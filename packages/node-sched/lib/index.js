@@ -299,6 +299,14 @@ function apply(ctx, config) {
 			res.end(JSON.stringify(body));
 		};
 
+		// Write operations: whitelisted, gated, audited (see operate()). The UI
+		// owns the two-step confirm; the host refuses unknown ops outright.
+		const OPS = {
+			cancel: (id) => `${S} cancel ${shellQuote(id)}`,
+			retry: (id) => `${S} retry ${shellQuote(id)}`,
+			resubmit: (id) => `${S} resubmit ${shellQuote(id)}`,
+		};
+
 		routeDisposers.push(
 			ctx.webServer.register({
 				kind: "prefix",
@@ -315,6 +323,23 @@ function apply(ctx, config) {
 				handler: async (_req, res) => {
 					const r = await query(`${S} list-gpus`, { json: false });
 					await json(res, { ok: r.text.startsWith("[error") ? false : true, text: r.text });
+				},
+			}),
+
+			ctx.webServer.register({
+				kind: "prefix",
+				path: "/sched/api/op",
+				handler: async (req, res) => {
+					if (req.method !== "POST") return void ((res.writeHead(405), res.end()));
+					let body = "";
+					for await (const chunk of req) body += chunk;
+					let op, id;
+					try { ({ op, id } = JSON.parse(body)); } catch { }
+					if (!OPS[op] || typeof id !== "string" || !/^[\w:.-]+$/.test(id)) {
+						return void json(res, { ok: false, error: "bad op/id" }, 400);
+					}
+					const r = await operate(`${op}:${id}`, OPS[op](id));
+					await json(res, { ok: r.ok, code: r.code, text: (r.stdout || r.stderr || "").trim().slice(0, 2000) });
 				},
 			}),
 

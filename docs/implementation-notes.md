@@ -60,3 +60,33 @@
   用户 preset，一条命令让真实模型调工具：
   `dsh --profile nodesched-hl "调用 sched_status …"`
 - WS 冒烟：Node 24 内建 `new WebSocket(url)` 即客户端，无需依赖
+
+## M3a：client 插件（完整路线，2026-08-24）
+
+### 浏览器包契约（解剖 @linxin666/dsh-web-ui-all + dsh-client-ui-task-board 得出）
+
+- 包内 `exports["./client"]` 指向浏览器 bundle；`dsh.client: {inject:[], platform:"web"}` 声明 client 面
+- bundle 格式：`window.__ModuleLoader__.load({id, factory(require){ ...; return module.exports }})`，
+  factory 内 `exports.apply/inject` 即 cordis client 插件；react / client-runtime 由 harness
+  运行时经 factory 的 require 供给（esbuild external）
+- **构建**：esbuild `format:"cjs"`（顶层名落在 factory 作用域；iife 会封死作用域导致 footer 够不到 apply）
+- **槽位**：生态面板槽 `web-ui.plugin.item`（来自 @linxin666/dsh-client-ui-web-ui-settings，
+  profile bundles 需加 @linxin666/dsh-web-ui-all）；官方布局槽待后续研究
+
+### 关键坑：exports 必须包含 "./package.json"
+
+modules 服务用 `require.resolve('<pkg>/package.json')` 读元数据——exports map 不含
+`./package.json` 时抛 ERR_PACKAGE_PATH_NOT_EXPORTED → resolveMeta 返回 null →
+**行静默从浏览器 roster 消失**（无任何报错）。官方所有包都带此导出。
+
+### 当前端点
+
+| 端点 | 方法 | 说明 |
+|---|---|---|
+| `/sched/api/status` | GET | `{ok, summary, raw}` |
+| `/sched/api/gpus` | GET | 文本 |
+| `/sched/api/log?task=&lines=` | GET | 文本 |
+| `/sched/api/op` | POST | `{op: cancel\|retry\|resubmit, id}`，白名单+并发门+审计 |
+| `/sched/ws/events` | WS | `{type:'log',line}` + `{type:'status',summary,ts}` |
+
+UI 侧 cancel 为两步确认（输入完整任务 id 才能点确认）；host 侧另有白名单+审计兜底。
