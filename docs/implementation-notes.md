@@ -108,3 +108,19 @@ load 事件 → kernel 检查 factories 未注册 → 报 "loaded without regist
 
 slots 服务在 client plane 由 kernel/runtime 提供；task-board 的 client/index.ts
 `inject = ["slots","sessions",...]` 是权威参照。
+
+## M3b：写操作全量（2026-08-24）
+
+- `/sched/api/op` 扩展：gpu-free/gpu-ignore/gpu-ok（id=卡号，纯数字校验）、
+  daemon-start/daemon-stop（无 id）；per-op 声明 needsId/pattern
+- 新端点：`/sched/api/dryrun`（POST {content}，ssh stdin 写远端 /tmp 临时文件 →
+  `submit --dry-run` → 用后即删；本地不落盘）、`/sched/api/submit`（同管道，
+  经 operate() 门+审计）、`/sched/api/daemon`（GET 状态）
+- UI：submit tab（粘贴 batch.json → ① dry-run 预览 → ② 确认提交，预览不过禁用提交）、
+  批次行级 cancel、失败任务 retry/resubmit（resubmit 需 ArmButton 二次确认并标注"删产物!"）、
+  GPU 行 unmanaged→gpu-free / quarantined→gpu-ok、daemon start/stop（stop 需输入 "stop"）
+- **坑：envelope() 曾丢弃 ok/code**——HTTP 路由依赖 r.ok 分支，undefined 被
+  JSON.stringify 静默删除，表现为响应缺字段。修复：envelope 全路径保留 ok/code。
+  教训：跨层复用的返回结构加字段时必须全链路核对消费方。
+- **部署事实**：远端 config.venvs 的别名是 `k`（非 kronos_ft），UI 提交的 batch.json
+  cmd 模板须写 `{VENV:k}`——dry-run 会透传 sched 的 schema 校验错误（含此提示）。

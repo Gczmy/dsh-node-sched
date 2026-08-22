@@ -100,13 +100,15 @@ function clip(text, max = 20_000) {
 
 /** Uniform tool result envelope: human-readable text + optional parsed JSON. */
 function envelope(res, { json = true } = {}) {
+	// ok/code always preserved — HTTP routes branch on them.
 	if (!res.ok) {
-		return { text: clip(`[error exit=${res.code}] ${(res.stderr || res.stdout || "(no output)").trim()}`), raw: undefined };
+		return { ok: false, code: res.code, text: clip(`[error exit=${res.code}] ${(res.stderr || res.stdout || "(no output)").trim()}`), raw: undefined };
 	}
 	const body = (res.stdout ?? "").trim();
-	if (!json) return { text: clip(body || "(no output)"), raw: undefined };
+	if (!json) return { ok: true, code: res.code, text: clip(body || "(no output)"), raw: undefined };
 	const parsed = (() => { try { return JSON.parse(body); } catch { return undefined; } })();
 	return {
+		ok: true, code: res.code,
 		text: clip(parsed ? JSON.stringify(parsed, null, 1) : (body || "(no output)")),
 		raw: parsed,
 	};
@@ -302,9 +304,37 @@ function apply(ctx, config) {
 		// Write operations: whitelisted, gated, audited (see operate()). The UI
 		// owns the two-step confirm; the host refuses unknown ops outright.
 		const OPS = {
-			cancel: (id) => `${S} cancel ${shellQuote(id)}`,
-			retry: (id) => `${S} retry ${shellQuote(id)}`,
-			resubmit: (id) => `${S} resubmit ${shellQuote(id)}`,
+			cancel: { cmd: (id) => `${S} cancel ${shellQuote(id)}`, needsId: true },
+			retry: { cmd: (id) => `${S} retry ${shellQuote(id)}`, needsId: true },
+			resubmit: { cmd: (id) => `${S} resubmit ${shellQuote(id)}`, needsId: true },
+			"gpu-free": { cmd: (id) => `${S} gpu-free ${id} --yes`, needsId: true, pattern: /^\d+$/ },
+			"gpu-ignore": { cmd: (id) => `${S} gpu-ignore ${id}`, needsId: true, pattern: /^\d+$/ },
+			"gpu-ok": { cmd: (id) => `${S} gpu-ok ${id}`, needsId: true, pattern: /^\d+$/ },
+			"daemon-start": { cmd: () => `${S} daemon start`, needsId: false },
+			"daemon-stop": { cmd: () => `${S} daemon stop`, needsId: false },
+		};
+
+		// batch.json 上传：内容经 ssh stdin 写远端临时文件（本地不落盘），
+		// dry-run 纯只读预览；submit 走 operate() 门+审计。两者用后即删临时文件。
+		const uploadRemote = (content) => new Promise((resolve, reject) => {
+			const name = `nodesched-upload-${Date.now()}.json`;
+			if (!/^\s*\{/.test(content)) return reject(new Error("content is not a JSON object"));
+			JSON.parse(content);
+			const child = cp.spawn(
+				"ssh",
+				["-o", `ConnectTimeout=${config.connectTimeoutSec}`, "-o", "BatchMode=yes",
+					config.sshEntry, `cat > /tmp/${name}`],
+			);
+			let err = "";
+			child.stderr.on("data", (d) => { err += d; });
+			child.on("error", reject);
+			child.on("close", (code) => code === 0 ? resolve(`/tmp/${name}`) : reject(new Error(err || "upload failed")));
+			child.stdin.end(content);
+		});
+		const readBodyJson = async (req) => {
+			let body = "";
+			for await (const chunk of req) body += chunk;
+			return JSON.parse(body);
 		};
 
 		routeDisposers.push(
@@ -328,6 +358,53 @@ function apply(ctx, config) {
 
 			ctx.webServer.register({
 				kind: "prefix",
+				path: "/sched/api/dryrun",
+				handler: async (req, res) => {
+					try {
+						const { content } = await readBodyJson(req);
+						const remotePath = await uploadRemote(String(content));
+						try {
+							const r = await query(`${S} submit --dry-run ${shellQuote(remotePath)}`, { json: false });
+							await json(res, { ok: r.ok && !r.text.startsWith("[error"), text: r.text });
+						} finally {
+							await runRemote(`rm -f ${shellQuote(remotePath)}`);
+						}
+					} catch (e) {
+						await json(res, { ok: false, text: String(e.message ?? e) }, 400);
+					}
+				},
+			}),
+
+			ctx.webServer.register({
+				kind: "prefix",
+				path: "/sched/api/submit",
+				handler: async (req, res) => {
+					try {
+						const { content } = await readBodyJson(req);
+						const remotePath = await uploadRemote(String(content));
+						try {
+							const r = await operate(`submit:${remotePath}`, `${S} submit ${shellQuote(remotePath)}`);
+							await json(res, { ok: r.ok, code: r.code, text: clip((r.stdout || r.stderr || "").trim(), 2000) });
+						} finally {
+							await runRemote(`rm -f ${shellQuote(remotePath)}`);
+						}
+					} catch (e) {
+						await json(res, { ok: false, text: String(e.message ?? e) }, 400);
+					}
+				},
+			}),
+
+			ctx.webServer.register({
+				kind: "prefix",
+				path: "/sched/api/daemon",
+				handler: async (_req, res) => {
+					const r = await query(`${S} daemon status`, { json: false });
+					await json(res, { ok: r.ok, text: r.text });
+				},
+			}),
+
+			ctx.webServer.register({
+				kind: "prefix",
 				path: "/sched/api/op",
 				handler: async (req, res) => {
 					if (req.method !== "POST") return void ((res.writeHead(405), res.end()));
@@ -335,10 +412,14 @@ function apply(ctx, config) {
 					for await (const chunk of req) body += chunk;
 					let op, id;
 					try { ({ op, id } = JSON.parse(body)); } catch { }
-					if (!OPS[op] || typeof id !== "string" || !/^[\w:.-]+$/.test(id)) {
+					const spec = OPS[op];
+					if (!spec || typeof (id ?? "") !== "string") {
 						return void json(res, { ok: false, error: "bad op/id" }, 400);
 					}
-					const r = await operate(`${op}:${id}`, OPS[op](id));
+					if (spec.needsId && (!id || !(spec.pattern ?? /^[\w:.-]+$/).test(id))) {
+						return void json(res, { ok: false, error: "bad id for op" }, 400);
+					}
+					const r = await operate(`${op}:${id ?? ""}`, spec.cmd(id));
 					await json(res, { ok: r.ok, code: r.code, text: (r.stdout || r.stderr || "").trim().slice(0, 2000) });
 				},
 			}),
