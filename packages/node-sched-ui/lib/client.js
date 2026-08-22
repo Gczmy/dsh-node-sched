@@ -34,23 +34,34 @@ var SLOT_SETTINGS = "web-ui.plugin.item";
 var NS = "nodesched";
 var name = "@zzc/dsh-node-sched-ui";
 var inject = ["slots"];
+var T = {
+  brand: "var(--dsw-alias-brand-primary)",
+  ok: "var(--dsw-alias-state-success-primary)",
+  warn: "var(--dsw-alias-state-warn-primary)",
+  err: "var(--dsw-alias-state-error-primary)",
+  label: "var(--dsw-alias-label-primary)",
+  label2: "var(--dsw-alias-label-secondary)",
+  bgLayer: "var(--dsw-alias-bg-layer-2, rgba(127,127,127,.08))",
+  border: "var(--dsw-alias-border-l1)",
+  font: "var(--dsw-font-family, ui-monospace, monospace)"
+};
 var COLORS = {
-  done: "#2e7d32",
-  skip: "#2e7d32",
-  free: "#2e7d32",
-  active: "#1565c0",
-  running: "#1565c0",
-  assigned: "#1565c0",
-  pending: "#6a1b9a",
-  waiting_dep: "#6a1b9a",
-  queued: "#6a1b9a",
-  blocked: "#b26a00",
-  releasing: "#b26a00",
-  failed: "#c62828",
-  cancelled: "#546e7a",
-  timed_out: "#c62828",
-  interrupted: "#ad1457",
-  unmanaged: "#c62828"
+  done: T.ok,
+  skip: T.ok,
+  free: T.ok,
+  active: T.brand,
+  running: T.brand,
+  assigned: T.brand,
+  blocked: T.warn,
+  releasing: T.warn,
+  failed: T.err,
+  timed_out: T.err,
+  unmanaged: T.err,
+  cancelled: T.label2,
+  interrupted: T.err,
+  pending: T.label2,
+  waiting_dep: T.warn,
+  queued: T.label2
 };
 function apply(cctx, config) {
   const { useEffect, useState, useCallback } = require("react");
@@ -62,33 +73,46 @@ function apply(cctx, config) {
     return _jsx(tag, p);
   };
   const jsxs2 = j;
-  const pre = { margin: "4px 0", whiteSpace: "pre-wrap", background: "rgba(127,127,127,.08)", borderRadius: 6, padding: 8, fontSize: 11 };
-  const btn = (bg, disabled) => ({ background: disabled ? "#bbb" : bg, border: 0, color: "#fff", borderRadius: 4, padding: "2px 8px", fontSize: 11, cursor: disabled ? "default" : "pointer", marginRight: 4 });
+  const pre = { margin: "4px 0", whiteSpace: "pre-wrap", background: T.bgLayer, border: `1px solid ${T.border}`, borderRadius: 8, padding: 10, fontSize: 11 };
+  const btn = (bg, disabled) => ({
+    background: disabled ? T.bgLayer : bg,
+    border: disabled ? `1px solid ${T.border}` : "0",
+    color: disabled ? T.label2 : "#fff",
+    borderRadius: 6,
+    padding: "3px 10px",
+    fontSize: 11,
+    cursor: disabled ? "default" : "pointer",
+    marginRight: 4,
+    transition: "opacity .15s"
+  });
+  const ghostBtn = { background: "transparent", border: `1px solid ${T.border}`, color: T.label, borderRadius: 6, padding: "3px 10px", fontSize: 11, cursor: "pointer", marginRight: 4 };
   const badge = (s) => ({ background: COLORS[s] ?? "#666", color: "#fff", borderRadius: 4, padding: "0 6px", fontSize: 10, marginRight: 6 });
   const overlayStyle = {
     position: "fixed",
     inset: 0,
     zIndex: 9999,
     background: "rgba(0,0,0,.45)",
+    backdropFilter: "blur(2px)",
     display: "flex",
     alignItems: "center",
     justifyContent: "center"
   };
   const panelStyle = {
-    background: "var(--ds-bg, #fff)",
-    color: "inherit",
-    borderRadius: 10,
-    padding: 14,
-    width: "min(920px, 94vw)",
+    background: "var(--dsw-alias-bg-overlay, var(--dsw-alias-bg-layer-1, #fff))",
+    color: T.label,
+    border: `1px solid ${T.border}`,
+    borderRadius: 12,
+    padding: 16,
+    width: "min(960px, 94vw)",
     maxHeight: "88vh",
     overflow: "auto",
-    boxShadow: "0 12px 48px rgba(0,0,0,.35)",
-    fontFamily: "ui-monospace,monospace",
+    boxShadow: "0 16px 56px rgba(0,0,0,.35)",
+    fontFamily: T.font,
     fontSize: 12,
-    lineHeight: 1.5
+    lineHeight: 1.55
   };
   const bar = (pct) => ({ height: 6, background: "rgba(127,127,127,.2)", borderRadius: 3, overflow: "hidden", flex: 1, margin: "0 8px" });
-  const barFill = (pct) => ({ height: "100%", width: `${Math.max(0, Math.min(100, pct))}%`, background: "#1565c0" });
+  const barFill = (pct) => ({ height: "100%", width: `${Math.max(0, Math.min(100, pct))}%`, background: T.brand });
   const Badge = ({ s }) => j("span", { style: badge(s) }, s);
   async function post(action, body) {
     const r = await fetch(`/sched/api/${action}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -114,7 +138,7 @@ function apply(cctx, config) {
         await onConfirm();
         setTyped("");
       }, style: btn(color, typed !== placeholder) }, children),
-      j("button", { onClick: () => setTyped("") }, "\xD7")
+      j("button", { onClick: () => setTyped(""), style: ghostBtn }, "\xD7")
     ]);
   }
   function useSchedStream() {
@@ -190,7 +214,7 @@ function apply(cctx, config) {
         jsxs2("div", { style: { display: "flex", alignItems: "center", marginBottom: 6 } }, [
           j("b", null, `log: ${taskId}`),
           j("span", { style: { flex: 1 } }),
-          j("button", { onClick: onClose, style: btn("#555") }, "\xD7")
+          j("button", { onClick: onClose, style: ghostBtn }, "\xD7")
         ]),
         j("pre", { style: { ...pre, maxHeight: "60vh", overflow: "auto" } }, text)
       ])
@@ -218,15 +242,15 @@ function apply(cctx, config) {
           Badge({ s: b.status }),
           j("b", null, b.name),
           j(ProgressBar, { p: b.progress }),
-          j("button", { onClick: () => runOp("cancel", b.name), style: btn("#c62828") }, "cancel")
+          j("button", { onClick: () => runOp("cancel", b.name), style: btn(T.err) }, "cancel")
         ]),
         b.depends_on?.length > 0 && j("div", { style: { fontSize: 10, color: "#888" } }, `\u4F9D\u8D56: ${b.depends_on.join(", ")}`),
         ...failedTasks.map((t) => jsxs2("div", { style: { fontSize: 11, marginLeft: 14, marginTop: 2, display: "flex", alignItems: "center" } }, [
           j("span", { style: { fontFamily: "monospace", cursor: "pointer", textDecoration: "underline", marginRight: 6 }, onClick: () => setLogTask(`${t.batch}:${t.task}`), title: "\u67E5\u770B\u65E5\u5FD7" }, t.task),
           Badge({ s: t.status }),
           t.retries != null && j("span", { style: { color: "#888", marginRight: 4 } }, `retries=${t.retries}`),
-          j("button", { onClick: () => runOp("retry", `${t.batch}:${t.task}`), style: btn("#1565c0") }, "retry"),
-          j(ArmButton, { label: "resubmit", confirmLabel: "resubmit(\u5220\u4EA7\u7269!)", color: "#e65100", onConfirm: () => runOp("resubmit", `${t.batch}:${t.task}`) })
+          j("button", { onClick: () => runOp("retry", `${t.batch}:${t.task}`), style: btn(T.brand) }, "retry"),
+          j(ArmButton, { label: "resubmit", confirmLabel: "resubmit(\u5220\u4EA7\u7269!)", color: T.warn, onConfirm: () => runOp("resubmit", `${t.batch}:${t.task}`) })
         ]))
       ]);
     }
@@ -234,11 +258,11 @@ function apply(cctx, config) {
       return jsxs2("div", { style: { marginBottom: 6, display: "flex", alignItems: "center" } }, [
         Badge({ s: g.status }),
         j("span", { style: { fontFamily: "monospace", marginRight: 8 } }, `GPU${g.idx}`),
-        g.job && j("span", { style: { fontSize: 10, marginRight: 8, color: "#555", flex: 1 } }, g.job),
-        g.quarantined && j("span", { style: { color: "#c62828", marginRight: 8, fontSize: 10 } }, "[quarantined]"),
+        g.job && j("span", { style: { fontSize: 10, marginRight: 8, color: T.label2, flex: 1 } }, g.job),
+        g.quarantined && j("span", { style: { color: T.err, marginRight: 8, fontSize: 10 } }, "[quarantined]"),
         !g.job && g.status === "free" && j("span", { style: { flex: 1 } }),
-        g.status === "unmanaged" && j("button", { onClick: () => runOp("gpu-free", String(g.idx)), style: btn("#2e7d32") }, "gpu-free \u5F3A\u5236\u56DE\u6536"),
-        g.quarantined && j("button", { onClick: () => runOp("gpu-ok", String(g.idx)), style: btn("#2e7d32") }, "gpu-ok \u89E3\u9664\u9694\u79BB")
+        g.status === "unmanaged" && j("button", { onClick: () => runOp("gpu-free", String(g.idx)), style: btn(T.ok) }, "gpu-free \u5F3A\u5236\u56DE\u6536"),
+        g.quarantined && j("button", { onClick: () => runOp("gpu-ok", String(g.idx)), style: btn(T.ok) }, "gpu-ok \u89E3\u9664\u9694\u79BB")
       ]);
     }
     function DaemonBar() {
@@ -253,16 +277,16 @@ function apply(cctx, config) {
         const t = setInterval(load, 3e4);
         return () => clearInterval(t);
       }, [load]);
-      return jsxs2("div", { style: { marginBottom: 8, paddingBottom: 6, borderBottom: "1px solid rgba(127,127,127,.25)", display: "flex", alignItems: "center" } }, [
+      return jsxs2("div", { style: { marginBottom: 8, paddingBottom: 6, borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center" } }, [
         j("span", { style: { fontSize: 11, marginRight: 8, flex: 1 } }, `daemon: ${status || "?"}`),
         j("button", { onClick: async () => {
           await runOp("daemon-start");
           setTimeout(load, 3e3);
-        }, style: btn("#2e7d32") }, "start"),
-        !confirmStop && j("button", { onClick: () => setConfirmStop(true), style: btn("#c62828") }, "stop"),
+        }, style: btn(T.ok) }, "start"),
+        !confirmStop && j("button", { onClick: () => setConfirmStop(true), style: btn(T.err) }, "stop"),
         confirmStop && j(TypedConfirm, {
           placeholder: "\u8F93\u5165 stop \u786E\u8BA4\uFF08\u4F1A\u53D6\u6D88\u672A\u5B8C\u6210\u4EFB\u52A1\uFF09",
-          color: "#c62828",
+          color: T.err,
           onConfirm: async () => {
             await runOp("daemon-stop");
             setConfirmStop(false);
@@ -308,8 +332,8 @@ function apply(cctx, config) {
           style: { width: "100%", height: 150, fontFamily: "monospace", fontSize: 11 }
         }),
         jsxs2("div", { style: { margin: "6px 0" } }, [
-          j("button", { onClick: doDryRun, disabled: !text.trim(), style: btn("#1565c0", !text.trim()) }, "\u2460 dry-run \u9884\u89C8"),
-          j("button", { onClick: doSubmit, disabled: !(preview?.ok && text.trim()), style: btn("#2e7d32", !(preview?.ok && text.trim())) }, "\u2461 \u786E\u8BA4\u63D0\u4EA4"),
+          j("button", { onClick: doDryRun, disabled: !text.trim(), style: btn(T.brand, !text.trim()) }, "\u2460 dry-run \u9884\u89C8"),
+          j("button", { onClick: doSubmit, disabled: !(preview?.ok && text.trim()), style: btn(T.ok, !(preview?.ok && text.trim())) }, "\u2461 \u786E\u8BA4\u63D0\u4EA4"),
           j("span", { style: { fontSize: 11, marginLeft: 8 } }, msg)
         ]),
         preview && j("pre", { style: { ...pre, maxHeight: 240, overflow: "auto" } }, preview.text)
@@ -319,13 +343,13 @@ function apply(cctx, config) {
       jsxs2("div", { style: panelStyle, onClick: (e) => e.stopPropagation() }, [
         jsxs2("div", { style: { display: "flex", gap: 8, alignItems: "center", marginBottom: 8 } }, [
           j("b", null, "node-sched"),
-          j("span", { style: { color: stream.connected ? "#2e7d32" : "#c62828", fontSize: 11 } }, stream.connected ? "\u25CF live" : "\u25CB offline"),
-          j("button", { onClick: refreshSnap, style: btn("#555") }, "refresh"),
-          ...["batches", "gpus", "events", "submit"].map((t) => j("button", { key: t, onClick: () => setTab(t), style: btn(tab === t ? "#333" : "#aaa") }, t)),
+          j("span", { style: { color: stream.connected ? T.ok : T.err, fontSize: 11 } }, stream.connected ? "\u25CF live" : "\u25CB offline"),
+          j("button", { onClick: refreshSnap, style: ghostBtn }, "refresh"),
+          ...["batches", "gpus", "events", "submit"].map((t) => j("button", { key: t, onClick: () => setTab(t), style: tab === t ? btn(T.brand) : ghostBtn }, t)),
           j("span", { style: { flex: 1 } }),
-          j("button", { onClick: onClose, style: btn("#555") }, "\xD7")
+          j("button", { onClick: onClose, style: ghostBtn }, "\xD7")
         ]),
-        opMsg && j("div", { style: { fontSize: 11, color: "#b26a00", marginBottom: 4 } }, opMsg),
+        opMsg && j("div", { style: { fontSize: 11, color: T.warn, marginBottom: 4 } }, opMsg),
         tab === "batches" && jsxs2("div", null, [
           j(DaemonBar, null),
           !summary && j("div", null, "loading\u2026"),
@@ -348,7 +372,7 @@ function apply(cctx, config) {
       j("button", {
         onClick: () => setOpen(true),
         title: "node-sched GPU/CPU \u8C03\u5EA6\u770B\u677F",
-        style: { ...btn("#333"), width: "100%", textAlign: "left", padding: "6px 10px", fontSize: 12 }
+        style: { ...ghostBtn, width: "100%", textAlign: "left", padding: "6px 10px", fontSize: 12 }
       }, "\u26A1 sched \u770B\u677F"),
       open && j(Dashboard, { onClose: () => {
         setOpen(false);
