@@ -181,9 +181,22 @@ function apply(ctx, config) {
 			if (!res.ok && /Connection timed out|Connection refused|kex_exchange/i.test(res.stderr)) {
 				res = await runRemote(args);
 			}
+
 			return envelope(res, opts);
 		}
 
+			/**
+			 * Side-effectful operation. Serialized per key by WriteGate, audited,
+			 * NEVER auto-retried (a timed-out killpg may still have taken effect;
+			 * unknown outcome => report and ask a human to check `sched status`).
+			 */
+			async function operate(key, args, { timeoutMs } = {}) {
+				return gate.run(key, async () => {
+					ctx.logger.warn("[node-sched] audit #%d op=%s cmd=`%s`", ++auditSeq, key, args);
+					const res = await runRemote(args, { timeoutMs });
+					return envelope(res, { json: false });
+				});
+			}
 		function presentRead(title) {
 			return () => ({ card: "generic", title, kind: "read" });
 		}
@@ -399,7 +412,7 @@ function apply(ctx, config) {
 				path: "/sched/api/daemon",
 				handler: async (_req, res) => {
 					const r = await query(`${S} daemon status`, { json: false });
-					await json(res, { ok: r.ok, text: r.text });
+					await json(res, { v: 4, ok: r.ok, text: r.text });
 				},
 			}),
 

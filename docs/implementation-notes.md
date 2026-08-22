@@ -124,3 +124,13 @@ slots 服务在 client plane 由 kernel/runtime 提供；task-board 的 client/i
   教训：跨层复用的返回结构加字段时必须全链路核对消费方。
 - **部署事实**：远端 config.venvs 的别名是 `k`（非 kronos_ft），UI 提交的 batch.json
   cmd 模板须写 `{VENV:k}`——dry-run 会透传 sched 的 schema 校验错误（含此提示）。
+
+## M3b 事故补记：operate 未定义 + 两类"改了代码不生效"
+
+1. **operate 丢失**：M1 同步化重写时 query 带回来了，operate 没带——op/submit 路由
+   全部 ReferenceError。教训：重构后 grep 校验所有被调用符号都有定义。
+2. **插入嵌套错误**：行号脚本把 operate 插进了 query 内部（第一个裸 `}` 是 if 的），
+   外层作用域不可见。教训：函数级搬移用 AST 或完整花括号配对，别数行。
+3. **重启后仍是旧行为**：两次由不同原因造成——①旧进程未被 pkill 杀掉仍占端口；
+   ②新进程确实起来了但当时磁盘文件就是坏的。**决定性排查法：在响应里加版本标记
+   （v:3/v:4）+ ps 确认进程启动时间晚于文件 mtime。**
