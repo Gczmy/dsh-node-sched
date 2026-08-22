@@ -28,6 +28,7 @@ const T = {
 	bgLayer: "var(--dsw-alias-bg-layer-2, rgba(127,127,127,.08))",
 	border: "var(--dsw-alias-border-l1)",
 	font: "var(--dsw-font-family, ui-monospace, monospace)",
+	onFill: "var(--dsw-alias-bg-base)", // 实底上的文字：明色主题→白、暗色主题→深
 };
 const COLORS = {
 	done: T.ok, skip: T.ok, free: T.ok,
@@ -53,11 +54,11 @@ function apply(cctx, config) {
 	const pre = { margin: "4px 0", whiteSpace: "pre-wrap", background: T.bgLayer, border: `1px solid ${T.border}`, borderRadius: 8, padding: 10, fontSize: 11 };
 	const btn = (bg, disabled) => ({
 		background: disabled ? T.bgLayer : bg, border: disabled ? `1px solid ${T.border}` : "0",
-		color: disabled ? T.label2 : "#fff", borderRadius: 6, padding: "3px 10px", fontSize: 11,
+		color: disabled ? T.label2 : T.onFill, borderRadius: 6, padding: "3px 10px", fontSize: 11,
 		cursor: disabled ? "default" : "pointer", marginRight: 4, transition: "opacity .15s",
 	});
 	const ghostBtn = { background: "transparent", border: `1px solid ${T.border}`, color: T.label, borderRadius: 6, padding: "3px 10px", fontSize: 11, cursor: "pointer", marginRight: 4 };
-	const badge = (s) => ({ background: COLORS[s] ?? "#666", color: "#fff", borderRadius: 4, padding: "0 6px", fontSize: 10, marginRight: 6 });
+	const badge = (s) => ({ background: COLORS[s] ?? T.label2, borderRadius: 4, padding: "0 6px", fontSize: 10, marginRight: 6 });
 	const overlayStyle = {
 		position: "fixed", inset: 0, zIndex: 9999, background: "rgba(0,0,0,.45)",
 		backdropFilter: "blur(2px)",
@@ -72,7 +73,8 @@ function apply(cctx, config) {
 	const bar = (pct) => ({ height: 6, background: "rgba(127,127,127,.2)", borderRadius: 3, overflow: "hidden", flex: 1, margin: "0 8px" });
 	const barFill = (pct) => ({ height: "100%", width: `${Math.max(0, Math.min(100, pct))}%`, background: T.brand });
 
-	const Badge = ({ s }) => j("span", { style: badge(s) }, s);
+	const badgeStyleOld = null;
+	const Badge = ({ s }) => j("span", { style: { ...badge(s), color: T.onFill } }, s);
 
 	async function post(action, body) {
 		const r = await fetch(`/sched/api/${action}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
