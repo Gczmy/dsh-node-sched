@@ -10,6 +10,8 @@
 const SLOT = "web-ui.plugin.item";
 const NS = "nodesched";
 
+const name = "@zzc/dsh-node-sched-ui";
+
 const inject = [];
 
 function apply(cctx, config) {
@@ -139,4 +141,4 @@ function apply(cctx, config) {
 	return () => disposeInject?.();
 }
 
-export { inject, apply };
+export { name, inject, apply };

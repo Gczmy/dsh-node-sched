@@ -90,3 +90,11 @@ modules 服务用 `require.resolve('<pkg>/package.json')` 读元数据——expo
 | `/sched/ws/events` | WS | `{type:'log',line}` + `{type:'status',summary,ts}` |
 
 UI 侧 cancel 为两步确认（输入完整任务 id 才能点确认）；host 侧另有白名单+审计兜底。
+
+### 坑：bundle 语法错误 → "loaded without registering"
+
+esbuild footer 少闭合一个 `}` 时（factory 箭头块 + load 的对象字面量需要
+`}` + `}` + `)` 三连闭），浏览器端脚本报 SyntaxError，但 script 元素仍触发
+load 事件 → kernel 检查 factories 未注册 → 报 "loaded without registering"。
+**验证方法**：构建后必须 `node --check lib/client.js`，再用桩 require 在 Node 里
+模拟 `window.__ModuleLoader__` 跑一遍注册 + factory 调用（见 scripts 冒烟）。

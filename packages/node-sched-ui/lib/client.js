@@ -8,8 +8,8 @@ var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
 var __export = (target, all) => {
-  for (var name in all)
-    __defProp(target, name, { get: all[name], enumerable: true });
+  for (var name2 in all)
+    __defProp(target, name2, { get: all[name2], enumerable: true });
 };
 var __copyProps = (to, from, except, desc) => {
   if (from && typeof from === "object" || typeof from === "function") {
@@ -25,11 +25,13 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 var client_exports = {};
 __export(client_exports, {
   apply: () => apply,
-  inject: () => inject
+  inject: () => inject,
+  name: () => name
 });
 module.exports = __toCommonJS(client_exports);
 var SLOT = "web-ui.plugin.item";
 var NS = "nodesched";
+var name = "@zzc/dsh-node-sched-ui";
 var inject = [];
 function apply(cctx, config) {
   const { useEffect, useState, useCallback } = require("react");
@@ -157,5 +159,6 @@ function apply(cctx, config) {
   );
   return () => disposeInject?.();
 }
-	return module.exports;
+		return module.exports;
+	}
 });

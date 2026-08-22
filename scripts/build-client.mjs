@@ -31,7 +31,7 @@ await esbuild.build({
 		].join("\n"),
 	},
 	footer: {
-		js: "\treturn module.exports;\n});",
+		js: "\t\treturn module.exports;\n\t}\n});",
 	},
 });
 
