@@ -51,10 +51,10 @@ var COLORS = {
   done: T.ok,
   skip: T.ok,
   free: T.ok,
-  active: T.brand,
+  active: T.ok,
   running: T.brand,
   assigned: T.brand,
-  blocked: T.warn,
+  blocked: T.label2,
   releasing: T.warn,
   failed: T.err,
   timed_out: T.err,
@@ -251,22 +251,50 @@ function apply(cctx, config) {
       setOpMsg(`${op} ${id ?? ""}: ${r.ok ? "ok" : `fail (${r.error ?? r.code})`} ${r.text ? "\u2014 " + String(r.text).slice(0, 120) : ""}`);
       refreshSnap();
     };
+    const GRID = {
+      display: "grid",
+      gridTemplateColumns: "76px minmax(120px, 1.1fr) minmax(160px, 1.6fr) 56px 84px",
+      gap: "0 12px",
+      alignItems: "center"
+    };
+    function taskSegments(tasks) {
+      const seg = { bad: 0, ok: 0, run: 0, off: 0 };
+      for (const t of tasks) {
+        if (["failed", "timed_out"].includes(t.status)) seg.bad++;
+        else if (["done", "skip"].includes(t.status)) seg.ok++;
+        else if (t.status === "running") seg.run++;
+        else seg.off++;
+      }
+      return seg;
+    }
+    const SEG_COLOR = { bad: T.err, ok: T.ok, run: T.brand, off: T.border };
+    function SegmentedBar({ seg }) {
+      const total = seg.bad + seg.ok + seg.run + seg.off;
+      if (!total) return null;
+      return j("span", { style: bar() }, ["bad", "ok", "run", "off"].map(
+        (k) => j("span", { key: k, style: { height: "100%", width: `${seg[k] / total * 100}%`, background: SEG_COLOR[k], display: "inline-block" } })
+      ));
+    }
     function BatchRow({ b }) {
-      const failedTasks = (raw?.jobs ?? []).filter(
-        (x) => x.batch === b.name && ["failed", "timed_out", "cancelled"].includes(x.status)
+      const tasks = (raw?.jobs ?? []).filter(
+        (x) => x.batch === b.id || x.batch === b.name || x.batch.startsWith(b.name + "-")
       );
+      const failedTasks = tasks.filter((x) => ["failed", "timed_out", "cancelled"].includes(x.status));
+      const seg = taskSegments(tasks);
       return jsxs2("div", { style: { marginBottom: 10 } }, [
-        jsxs2("div", { style: { display: "flex", alignItems: "center" } }, [
-          Badge({ s: b.status }),
-          j("b", null, b.name),
-          j(ProgressBar, { p: b.progress }),
+        jsxs2("div", { style: GRID }, [
+          j("span", { style: { textAlign: "center" } }, Badge({ s: b.status })),
+          j("b", { style: { fontSize: 11.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, title: b.name }, b.name),
+          j(SegmentedBar, { seg }),
+          j("span", { style: { fontSize: 10.5, color: T.label2, textAlign: "right" } }, b.progress ?? ""),
           j("button", { onClick: () => runOp("cancel", b.name), style: btn(T.err) }, "cancel")
         ]),
-        b.depends_on?.length > 0 && j("div", { style: { fontSize: 10, color: T.label2 } }, `\u4F9D\u8D56: ${b.depends_on.join(", ")}`),
+        b.depends_on?.length > 0 && j("div", { style: { fontSize: 10, color: T.label2, marginTop: 2 } }, `\u4F9D\u8D56: ${b.depends_on.join(", ")}`),
         ...failedTasks.map((t) => jsxs2("div", { style: { fontSize: 11, marginLeft: 14, marginTop: 2, display: "flex", alignItems: "center" } }, [
           j("span", { style: { fontFamily: "monospace", cursor: "pointer", textDecoration: "underline", marginRight: 6 }, onClick: () => setLogTask(`${t.batch}:${t.task}`), title: "\u67E5\u770B\u65E5\u5FD7" }, t.task),
           Badge({ s: t.status }),
           t.retries != null && j("span", { style: { color: T.label2, marginRight: 4 } }, `retries=${t.retries}`),
+          j("span", { style: { flex: 1 } }),
           j("button", { onClick: () => runOp("retry", `${t.batch}:${t.task}`), style: btn(T.brand) }, "retry"),
           j(ArmButton, { label: "resubmit", confirmLabel: "resubmit(\u5220\u4EA7\u7269!)", color: T.warn, onConfirm: () => runOp("resubmit", `${t.batch}:${t.task}`) })
         ]))
@@ -372,7 +400,15 @@ function apply(cctx, config) {
           j(DaemonBar, null),
           !summary && j("div", null, "loading\u2026"),
           summary && j("pre", { style: { ...pre, maxHeight: 110, overflow: "auto" } }, summary.split("\njobs:")[0]),
-          raw && (raw.batches ?? []).filter((b) => !["done", "skip"].includes(b.status)).map((b) => j(BatchRow, { key: b.id ?? b.name, b }))
+          raw && jsxs2("div", {}, [
+            jsxs2("div", { style: { fontSize: 10, color: T.label2, marginBottom: 6 } }, [
+              j("span", { style: { marginRight: 10 } }, "\u25A0 \u7EA2=\u51FA\u9519"),
+              j("span", { style: { marginRight: 10, color: T.ok } }, "\u25A0 \u7EFF=\u6210\u529F"),
+              j("span", { style: { marginRight: 10, color: T.brand } }, "\u25A0 \u84DD=\u8FD0\u884C\u4E2D"),
+              j("span", { style: { color: T.label2 } }, "\u25A0 \u7070=\u6392\u961F/\u53D6\u6D88")
+            ]),
+            (raw.batches ?? []).filter((b) => !["done", "skip"].includes(b.status)).map((b) => j(BatchRow, { key: b.id ?? b.name, b }))
+          ])
         ]),
         tab === "gpus" && jsxs2("div", null, [
           raw && (raw.gpus ?? []).map((g) => j(GpuRow, { key: g.idx, g })),

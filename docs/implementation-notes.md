@@ -154,3 +154,10 @@ slots 服务在 client plane 由 kernel/runtime 提供；task-board 的 client/i
 - 深色面板：bg-overlay → **bg-layer-1**（提亮）+ border-l2 + 更重阴影
 - pre 块显式 label-primary（此前继承导致暗色发灰）；5 处 #888 次要文本 → label2
 - 教训：`--dsw-static-*` 是固定值不随主题变，跨主题配色只用 alias 或 color-mix(alias)
+
+## M4 交互细节：批次表格对齐 + 分段进度条（2026-08-24）
+
+- 网格列固定：徽章(76px居中) | 名称(弹性) | 分段进度条(弹性) | 计数(右对齐) | cancel(84px)
+- 分段进度条：红=出错(失败/超时) 绿=成功(完成/skip) 蓝=运行中 灰=排队/取消 —— 直观
+- 徽章语义：active→绿色(ok) blocked→灰(label2) —— 符合用户预期
+- 计数与 cancel 按钮分离 12px gap；cancel 列固定 84px

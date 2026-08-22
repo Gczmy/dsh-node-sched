@@ -31,9 +31,9 @@ const T = {
 	onFill: "var(--dsw-alias-bg-base)", // 实底上的文字：明色主题→白、暗色主题→深
 };
 const COLORS = {
-	done: T.ok, skip: T.ok, free: T.ok,
-	active: T.brand, running: T.brand, assigned: T.brand,
-	blocked: T.warn, releasing: T.warn,
+	done: T.ok, skip: T.ok, free: T.ok, active: T.ok,
+	running: T.brand, assigned: T.brand,
+	blocked: T.label2, releasing: T.warn,
 	failed: T.err, timed_out: T.err, unmanaged: T.err,
 	cancelled: T.label2, interrupted: T.err,
 	pending: T.label2, waiting_dep: T.warn, queued: T.label2,
@@ -189,23 +189,55 @@ function apply(cctx, config) {
 			refreshSnap();
 		};
 
+		// 批次行网格：徽章 | 名称 | 分段进度条 | 计数 | cancel —— 固定列宽对齐
+		const GRID = {
+			display: "grid",
+			gridTemplateColumns: "76px minmax(120px, 1.1fr) minmax(160px, 1.6fr) 56px 84px",
+			gap: "0 12px", alignItems: "center",
+		};
+
+		// 任务按状态分类计数 → 分段条（红=出错 绿=成功 蓝=运行中 灰=排队/取消）
+		function taskSegments(tasks) {
+			const seg = { bad: 0, ok: 0, run: 0, off: 0 };
+			for (const t of tasks) {
+				if (["failed", "timed_out"].includes(t.status)) seg.bad++;
+				else if (["done", "skip"].includes(t.status)) seg.ok++;
+				else if (t.status === "running") seg.run++;
+				else seg.off++;
+			}
+			return seg;
+		}
+		const SEG_COLOR = { bad: T.err, ok: T.ok, run: T.brand, off: T.border };
+
+		function SegmentedBar({ seg }) {
+			const total = seg.bad + seg.ok + seg.run + seg.off;
+			if (!total) return null;
+			return j("span", { style: bar() }, ["bad", "ok", "run", "off"].map((k) =>
+				j("span", { key: k, style: { height: "100%", width: `${(seg[k] / total) * 100}%`, background: SEG_COLOR[k], display: "inline-block" } }),
+			));
+		}
+
 		function BatchRow({ b }) {
-			const failedTasks = (raw?.jobs ?? []).filter(
-				(x) => x.batch === b.name && ["failed", "timed_out", "cancelled"].includes(x.status),
+			const tasks = (raw?.jobs ?? []).filter(
+				(x) => x.batch === b.id || x.batch === b.name || x.batch.startsWith(b.name + "-"),
 			);
+			const failedTasks = tasks.filter((x) => ["failed", "timed_out", "cancelled"].includes(x.status));
+			const seg = taskSegments(tasks);
 			return jsxs2("div", { style: { marginBottom: 10 } }, [
-				jsxs2("div", { style: { display: "flex", alignItems: "center" } }, [
-					Badge({ s: b.status }),
-					j("b", null, b.name),
-					j(ProgressBar, { p: b.progress }),
+				jsxs2("div", { style: GRID }, [
+					j("span", { style: { textAlign: "center" } }, Badge({ s: b.status })),
+					j("b", { style: { fontSize: 11.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, title: b.name }, b.name),
+					j(SegmentedBar, { seg }),
+					j("span", { style: { fontSize: 10.5, color: T.label2, textAlign: "right" } }, b.progress ?? ""),
 					j("button", { onClick: () => runOp("cancel", b.name), style: btn(T.err) }, "cancel"),
 				]),
-				b.depends_on?.length > 0 && j("div", { style: { fontSize: 10, color: T.label2 } }, `依赖: ${b.depends_on.join(", ")}`),
+				b.depends_on?.length > 0 && j("div", { style: { fontSize: 10, color: T.label2, marginTop: 2 } }, `依赖: ${b.depends_on.join(", ")}`),
 				...failedTasks.map((t) =>
 					jsxs2("div", { style: { fontSize: 11, marginLeft: 14, marginTop: 2, display: "flex", alignItems: "center" } }, [
 						j("span", { style: { fontFamily: "monospace", cursor: "pointer", textDecoration: "underline", marginRight: 6 }, onClick: () => setLogTask(`${t.batch}:${t.task}`), title: "查看日志" }, t.task),
 						Badge({ s: t.status }),
 						t.retries != null && j("span", { style: { color: T.label2, marginRight: 4 } }, `retries=${t.retries}`),
+						j("span", { style: { flex: 1 } }),
 						j("button", { onClick: () => runOp("retry", `${t.batch}:${t.task}`), style: btn(T.brand) }, "retry"),
 						j(ArmButton, { label: "resubmit", confirmLabel: "resubmit(删产物!)", color: T.warn, onConfirm: () => runOp("resubmit", `${t.batch}:${t.task}`) }),
 					])),
@@ -290,7 +322,15 @@ function apply(cctx, config) {
 					j(DaemonBar, null),
 					!summary && j("div", null, "loading…"),
 					summary && j("pre", { style: { ...pre, maxHeight: 110, overflow: "auto" } }, summary.split("\njobs:")[0]),
-					raw && (raw.batches ?? []).filter((b) => !["done", "skip"].includes(b.status)).map((b) => j(BatchRow, { key: b.id ?? b.name, b })),
+					raw && jsxs2("div", {}, [
+					jsxs2("div", { style: { fontSize: 10, color: T.label2, marginBottom: 6 } }, [
+						j("span", { style: { marginRight: 10 } }, "■ 红=出错"),
+						j("span", { style: { marginRight: 10, color: T.ok } }, "■ 绿=成功"),
+						j("span", { style: { marginRight: 10, color: T.brand } }, "■ 蓝=运行中"),
+						j("span", { style: { color: T.label2 } }, "■ 灰=排队/取消"),
+					]),
+					(raw.batches ?? []).filter((b) => !["done", "skip"].includes(b.status)).map((b) => j(BatchRow, { key: b.id ?? b.name, b })),
+				]),
 				]),
 				tab === "gpus" && jsxs2("div", null, [
 					raw && (raw.gpus ?? []).map((g) => j(GpuRow, { key: g.idx, g })),
