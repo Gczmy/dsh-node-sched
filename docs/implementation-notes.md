@@ -145,3 +145,12 @@ slots 服务在 client plane 由 kernel/runtime 提供；task-board 的 client/i
 - 新增：任务日志查看器（批次行任务名可点击 → /sched/api/log 轮询弹层）、
   进度条（progress "27/33" 解析）、提交成功自动跳回 batches tab 并清空表单
 - 依赖图降级为依赖 chips 文本（图可视化收益/成本比低，记为 deferred）
+
+## M4 风格二轮：柔和色调（2026-08-24）
+
+用户反馈：实底高饱和按钮"对比度太高吃力"，深色面板丑、文本不清。
+- 按钮/徽章从**实底+反白文字**改为 **soft tint**：`color-mix(状态色 12%, transparent)`
+  底纹 + 状态色同色文字 + 32% 同色描边——双主题自动柔和（官方 UI 的 chip/pill 风）
+- 深色面板：bg-overlay → **bg-layer-1**（提亮）+ border-l2 + 更重阴影
+- pre 块显式 label-primary（此前继承导致暗色发灰）；5 处 #888 次要文本 → label2
+- 教训：`--dsw-static-*` 是固定值不随主题变，跨主题配色只用 alias 或 color-mix(alias)

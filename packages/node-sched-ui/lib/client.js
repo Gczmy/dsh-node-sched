@@ -75,20 +75,36 @@ function apply(cctx, config) {
     return _jsx(tag, p);
   };
   const jsxs2 = j;
-  const pre = { margin: "4px 0", whiteSpace: "pre-wrap", background: T.bgLayer, border: `1px solid ${T.border}`, borderRadius: 8, padding: 10, fontSize: 11 };
-  const btn = (bg, disabled) => ({
-    background: disabled ? T.bgLayer : bg,
-    border: disabled ? `1px solid ${T.border}` : "0",
-    color: disabled ? T.label2 : T.onFill,
-    borderRadius: 6,
-    padding: "3px 10px",
-    fontSize: 11,
-    cursor: disabled ? "default" : "pointer",
-    marginRight: 4,
-    transition: "opacity .15s"
-  });
+  const pre = { margin: "4px 0", whiteSpace: "pre-wrap", background: T.bgLayer, border: `1px solid ${T.border}`, borderRadius: 8, padding: 10, fontSize: 11.5, color: T.label };
+  const btn = (color = T.brand, disabled) => {
+    if (disabled) {
+      return { background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label2, borderRadius: 6, padding: "3px 10px", fontSize: 11, cursor: "default", marginRight: 4 };
+    }
+    return {
+      background: `color-mix(in srgb, ${color} 12%, transparent)`,
+      border: `1px solid color-mix(in srgb, ${color} 32%, transparent)`,
+      color,
+      borderRadius: 6,
+      padding: "3px 10px",
+      fontSize: 11,
+      cursor: "pointer",
+      marginRight: 4,
+      transition: "background .15s"
+    };
+  };
   const ghostBtn = { background: "transparent", border: `1px solid ${T.border}`, color: T.label, borderRadius: 6, padding: "3px 10px", fontSize: 11, cursor: "pointer", marginRight: 4 };
-  const badge = (s) => ({ background: COLORS[s] ?? T.label2, borderRadius: 4, padding: "0 6px", fontSize: 10, marginRight: 6 });
+  const badge = (s) => {
+    const c = COLORS[s] ?? T.label2;
+    return {
+      background: `color-mix(in srgb, ${c} 13%, transparent)`,
+      border: `1px solid color-mix(in srgb, ${c} 30%, transparent)`,
+      color: c,
+      borderRadius: 999,
+      padding: "0 7px",
+      fontSize: 10,
+      marginRight: 6
+    };
+  };
   const overlayStyle = {
     position: "fixed",
     inset: 0,
@@ -100,23 +116,22 @@ function apply(cctx, config) {
     justifyContent: "center"
   };
   const panelStyle = {
-    background: "var(--dsw-alias-bg-overlay, var(--dsw-alias-bg-layer-1, #fff))",
+    background: "var(--dsw-alias-bg-layer-1, var(--dsw-alias-bg-base, #fff))",
     color: T.label,
-    border: `1px solid ${T.border}`,
+    border: `1px solid var(--dsw-alias-border-l2, ${T.border})`,
     borderRadius: 12,
     padding: 16,
     width: "min(960px, 94vw)",
     maxHeight: "88vh",
     overflow: "auto",
-    boxShadow: "0 16px 56px rgba(0,0,0,.35)",
+    boxShadow: "0 18px 60px rgba(0,0,0,.45)",
     fontFamily: T.font,
     fontSize: 12,
     lineHeight: 1.55
   };
   const bar = (pct) => ({ height: 6, background: "rgba(127,127,127,.2)", borderRadius: 3, overflow: "hidden", flex: 1, margin: "0 8px" });
   const barFill = (pct) => ({ height: "100%", width: `${Math.max(0, Math.min(100, pct))}%`, background: T.brand });
-  const badgeStyleOld = null;
-  const Badge = ({ s }) => j("span", { style: { ...badge(s), color: T.onFill } }, s);
+  const Badge = ({ s }) => j("span", { style: badge(s) }, s);
   async function post(action, body) {
     const r = await fetch(`/sched/api/${action}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     return r.json();
@@ -193,7 +208,7 @@ function apply(cctx, config) {
     if (!pp || pp.total === 0) return null;
     return jsxs2("span", { style: { display: "inline-flex", alignItems: "center", flex: 1 } }, [
       j("span", { style: bar() }, j("span", { style: barFill(pp.done / pp.total * 100) })),
-      j("span", { style: { fontSize: 10, color: "#888" } }, p)
+      j("span", { style: { fontSize: 10, color: T.label2 } }, p)
     ]);
   }
   function LogViewer({ taskId, onClose }) {
@@ -247,11 +262,11 @@ function apply(cctx, config) {
           j(ProgressBar, { p: b.progress }),
           j("button", { onClick: () => runOp("cancel", b.name), style: btn(T.err) }, "cancel")
         ]),
-        b.depends_on?.length > 0 && j("div", { style: { fontSize: 10, color: "#888" } }, `\u4F9D\u8D56: ${b.depends_on.join(", ")}`),
+        b.depends_on?.length > 0 && j("div", { style: { fontSize: 10, color: T.label2 } }, `\u4F9D\u8D56: ${b.depends_on.join(", ")}`),
         ...failedTasks.map((t) => jsxs2("div", { style: { fontSize: 11, marginLeft: 14, marginTop: 2, display: "flex", alignItems: "center" } }, [
           j("span", { style: { fontFamily: "monospace", cursor: "pointer", textDecoration: "underline", marginRight: 6 }, onClick: () => setLogTask(`${t.batch}:${t.task}`), title: "\u67E5\u770B\u65E5\u5FD7" }, t.task),
           Badge({ s: t.status }),
-          t.retries != null && j("span", { style: { color: "#888", marginRight: 4 } }, `retries=${t.retries}`),
+          t.retries != null && j("span", { style: { color: T.label2, marginRight: 4 } }, `retries=${t.retries}`),
           j("button", { onClick: () => runOp("retry", `${t.batch}:${t.task}`), style: btn(T.brand) }, "retry"),
           j(ArmButton, { label: "resubmit", confirmLabel: "resubmit(\u5220\u4EA7\u7269!)", color: T.warn, onConfirm: () => runOp("resubmit", `${t.batch}:${t.task}`) })
         ]))
@@ -390,10 +405,10 @@ function apply(cctx, config) {
     return jsxs2("div", { style: { fontFamily: "ui-monospace,monospace", fontSize: 11, lineHeight: 1.6 } }, [
       jsxs2("div", {}, [
         j("b", null, "node-sched"),
-        j("span", { style: { margin: "0 6px", color: "#888" } }, "GPU"),
+        j("span", { style: { margin: "0 6px", color: T.label2 } }, "GPU"),
         gpus || "?"
       ]),
-      j("div", { style: { color: "#888" } }, `\u6D3B\u8DC3/\u963B\u585E\u6279\u6B21: ${active}\uFF1B\u70B9\u4FA7\u680F\u5E95\u90E8\u300C\u26A1 sched \u770B\u677F\u300D\u6253\u5F00\u5B8C\u6574\u9762\u677F`)
+      j("div", { style: { color: T.label2 } }, `\u6D3B\u8DC3/\u963B\u585E\u6279\u6B21: ${active}\uFF1B\u70B9\u4FA7\u680F\u5E95\u90E8\u300C\u26A1 sched \u770B\u677F\u300D\u6253\u5F00\u5B8C\u6574\u9762\u677F`)
     ]);
   }
   cctx.logger?.info?.("[node-sched-ui] mounting footer entry + settings card");
