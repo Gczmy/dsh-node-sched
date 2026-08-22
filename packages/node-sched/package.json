@@ -1,0 +1,15 @@
+{
+  "name": "@zzc/dsh-node-sched",
+  "description": "dsh host plugin for the sched node-level scheduler: ssh proxy to remote `sched` CLI, agent tools, and dashboard RPC/WS plumbing",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js"
+  },
+  "files": [
+    "lib/index.js"
+  ],
+  "license": "MIT"
+}

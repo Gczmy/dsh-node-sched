@@ -1,0 +1,7 @@
+{
+  "name": "@zzc/dsh-node-sched-ui",
+  "description": "dsh client plugin: sched dashboard UI (placeholder skeleton, M3/M4)",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module"
+}

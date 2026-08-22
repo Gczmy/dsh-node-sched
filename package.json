@@ -1,0 +1,13 @@
+{
+  "name": "dsh-node-sched-monorepo",
+  "private": true,
+  "version": "0.0.1",
+  "description": "dsh plugins for the sched node-level GPU/CPU resource scheduler: host proxy + agent tools + web dashboard UI",
+  "type": "module",
+  "scripts": {
+    "build": "pnpm -r run build"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

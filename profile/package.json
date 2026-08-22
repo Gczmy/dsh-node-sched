@@ -1,0 +1,6 @@
+{
+  "name": "nodesched-profile",
+  "private": true,
+  "description": "Template for the dsh 'nodesched' profile: base + web surface over the node-sched plugins",
+  "type": "module"
+}

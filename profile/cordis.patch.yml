@@ -1,0 +1,20 @@
+# nodesched profile — 用户层 cordis.patch.yml 示例。
+# 安装方式（首次）：
+#   dsh plugin --profile nodesched add <path-to>/packages/node-sched <path-to>/packages/node-sched-ui
+# 并在 profile 目录 package.json 的 dsh.profile.bundles 中按序声明：
+#   ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "@zzc/dsh-node-sched", "@zzc/dsh-node-sched-ui"]
+#
+# ssh 入口是显式配置（AGENTS.md §1）：校园网 HPDC / 校外 HPDC_outside，
+# 本插件绝不自动切换入口；探活失败会报错提示检查网络环境。
+
+- insert:
+    - id: node-sched-proxy
+      name: "@zzc/dsh-node-sched"
+      config:
+        # 入口二选一，改这里（或后续由 setup 脚本生成）
+        sshEntry: "HPDC"
+        connectTimeoutSec: 20
+        pollFallbackSec: 30
+
+    - id: node-sched-ui
+      name: "@zzc/dsh-node-sched-ui"
