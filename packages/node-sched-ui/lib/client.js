@@ -61,6 +61,7 @@ function apply(cctx, config) {
     else if (kids.length > 1) p.children = kids;
     return _jsx(tag, p);
   };
+  const jsxs2 = j;
   const pre = { margin: "4px 0", whiteSpace: "pre-wrap", background: "rgba(127,127,127,.08)", borderRadius: 6, padding: 8, fontSize: 11 };
   const btn = (bg, disabled) => ({ background: disabled ? "#bbb" : bg, border: 0, color: "#fff", borderRadius: 4, padding: "2px 8px", fontSize: 11, cursor: disabled ? "default" : "pointer", marginRight: 4 });
   const badge = (s) => ({ background: COLORS[s] ?? "#666", color: "#fff", borderRadius: 4, padding: "0 6px", fontSize: 10, marginRight: 6 });

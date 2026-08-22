@@ -33,6 +33,7 @@ function apply(cctx, config) {
 		else if (kids.length > 1) p.children = kids;
 		return _jsx(tag, p);
 	};
+	const jsxs2 = j; // children-array variant shares the corrected semantics
 
 	// ── styles ──────────────────────────────────────────────────────────────
 	const pre = { margin: "4px 0", whiteSpace: "pre-wrap", background: "rgba(127,127,127,.08)", borderRadius: 6, padding: 8, fontSize: 11 };
