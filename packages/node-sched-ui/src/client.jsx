@@ -12,7 +12,7 @@ const NS = "nodesched";
 
 const name = "@zzc/dsh-node-sched-ui";
 
-const inject = [];
+const inject = ["slots"];
 
 function apply(cctx, config) {
 	const { useEffect, useState, useCallback } = require("react");

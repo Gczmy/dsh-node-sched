@@ -32,7 +32,7 @@ module.exports = __toCommonJS(client_exports);
 var SLOT = "web-ui.plugin.item";
 var NS = "nodesched";
 var name = "@zzc/dsh-node-sched-ui";
-var inject = [];
+var inject = ["slots"];
 function apply(cctx, config) {
   const { useEffect, useState, useCallback } = require("react");
   const { jsx: _jsx, jsxs } = require("react/jsx-runtime");

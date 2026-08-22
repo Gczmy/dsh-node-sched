@@ -98,3 +98,13 @@ esbuild footer 少闭合一个 `}` 时（factory 箭头块 + load 的对象字�
 load 事件 → kernel 检查 factories 未注册 → 报 "loaded without registering"。
 **验证方法**：构建后必须 `node --check lib/client.js`，再用桩 require 在 Node 里
 模拟 `window.__ModuleLoader__` 跑一遍注册 + factory 调用（见 scripts 冒烟）。
+
+### 坑：client 插件有两处 inject 语义不同，都要配
+
+| 位置 | 内容 | 缺失后果 |
+|---|---|---|
+| bundle 内 `exports.inject` | **服务名**（如 `["slots"]`） | apply 里 `ctx.slots` 报 "cannot get property without inject" |
+| package.json `dsh.client.inject` | **前置包名**（如 `["@deepseek-ai/dsh-client-runtime"]`），决定装载顺序 | 激活早于服务提供方（可能静默错序） |
+
+slots 服务在 client plane 由 kernel/runtime 提供；task-board 的 client/index.ts
+`inject = ["slots","sessions",...]` 是权威参照。
