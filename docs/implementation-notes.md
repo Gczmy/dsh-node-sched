@@ -134,3 +134,14 @@ slots 服务在 client plane 由 kernel/runtime 提供；task-board 的 client/i
 3. **重启后仍是旧行为**：两次由不同原因造成——①旧进程未被 pkill 杀掉仍占端口；
    ②新进程确实起来了但当时磁盘文件就是坏的。**决定性排查法：在响应里加版本标记
    （v:3/v:4）+ ps 确认进程启动时间晚于文件 mtime。**
+
+## M4：独立面板 + 日志查看器（2026-08-24）
+
+- 槽位盘点结论：官方 shell 无"额外页面"槽（三栏会话布局：sidebar/conversation/
+  details）；生态可用槽 = `sidebar.footer.action`（侧栏底部按钮位，remote-web-ui
+  同款模式）+ `web-ui.plugin.item`（设置页子卡）
+- 最终形态：侧栏底部「⚡ sched 看板」按钮 → 全屏 overlay 面板（fixed 定位逃出
+  sidebar 布局；点遮罩或 × 关闭）；设置子卡缩为状态摘要 + 入口提示
+- 新增：任务日志查看器（批次行任务名可点击 → /sched/api/log 轮询弹层）、
+  进度条（progress "27/33" 解析）、提交成功自动跳回 batches tab 并清空表单
+- 依赖图降级为依赖 chips 文本（图可视化收益/成本比低，记为 deferred）
