@@ -19,7 +19,7 @@ docs/                    文档索引与实现笔记
 |---|---|---|
 | M0 | 仓库骨架 | ✅ |
 | M1 | 只读打通：schedProxy + agent 工具 + 最小只读看板 | 🚧 schedProxy 骨架已落，工具待接 dsh-tools API |
-| M2 | 事件流：events tail → WS 推送；日志流式查看器 | |
+| M2 | 事件流：scheduler.log tail → WS 推送 + HTTP 快照 API | ✅（见 docs/implementation-notes.md）|
 | M3 | 写操作：dry-run 预览流 + submit/cancel/retry/resubmit + GPU 管理 | |
 | M4 | 打磨：依赖图、历史过滤、notify webhook 对接 | |
 

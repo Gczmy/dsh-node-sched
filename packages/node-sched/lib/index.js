@@ -21,6 +21,7 @@
 import cp from "node:child_process";
 import z from "@deepseek-ai/schemastery";
 import { defineTool } from "@deepseek-ai/dsh-tools";
+import { WebSocketServer } from "ws";
 
 const name = "node-sched";
 
@@ -43,7 +44,7 @@ const Config = z.object({
 	pollFallbackSec: z.number().min(10).max(600).default(30)
 });
 
-const inject = ["tools", "systemPrompt"];
+const inject = ["tools", "systemPrompt", "webServer"];
 
 /** One in-flight write operation per target, so double-clicks cannot double-kill. */
 class WriteGate {
@@ -289,8 +290,141 @@ function apply(ctx, config) {
 
 	ctx.logger.warn("[node-sched] %d read tools registered", disposers.length);
 
+	// ── Dashboard plumbing (M2): HTTP snapshots + WS event stream over the shared webserver. ──
+	const routeDisposers = [];
+	let heartbeat;
+	if (ctx.webServer) {
+		const json = async (res, body, code = 200) => {
+			res.writeHead(code, { "content-type": "application/json; charset=utf-8" });
+			res.end(JSON.stringify(body));
+		};
+
+		routeDisposers.push(
+			ctx.webServer.register({
+				kind: "prefix",
+				path: "/sched/api/status",
+				handler: async (_req, res) => {
+					const { raw, text } = await query(`${S} status --json`);
+					await json(res, raw ? { ok: true, summary: summarizeStatus(raw), raw } : { ok: false, text });
+				},
+			}),
+
+			ctx.webServer.register({
+				kind: "prefix",
+				path: "/sched/api/gpus",
+				handler: async (_req, res) => {
+					const r = await query(`${S} list-gpus`, { json: false });
+					await json(res, { ok: r.text.startsWith("[error") ? false : true, text: r.text });
+				},
+			}),
+
+			ctx.webServer.register({
+				kind: "prefix",
+				path: "/sched/api/log",
+				handler: async (req, res) => {
+					const url = new URL(req.url ?? "/", "http://x");
+					const task = url.searchParams.get("task") ?? "";
+					const lines = clamp(Number(url.searchParams.get("lines") ?? 200) || 200, 1, 5000);
+					if (!task) return void ((res.writeHead(400), res.end("missing ?task=<batch>:<task>")));
+					const r = await query(`${S} log ${shellQuote(task)} -n ${lines}`, { json: false });
+					res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+					res.end(r.text);
+				},
+			}),
+		);
+
+		// WS event stream: tail the remote dispatcher decision log line-by-line.
+		// Source is ~/.sched/<remote-hostname>/scheduler.log (the B6 events dir is
+		// unimplemented upstream); frames are `{type:'log', line}` plus a periodic
+		// `{type:'status', summary}` heartbeat so clients survive quiet stretches.
+		const wss = new WebSocketServer({ noServer: true });
+		/** @type {Set<import('ws').WebSocket>} */
+		const clients = new Set();
+		/** @type {import('node:child_process').ChildProcess | undefined} */
+		let tailChild;
+		let tailRestartTimer;
+
+		function broadcast(obj) {
+			const msg = JSON.stringify(obj);
+			for (const ws of clients) {
+				try { ws.send(msg); } catch { /* socket closing */ }
+			}
+		}
+
+		/** Tail the dispatcher decision log; restart with backoff while clients exist.
+		 * State dir partitions by the configured COMPUTE node (~/.sched/<node>/),
+		 * NOT the ssh-landing host (an outside entry lands on the gateway whose
+		 * own hostname dir is empty) — so resolve `node` from the remote
+		 * ~/.sched/config.json rather than `hostname`. */
+		async function resolveNode() {
+			const res = await runRemote("cat $HOME/.sched/config.json");
+			if (!res.ok) return undefined;
+			try { return JSON.parse(res.stdout).node; } catch { return undefined; }
+		}
+
+		async function startTail() {
+			if (tailChild || clients.size === 0) return;
+			const nodeName = await resolveNode();
+			if (!nodeName) {
+				ctx.logger.error("[node-sched] cannot resolve sched node from remote ~/.sched/config.json");
+				return;
+			}
+			const safeNode = String(nodeName).replace(/[^a-zA-Z0-9.-]/g, "");
+			const remoteCmd = `tail -n 50 -F $HOME/.sched/${safeNode}/scheduler.log 2>/dev/null`;
+			const child = cp.spawn(
+				"ssh",
+				["-o", `ConnectTimeout=${config.connectTimeoutSec}`, "-o", "BatchMode=yes", config.sshEntry, remoteCmd],
+			);
+			tailChild = child;
+			let buffer = "";
+			child.stdout.on("data", (d) => {
+				buffer += d.toString();
+				let at;
+				while ((at = buffer.indexOf("\n")) !== -1) {
+					const line = buffer.slice(0, at).trimEnd();
+					buffer = buffer.slice(at + 1);
+					if (line) broadcast({ type: "log", line });
+				}
+			});
+			child.on("close", () => {
+				tailChild = undefined;
+				if (clients.size > 0 && !tailRestartTimer) {
+					tailRestartTimer = setTimeout(() => {
+						tailRestartTimer = undefined;
+						startTail().catch(() => {});
+					}, 5_000);
+				}
+			});
+		}
+
+		// Periodic status heartbeat so quiet stretches still refresh dashboards.
+		heartbeat = setInterval(async () => {
+			if (clients.size === 0) return;
+			try {
+				const { raw } = await query(`${S} status --json`);
+				broadcast({ type: "status", summary: raw ? summarizeStatus(raw) : null, ts: Date.now() });
+			} catch { /* transient */ }
+		}, config.pollFallbackSec * 1000);
+
+		routeDisposers.push(
+			ctx.webServer.registerUpgrade({
+				path: "/sched/ws/events",
+				handler: (req, socket, head) => {
+					wss.handleUpgrade(req, socket, head, (ws) => {
+						clients.add(ws);
+						ws.on("close", () => clients.delete(ws));
+						ws.on("error", () => clients.delete(ws));
+						startTail().catch(() => {});
+					});
+				},
+			}),
+		);
+	}
+
 	return () => {
 		for (const d of disposers) { try { d?.(); } catch { /* already gone */ } }
+		for (const d of routeDisposers) { try { d?.(); } catch { /* already gone */ } }
+		clearInterval(heartbeat);
 	};
 }
 
