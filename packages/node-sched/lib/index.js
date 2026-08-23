@@ -307,6 +307,41 @@ function apply(ctx, config) {
 
 	// ── Dashboard plumbing (M2): HTTP snapshots + WS event stream over the shared webserver. ──
 		let _daemonCache = { ts: 0, body: null };
+		let _statusCache = null;
+		let _refreshTimer;
+
+		// B11c: 后台统一刷新器 -- 定时经 ssh 查询远程状态并缓存,
+		// 所有 API 路由即时返回缓存值, 网络抖动对浏览器完全透明。
+		const REFRESH_MS = config.pollFallbackSec * 1000;
+
+		async function refreshCaches() {
+			try {
+				const r = await query(`${S} daemon status`, { json: false });
+				_daemonCache = {
+					ts: Date.now(),
+					body: { ok: r.ok, text: r.text },
+				};
+			} catch { /* keep old */ }
+			try {
+				const sr = await query(`${S} status --json`);
+				if (sr.ok && sr.raw) {
+					_statusCache = {
+						ts: Date.now(),
+						body: { ok: true, summary: summarizeStatus(sr.raw), raw: sr.raw },
+					};
+				}
+			} catch { /* keep old */ }
+		}
+
+		function startRefresher() {
+			if (_refreshTimer) return;
+			refreshCaches(); // 首次立即加载
+			_refreshTimer = setInterval(refreshCaches, REFRESH_MS);
+		}
+
+		function stopRefresher() {
+			if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = undefined; }
+		}
 	const routeDisposers = [];
 	let heartbeat;
 	if (ctx.webServer) {
@@ -351,13 +386,18 @@ function apply(ctx, config) {
 			return JSON.parse(body);
 		};
 
+		startRefresher();
+
 		routeDisposers.push(
 			ctx.webServer.register({
 				kind: "prefix",
 				path: "/sched/api/status",
 				handler: async (_req, res) => {
+					if (_statusCache) return void json(res, _statusCache.body);
 					const { raw, text } = await query(`${S} status --json`);
-					await json(res, raw ? { ok: true, summary: summarizeStatus(raw), raw } : { ok: false, text });
+					const body = raw ? { ok: true, summary: summarizeStatus(raw), raw } : { ok: false, text };
+					_statusCache = { ts: Date.now(), body };
+					json(res, body);
 				},
 			}),
 
@@ -412,14 +452,7 @@ function apply(ctx, config) {
 				kind: "prefix",
 				path: "/sched/api/daemon",
 					handler: async (_req, res) => {
-						// 10s micro-cache: merge duplicate ssh queries from multi-client polling
-						const now = Date.now();
-						if (now - (_daemonCache.ts || 0) < 10000 && _daemonCache.body) {
-							return void json(res, _daemonCache.body);
-						}
-						const r = await query(`${S} daemon status`, { json: false });
-						_daemonCache = { ts: now, body: { ok: r.ok, text: r.text } };
-						json(res, _daemonCache.body);
+						json(res, _daemonCache.body || { ok: false, text: "尚未查询" });
 					},
 				}),
 
@@ -551,6 +584,7 @@ function apply(ctx, config) {
 		for (const d of disposers) { try { d?.(); } catch { /* already gone */ } }
 		for (const d of routeDisposers) { try { d?.(); } catch { /* already gone */ } }
 		clearInterval(heartbeat);
+		stopRefresher();
 	};
 }
 
