@@ -181,8 +181,10 @@ function apply(cctx, config) {
 		const [tab, setTab] = useState("batches");
 		const [opMsg, setOpMsg] = useState("");
 		const [logTask, setLogTask] = useState(null);
+		const [projFilter, setProjFilter] = useState("");
 		const raw = snap?.raw;
 		const summary = snap?.summary;
+		const projects = [...new Set((raw?.batches ?? []).map((b) => b.project).filter(Boolean))];
 
 		const runOp = async (op, id) => {
 			const r = await post("op", { op, id });
@@ -229,7 +231,10 @@ function apply(cctx, config) {
 			return jsxs2("div", { style: { marginBottom: 10 } }, [
 				jsxs2("div", { style: GRID, onClick: () => setOpen(!open) }, [
 					j("span", { style: { textAlign: "center", cursor: "pointer" } }, Badge({ s: b.status })),
-					j("b", { style: { fontSize: 11.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "pointer" }, title: b.name, onClick: (e) => { e.stopPropagation(); setOpen(!open); } }, b.name),
+					jsxs2("span", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "pointer" }, onClick: (e) => { e.stopPropagation(); setOpen(!open); } }, [
+					j("b", { style: { fontSize: 11.5 }, title: b.name }, b.name),
+					b.project && j("span", { style: { fontSize: 9, color: T.label2, marginLeft: 6 } }, b.project),
+				]),
 					j(SegmentedBar, { seg: taskSegments(tasks) }),
 					j("span", { style: { fontSize: 10.5, color: T.label2, textAlign: "right" } }, b.progress ?? ""),
 					j("button", { onClick: (e) => { e.stopPropagation(); runOp("cancel", b.name); }, style: btn(T.err) }, "cancel"),
@@ -317,6 +322,14 @@ function apply(cctx, config) {
 					j("b", null, "node-sched"),
 					j("span", { style: { color: stream.connected ? T.ok : T.err, fontSize: 11 } }, stream.connected ? "● live" : "○ offline"),
 					j("button", { onClick: refreshSnap, style: ghostBtn }, "refresh"),
+					j("select", {
+						value: projFilter,
+						onChange: (e) => setProjFilter(e.target.value),
+						style: { background: "transparent", border: `1px solid ${T.border}`, color: T.label, borderRadius: 6, padding: "3px 6px", fontSize: 11, marginRight: 4 },
+					}, [
+						j("option", { value: "" }, "all projects"),
+						...projects.map((pr) => j("option", { key: pr, value: pr }, pr)),
+					]),
 					...["batches", "gpus", "events", "submit"].map((t) =>
 						j("button", { key: t, onClick: () => setTab(t), style: tab === t ? btn(T.brand) : ghostBtn }, t)),
 					j("span", { style: { flex: 1 } }),
@@ -334,7 +347,10 @@ function apply(cctx, config) {
 						j("span", { style: { marginRight: 10, color: "#3b82f6" } }, "■ 蓝=运行中"),
 						j("span", { style: { color: "#9ca3af" } }, "■ 灰=排队/取消"),
 					]),
-					(raw.batches ?? []).filter((b) => !["done", "skip"].includes(b.status)).map((b) => j(BatchRow, { key: b.id ?? b.name, b })),
+					(raw.batches ?? [])
+						.filter((b) => !["done", "skip"].includes(b.status))
+						.filter((b) => !projFilter || b.project === projFilter)
+						.map((b) => j(BatchRow, { key: b.id ?? b.name, b })),
 				]),
 				]),
 				tab === "gpus" && jsxs2("div", null, [
