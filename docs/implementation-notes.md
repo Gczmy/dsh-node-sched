@@ -167,3 +167,9 @@ slots 服务在 client plane 由 kernel/runtime 提供；task-board 的 client/i
 - BatchRow 默认折叠，点击徽章或批次名展开；展开显示依赖 + 失败任务列表（含 retry/resubmit/log 链接）
 - 进度条容器加 `display: flex`，分段条正常渲染颜色：红=出错 绿=成功 蓝=运行中 灰=排队/取消
 - 徽章语义：active→绿（成功色） blocked→灰（次要色）
+
+## M4 最终交互：折叠 + 分段进度条（2026-08-24）
+
+- BatchRow 默认折叠，点击徽章或批次名展开；展开显示依赖 + 失败任务列表（含 retry/resubmit/点击查看日志）
+- 进度条容器加 `display: flex`，分段横杠正常渲染颜色：红=出错 绿=成功 蓝=运行中 灰=排队/取消
+- 徽章语义：active→绿（成功色） blocked→灰（次要色）

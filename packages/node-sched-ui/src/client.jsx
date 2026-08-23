@@ -84,7 +84,7 @@ function apply(cctx, config) {
 		width: "min(960px, 94vw)", maxHeight: "88vh", overflow: "auto",
 		boxShadow: "0 18px 60px rgba(0,0,0,.45)", fontFamily: T.font, fontSize: 12, lineHeight: 1.55,
 	};
-	const bar = (pct) => ({ height: 6, background: "rgba(127,127,127,.2)", borderRadius: 3, overflow: "hidden", flex: 1, margin: "0 8px" });
+	const bar = (pct) => ({ height: 6, background: "rgba(127,127,127,.2)", borderRadius: 3, overflow: "hidden", flex: 1, margin: "0 8px", display: "flex" });
 	const barFill = (pct) => ({ height: "100%", width: `${Math.max(0, Math.min(100, pct))}%`, background: T.brand });
 
 		const Badge = ({ s }) => j("span", { style: badge(s) }, s);
@@ -218,29 +218,33 @@ function apply(cctx, config) {
 		}
 
 		function BatchRow({ b }) {
+			const [open, setOpen] = useState(false);
 			const tasks = (raw?.jobs ?? []).filter(
 				(x) => x.batch === b.id || x.batch === b.name || x.batch.startsWith(b.name + "-"),
 			);
 			const failedTasks = tasks.filter((x) => ["failed", "timed_out", "cancelled"].includes(x.status));
 			const seg = taskSegments(tasks);
+
 			return jsxs2("div", { style: { marginBottom: 10 } }, [
-				jsxs2("div", { style: GRID }, [
-					j("span", { style: { textAlign: "center" } }, Badge({ s: b.status })),
-					j("b", { style: { fontSize: 11.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, title: b.name }, b.name),
-					j(SegmentedBar, { seg }),
+				jsxs2("div", { style: GRID, onClick: () => setOpen(!open) }, [
+					j("span", { style: { textAlign: "center", cursor: "pointer" } }, Badge({ s: b.status })),
+					j("b", { style: { fontSize: 11.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "pointer" }, title: b.name, onClick: (e) => { e.stopPropagation(); setOpen(!open); } }, b.name),
+					j(SegmentedBar, { seg: taskSegments(tasks) }),
 					j("span", { style: { fontSize: 10.5, color: T.label2, textAlign: "right" } }, b.progress ?? ""),
-					j("button", { onClick: () => runOp("cancel", b.name), style: btn(T.err) }, "cancel"),
+					j("button", { onClick: (e) => { e.stopPropagation(); runOp("cancel", b.name); }, style: btn(T.err) }, "cancel"),
 				]),
-				b.depends_on?.length > 0 && j("div", { style: { fontSize: 10, color: T.label2, marginTop: 2 } }, `依赖: ${b.depends_on.join(", ")}`),
-				...failedTasks.map((t) =>
-					jsxs2("div", { style: { fontSize: 11, marginLeft: 14, marginTop: 2, display: "flex", alignItems: "center" } }, [
-						j("span", { style: { fontFamily: "monospace", cursor: "pointer", textDecoration: "underline", marginRight: 6 }, onClick: () => setLogTask(`${t.batch}:${t.task}`), title: "查看日志" }, t.task),
-						Badge({ s: t.status }),
-						t.retries != null && j("span", { style: { color: T.label2, marginRight: 4 } }, `retries=${t.retries}`),
-						j("span", { style: { flex: 1 } }),
-						j("button", { onClick: () => runOp("retry", `${t.batch}:${t.task}`), style: btn(T.brand) }, "retry"),
-						j(ArmButton, { label: "resubmit", confirmLabel: "resubmit(删产物!)", color: T.warn, onConfirm: () => runOp("resubmit", `${t.batch}:${t.task}`) }),
-					])),
+				open && jsxs2("div", { style: { marginTop: 6, marginLeft: 76, paddingLeft: 10, borderLeft: `2px solid ${T.border}` } }, [
+					b.depends_on?.length > 0 && j("div", { style: { fontSize: 10, color: T.label2 } }, `依赖: ${b.depends_on.join(", ")}`),
+					...tasks.filter((t) => ["failed", "timed_out", "cancelled"].includes(t.status)).map((t) =>
+						jsxs2("div", { style: { fontSize: 11, marginLeft: 14, marginTop: 2, display: "flex", alignItems: "center" } }, [
+							j("span", { style: { fontFamily: "monospace", cursor: "pointer", textDecoration: "underline", marginRight: 6 }, onClick: () => setLogTask(`${t.batch}:${t.task}`), title: "查看日志" }, t.task),
+							Badge({ s: t.status }),
+							t.retries != null && j("span", { style: { color: T.label2, marginRight: 4 } }, `retries=${t.retries}`),
+							j("span", { style: { flex: 1 } }),
+							j("button", { onClick: () => runOp("retry", `${t.batch}:${t.task}`), style: btn(T.brand) }, "retry"),
+							j(ArmButton, { label: "resubmit", confirmLabel: "resubmit(删产物!)", color: T.warn, onConfirm: () => runOp("resubmit", `${t.batch}:${t.task}`) }),
+						])),
+				]),
 			]);
 		}
 
