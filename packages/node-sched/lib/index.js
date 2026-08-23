@@ -412,7 +412,7 @@ function apply(ctx, config) {
 				path: "/sched/api/daemon",
 				handler: async (_req, res) => {
 					const r = await query(`${S} daemon status`, { json: false });
-					await json(res, { v: 4, ok: r.ok, text: r.text });
+					await json(res, { ok: r.ok, text: r.text });
 				},
 			}),
 

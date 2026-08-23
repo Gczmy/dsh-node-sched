@@ -327,11 +327,12 @@ function apply(cctx, config) {
       ]);
     }
     function DaemonBar() {
-      const [status, setStatus] = useState("");
+      const [status, setStatus] = useState(null);
       const [confirmStop, setConfirmStop] = useState(false);
       const load = useCallback(() => {
-        getText("daemon").then((t) => setStatus(t.trim().slice(0, 120))).catch(() => {
-        });
+        fetch("/sched/api/daemon").then((r) => r.json()).then((d) => {
+          setStatus(d.ok ? d.text : "\u67E5\u8BE2\u5931\u8D25");
+        }).catch(() => setStatus(null));
       }, []);
       useEffect(() => {
         load();
@@ -339,7 +340,7 @@ function apply(cctx, config) {
         return () => clearInterval(t);
       }, [load]);
       return jsxs2("div", { style: { marginBottom: 8, paddingBottom: 6, borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center" } }, [
-        j("span", { style: { fontSize: 11, marginRight: 8, flex: 1 } }, `daemon: ${status || "?"}`),
+        j("span", { style: { fontSize: 11, marginRight: 8, flex: 1, color: status && status.includes("\u8FD0\u884C\u4E2D") ? T.ok : T.err } }, `daemon: ${status || "\u2026?"}`),
         j("button", { onClick: async () => {
           await runOp("daemon-start");
           setTimeout(load, 3e3);
