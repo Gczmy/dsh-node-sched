@@ -185,3 +185,49 @@ slots 服务在 client plane 由 kernel/runtime 提供；task-board 的 client/i
   - err → `#ef4444` (red-500)
   - label → `#1f2937` (slate-900)
   - label2 → `#6b7280` (gray-500)
+
+## B11c 多项目调度联调事故与教训（2026-08-24）
+
+### 事故：selfdist 代理走错入口 → 任务滞留死库
+
+**现象**：selfdist 代理提交 sd_chronos_etth1 后任务永远 queued 不派发，
+且报错分析误导（声称"共享 config 缺 selfdist 项目"——实际早已配好）。
+
+**根因**：代理沿用了旧双 daemon 方案的入口
+（`SCHED_STATE=~/.sched_selfdist` + 独立 config），任务写进了**已停用的
+daemon B 的状态库**——那里没有任何 daemon 在跑，永远不会派发。
+
+**恢复**：旧库 cancel 僵尸批次 → 统一入口重新提交 → 指纹机制判定产物
+有效自动 SKIP（此前已成功训练过）——skip 是防重复派发机制的正确行为。
+
+**教训**：
+1. **废弃入口必须物理清除**，仅靠文档标注不够——代理会话可能拿着旧指令
+   运行数小时。后续将 `sched-sd`/`start_sd_daemon.sh` 改名停用（待用户确认）。
+2. **代理必须重载纪律文档**。给代理下发新纪律后，要求其复述关键约束再继续。
+3. 报错时先查"提交进了哪个 state"再分析其他——
+   `sqlite3 <state>/ambiorix/state.db 'SELECT name,status FROM batches'`
+   一眼分辨。
+
+### sqlite3.Row 三连坑（dispatcher 崩溃事故）
+
+| # | 坑 | 症状 |
+|---|---|---|
+| 1 | `ORDER BY j.rowid` 可用 ≠ 结果集含 rowid 列；排序 lambda 里 `j["rowid"]` KeyError | daemon 每 tick 崩溃、5 次后退出、零派发 |
+| 2 | Row 无 `.get()` 方法 | `j.get("x")` AttributeError |
+| 3 | Row 键必须显式出现在 SELECT 中 | 隐式假设 = 运行时 KeyError |
+
+**修法**：SELECT 显式带出所需列（`j.rowid AS rid, b.project AS batch_project,
+b.priority AS batch_priority`）；代码中全部用 `r["key"]` 显式访问。
+
+### 补丁脚本写盘时机教训（会话内反复踩）
+
+多次"修改成功但文件没变"：Python 补丁脚本在函数末尾才 write_text，
+中途断言/正则崩溃 → 内存中已改内容全部丢失，且下一个脚本从磁盘重读的是
+未修改版本 → 连锁困惑。**定案：每个成功替换立即写盘；
+验证不只 py_compile（语法过但符号缺失照样崩），加运行时属性检查。**
+
+### waiting_quota 死状态教训
+
+给配额不足的任务标新状态 `waiting_quota` 后，派发 SELECT 只捞 pending →
+任务永远不再被捞起（配额释放也无效）。**教训：引入新状态前必须核对所有
+按状态过滤的查询路径；"本轮跳过 + 保持原状态" 通常优于 "发明新状态"。**
