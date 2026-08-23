@@ -19,14 +19,15 @@ const inject = ["slots"];
 
 // 官方主题语义 token（跟随明暗主题）；statics 仅作补充色相。
 const T = {
-	brand: "var(--dsw-alias-brand-primary)",
-	ok: "var(--dsw-alias-state-success-primary)",
-	warn: "var(--dsw-alias-state-warn-primary)",
-	err: "var(--dsw-alias-state-error-primary)",
-	label: "var(--dsw-alias-label-primary)",
-	label2: "var(--dsw-alias-label-secondary)",
+	brand: "var(--dsw-alias-brand-primary, #3b82f6)",
+	ok: "var(--dsw-alias-state-success-primary, #22c55e)",
+	warn: "var(--dsw-alias-state-warn-primary, #f59e0b)",
+	err: "var(--dsw-alias-state-error-primary, #ef4444)",
+	label: "var(--dsw-alias-label-primary, #1f2937)",
+	label2: "var(--dsw-alias-label-secondary, #6b7280)",
 	bgLayer: "var(--dsw-alias-bg-layer-2, rgba(127,127,127,.08))",
 	border: "var(--dsw-alias-border-l1)",
+	border2: "var(--dsw-alias-border-l2)",
 	font: "var(--dsw-font-family, ui-monospace, monospace)",
 	onFill: "var(--dsw-alias-bg-base)", // 实底上的文字：明色主题→白、暗色主题→深
 };

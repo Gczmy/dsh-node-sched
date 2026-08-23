@@ -173,3 +173,15 @@ slots 服务在 client plane 由 kernel/runtime 提供；task-board 的 client/i
 - BatchRow 默认折叠，点击徽章或批次名展开；展开显示依赖 + 失败任务列表（含 retry/resubmit/点击查看日志）
 - 进度条容器加 `display: flex`，分段横杠正常渲染颜色：红=出错 绿=成功 蓝=运行中 灰=排队/取消
 - 徽章语义：active→绿（成功色） blocked→灰（次要色）
+
+## M4 最终修复：进度条蓝色显示修复（2026-08-24）
+
+- 问题：浅色主题下分段进度条的"蓝=运行中"显示为白色/不可见
+- 根因：`--dsw-alias-brand-primary` 语义变量在部分环境下未定义或值极浅
+- 修法：给所有语义 token（brand/ok/warn/err/label/label2）加 **fallback 十六进制色**，确保 CSS 变量未定义时自动回退到安全色值
+  - brand → `#3b82f6` (Tailwind blue-500)
+  - ok → `#22c55e` (green-500)
+  - warn → `#f59e0b` (amber-500)
+  - err → `#ef4444` (red-500)
+  - label → `#1f2937` (slate-900)
+  - label2 → `#6b7280` (gray-500)
