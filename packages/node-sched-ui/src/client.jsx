@@ -223,7 +223,7 @@ function apply(cctx, config) {
 		function BatchRow({ b }) {
 			const [open, setOpen] = useState(false);
 			const tasks = (raw?.jobs ?? []).filter(
-				(x) => x.batch === b.id || x.batch === b.name || x.batch.startsWith(b.name + "-"),
+				(x) => x.batch === b.id,
 			);
 			const failedTasks = tasks.filter((x) => ["failed", "timed_out", "cancelled"].includes(x.status));
 			const seg = taskSegments(tasks);

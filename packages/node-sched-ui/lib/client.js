@@ -21,7 +21,7 @@ var __copyProps = (to, from, except, desc) => {
 };
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-// src/client.jsx
+// packages/node-sched-ui/src/client.jsx
 var client_exports = {};
 __export(client_exports, {
   apply: () => apply,
@@ -281,7 +281,7 @@ function apply(cctx, config) {
     function BatchRow({ b }) {
       const [open, setOpen] = useState(false);
       const tasks = (raw?.jobs ?? []).filter(
-        (x) => x.batch === b.id || x.batch === b.name || x.batch.startsWith(b.name + "-")
+        (x) => x.batch === b.id
       );
       const failedTasks = tasks.filter((x) => ["failed", "timed_out", "cancelled"].includes(x.status));
       const seg = taskSegments(tasks);
