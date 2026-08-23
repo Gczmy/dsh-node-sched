@@ -208,7 +208,7 @@ function apply(cctx, config) {
 			}
 			return seg;
 		}
-		const SEG_COLOR = { bad: T.err, ok: T.ok, run: T.brand, off: T.border };
+		const SEG_COLOR = { bad: "#ef4444", ok: "#22c55e", run: "#3b82f6", off: "#9ca3af" };
 
 		function SegmentedBar({ seg }) {
 			const total = seg.bad + seg.ok + seg.run + seg.off;
@@ -329,10 +329,10 @@ function apply(cctx, config) {
 					summary && j("pre", { style: { ...pre, maxHeight: 110, overflow: "auto" } }, summary.split("\njobs:")[0]),
 					raw && jsxs2("div", {}, [
 					jsxs2("div", { style: { fontSize: 10, color: T.label2, marginBottom: 6 } }, [
-						j("span", { style: { marginRight: 10 } }, "■ 红=出错"),
-						j("span", { style: { marginRight: 10, color: T.ok } }, "■ 绿=成功"),
-						j("span", { style: { marginRight: 10, color: T.brand } }, "■ 蓝=运行中"),
-						j("span", { style: { color: T.label2 } }, "■ 灰=排队/取消"),
+						j("span", { style: { marginRight: 10, color: "#ef4444" } }, "■ 红=出错"),
+						j("span", { style: { marginRight: 10, color: "#22c55e" } }, "■ 绿=成功"),
+						j("span", { style: { marginRight: 10, color: "#3b82f6" } }, "■ 蓝=运行中"),
+						j("span", { style: { color: "#9ca3af" } }, "■ 灰=排队/取消"),
 					]),
 					(raw.batches ?? []).filter((b) => !["done", "skip"].includes(b.status)).map((b) => j(BatchRow, { key: b.id ?? b.name, b })),
 				]),

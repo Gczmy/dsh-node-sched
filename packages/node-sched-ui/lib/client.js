@@ -268,7 +268,7 @@ function apply(cctx, config) {
       }
       return seg;
     }
-    const SEG_COLOR = { bad: T.err, ok: T.ok, run: T.brand, off: T.border };
+    const SEG_COLOR = { bad: "#ef4444", ok: "#22c55e", run: "#3b82f6", off: "#9ca3af" };
     function SegmentedBar({ seg }) {
       const total = seg.bad + seg.ok + seg.run + seg.off;
       if (!total) return null;
@@ -412,10 +412,10 @@ function apply(cctx, config) {
           summary && j("pre", { style: { ...pre, maxHeight: 110, overflow: "auto" } }, summary.split("\njobs:")[0]),
           raw && jsxs2("div", {}, [
             jsxs2("div", { style: { fontSize: 10, color: T.label2, marginBottom: 6 } }, [
-              j("span", { style: { marginRight: 10 } }, "\u25A0 \u7EA2=\u51FA\u9519"),
-              j("span", { style: { marginRight: 10, color: T.ok } }, "\u25A0 \u7EFF=\u6210\u529F"),
-              j("span", { style: { marginRight: 10, color: T.brand } }, "\u25A0 \u84DD=\u8FD0\u884C\u4E2D"),
-              j("span", { style: { color: T.label2 } }, "\u25A0 \u7070=\u6392\u961F/\u53D6\u6D88")
+              j("span", { style: { marginRight: 10, color: "#ef4444" } }, "\u25A0 \u7EA2=\u51FA\u9519"),
+              j("span", { style: { marginRight: 10, color: "#22c55e" } }, "\u25A0 \u7EFF=\u6210\u529F"),
+              j("span", { style: { marginRight: 10, color: "#3b82f6" } }, "\u25A0 \u84DD=\u8FD0\u884C\u4E2D"),
+              j("span", { style: { color: "#9ca3af" } }, "\u25A0 \u7070=\u6392\u961F/\u53D6\u6D88")
             ]),
             (raw.batches ?? []).filter((b) => !["done", "skip"].includes(b.status)).map((b) => j(BatchRow, { key: b.id ?? b.name, b }))
           ])
