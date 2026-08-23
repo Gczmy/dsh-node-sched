@@ -21,7 +21,7 @@ var __copyProps = (to, from, except, desc) => {
 };
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-// packages/node-sched-ui/src/client.jsx
+// src/client.jsx
 var client_exports = {};
 __export(client_exports, {
   apply: () => apply,
@@ -328,19 +328,33 @@ function apply(cctx, config) {
     }
     function DaemonBar() {
       const [status, setStatus] = useState(null);
+      const [querying, setQuerying] = useState(true);
       const [confirmStop, setConfirmStop] = useState(false);
       const load = useCallback(() => {
+        setQuerying(true);
         fetch("/sched/api/daemon").then((r) => r.json()).then((d) => {
-          setStatus(d.ok ? d.text : "\u67E5\u8BE2\u5931\u8D25");
-        }).catch(() => setStatus(null));
+          if (d.ok) setStatus(d.text);
+          else setStatus((prev) => prev ?? "\u67E5\u8BE2\u5931\u8D25: " + String(d.text ?? "").slice(0, 80));
+          setQuerying(false);
+        }).catch(() => {
+          setQuerying(false);
+        });
       }, []);
       useEffect(() => {
         load();
         const t = setInterval(load, 3e4);
         return () => clearInterval(t);
       }, [load]);
+      const running = status != null && status.includes("\u8FD0\u884C\u4E2D");
       return jsxs2("div", { style: { marginBottom: 8, paddingBottom: 6, borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center" } }, [
-        j("span", { style: { fontSize: 11, marginRight: 8, flex: 1, color: status && status.includes("\u8FD0\u884C\u4E2D") ? T.ok : T.err } }, `daemon: ${status || "\u2026\u7B49\u5F85\u67E5\u8BE2"}`),
+        jsxs2("span", { style: { fontSize: 11, marginRight: 8, flex: 1 } }, [
+          j(
+            "span",
+            { style: { color: running ? T.ok : status ? T.err : T.label2 } },
+            `daemon: ${status ?? ""}`
+          ),
+          querying && j("span", { style: { color: T.label2 } }, " \u2026\u7B49\u5F85\u67E5\u8BE2")
+        ]),
         j("button", { onClick: async () => {
           await runOp("daemon-start");
           setTimeout(load, 3e3);

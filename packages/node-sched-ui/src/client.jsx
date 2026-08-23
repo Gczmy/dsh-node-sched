@@ -267,17 +267,25 @@ function apply(cctx, config) {
 		}
 
 		function DaemonBar() {
-			const [status, setStatus] = useState(null);
+			const [status, setStatus] = useState(null);      // 上次成功查询的状态文本（保留不清空）
+			const [querying, setQuerying] = useState(true);  // 是否正在查询
 			const [confirmStop, setConfirmStop] = useState(false);
 			const load = useCallback(() => {
+				setQuerying(true);
 				fetch("/sched/api/daemon").then((r) => r.json()).then((d) => {
-					// {ok, text}: text 形如 "运行中 (pid=..., host=ambiorix)"
-					setStatus(d.ok ? d.text : "查询失败");
-				}).catch(() => setStatus(null));
+					if (d.ok) setStatus(d.text);
+					else setStatus((prev) => prev ?? ("查询失败: " + String(d.text ?? "").slice(0, 80)));
+					setQuerying(false);
+				}).catch(() => { setQuerying(false); }); // 失败保留上次值
 			}, []);
 			useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, [load]);
+			const running = status != null && status.includes("运行中");
 			return jsxs2("div", { style: { marginBottom: 8, paddingBottom: 6, borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center" } }, [
-				j("span", { style: { fontSize: 11, marginRight: 8, flex: 1, color: status && status.includes("运行中") ? T.ok : T.err } }, `daemon: ${status || "…等待查询"}`),
+				jsxs2("span", { style: { fontSize: 11, marginRight: 8, flex: 1 } }, [
+					j("span", { style: { color: running ? T.ok : (status ? T.err : T.label2) } },
+						`daemon: ${status ?? ""}`),
+					querying && j("span", { style: { color: T.label2 } }, " …等待查询"),
+				]),
 				j("button", { onClick: async () => { await runOp("daemon-start"); setTimeout(load, 3000); }, style: btn(T.ok) }, "start"),
 				!confirmStop && j("button", { onClick: () => setConfirmStop(true), style: btn(T.err) }, "stop"),
 				confirmStop && j(TypedConfirm, {
