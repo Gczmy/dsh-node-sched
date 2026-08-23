@@ -54,7 +54,7 @@ var COLORS = {
   free: T.ok,
   active: T.ok,
   running: T.brand,
-  assigned: T.brand,
+  assigned: "#3b82f6",
   blocked: T.label2,
   releasing: T.warn,
   failed: T.err,

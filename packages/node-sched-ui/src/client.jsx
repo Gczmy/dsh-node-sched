@@ -33,7 +33,7 @@ const T = {
 };
 const COLORS = {
 	done: T.ok, skip: T.ok, free: T.ok, active: T.ok,
-	running: T.brand, assigned: T.brand,
+	running: T.brand, assigned: "#3b82f6",
 	blocked: T.label2, releasing: T.warn,
 	failed: T.err, timed_out: T.err, unmanaged: T.err,
 	cancelled: T.label2, interrupted: T.err,
