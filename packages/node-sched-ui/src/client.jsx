@@ -277,7 +277,7 @@ function apply(cctx, config) {
 			}, []);
 			useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, [load]);
 			return jsxs2("div", { style: { marginBottom: 8, paddingBottom: 6, borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center" } }, [
-				j("span", { style: { fontSize: 11, marginRight: 8, flex: 1, color: status && status.includes("运行中") ? T.ok : T.err } }, `daemon: ${status || "…?"}`),
+				j("span", { style: { fontSize: 11, marginRight: 8, flex: 1, color: status && status.includes("运行中") ? T.ok : T.err } }, `daemon: ${status || "…等待查询"}`),
 				j("button", { onClick: async () => { await runOp("daemon-start"); setTimeout(load, 3000); }, style: btn(T.ok) }, "start"),
 				!confirmStop && j("button", { onClick: () => setConfirmStop(true), style: btn(T.err) }, "stop"),
 				confirmStop && j(TypedConfirm, {

@@ -306,6 +306,7 @@ function apply(ctx, config) {
 	ctx.logger.warn("[node-sched] %d read tools registered", disposers.length);
 
 	// ── Dashboard plumbing (M2): HTTP snapshots + WS event stream over the shared webserver. ──
+		let _daemonCache = { ts: 0, body: null };
 	const routeDisposers = [];
 	let heartbeat;
 	if (ctx.webServer) {
@@ -410,11 +411,17 @@ function apply(ctx, config) {
 			ctx.webServer.register({
 				kind: "prefix",
 				path: "/sched/api/daemon",
-				handler: async (_req, res) => {
-					const r = await query(`${S} daemon status`, { json: false });
-					await json(res, { ok: r.ok, text: r.text });
-				},
-			}),
+					handler: async (_req, res) => {
+						// 10s micro-cache: merge duplicate ssh queries from multi-client polling
+						const now = Date.now();
+						if (now - (_daemonCache.ts || 0) < 10000 && _daemonCache.body) {
+							return void json(res, _daemonCache.body);
+						}
+						const r = await query(`${S} daemon status`, { json: false });
+						_daemonCache = { ts: now, body: { ok: r.ok, text: r.text } };
+						json(res, _daemonCache.body);
+					},
+				}),
 
 			ctx.webServer.register({
 				kind: "prefix",

@@ -340,7 +340,7 @@ function apply(cctx, config) {
         return () => clearInterval(t);
       }, [load]);
       return jsxs2("div", { style: { marginBottom: 8, paddingBottom: 6, borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center" } }, [
-        j("span", { style: { fontSize: 11, marginRight: 8, flex: 1, color: status && status.includes("\u8FD0\u884C\u4E2D") ? T.ok : T.err } }, `daemon: ${status || "\u2026?"}`),
+        j("span", { style: { fontSize: 11, marginRight: 8, flex: 1, color: status && status.includes("\u8FD0\u884C\u4E2D") ? T.ok : T.err } }, `daemon: ${status || "\u2026\u7B49\u5F85\u67E5\u8BE2"}`),
         j("button", { onClick: async () => {
           await runOp("daemon-start");
           setTimeout(load, 3e3);
