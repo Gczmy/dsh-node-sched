@@ -2,7 +2,7 @@
   "name": "dsh-node-sched-monorepo",
   "private": true,
   "version": "0.0.1",
-  "description": "dsh plugins for the sched node-level GPU/CPU resource scheduler: host proxy + agent tools + web dashboard UI",
+  "description": "dsh plugin suite exposing the sched node-level GPU/CPU scheduler as a web dashboard and agent tool surface",
   "type": "module",
   "scripts": {
     "build": "pnpm -r run build"
@@ -12,5 +12,14 @@
   },
   "devDependencies": {
     "esbuild": "^0.24.0"
-  }
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "gpu-scheduler",
+    "hpc",
+    "dashboard",
+    "ssh-proxy",
+    "slurm"
+  ]
 }

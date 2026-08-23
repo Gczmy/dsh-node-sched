@@ -1,40 +1,131 @@
 # dsh-node-sched
 
-[dsh](https://github.com/deepseek-ai/deepseek-harness) 插件：为 [sched](../../sched/)（节点级
-GPU/CPU 资源调度器）提供 agent 工具面与 Web 看板。适配器架构——调度智能全部留在远程
-sched daemon，插件只做「传输（ssh）+ 展示 + 操作转发」。
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-## 结构
+**English** | [中文](README.zh-CN.md)
+
+A [dsh](https://github.com/deepseek-ai/deepseek-harness) plugin suite that turns [sched](https://github.com/Gczmy/sched) — a node-level GPU/CPU batch scheduler — into a fully operable web dashboard and agent tool surface.
+
+The design principle is **strict adapter architecture**: all scheduling intelligence lives in the remote `sched` daemon. The plugin never reimplements scheduling logic — it only provides transport (SSH), presentation, and operation forwarding.
 
 ```
-packages/node-sched      host 插件：ssh 代理 sched CLI（JSON 接口）、审计、写操作并发门
-packages/node-sched-ui   client 插件：看板 UI（M3/M4，现为占位）
-profile/                 nodesched profile 模板（bundles 声明 + cordis.patch.yml 示例）
-docs/                    文档索引与实现笔记
+┌─────────────────────────────┐         ┌──────────────────────────────────┐
+│  dsh (browser)              │         │  remote compute node             │
+│                             │         │                                  │
+│  ┌───────────────────────┐  │  HTTP   │  ┌────────────┐   ┌───────────┐  │
+│  │ node-sched-ui         │  │◄────────┼─►│ sched CLI  │◄──│ sched     │  │
+│  │ full-screen dashboard │  │  /WS    │  │ (--json)   │   │ daemon    │  │
+│  └──────────┬────────────┘  │  + SSH  │  └────────────┘   └─────┬─────┘  │
+│             │ RPC           │         │                         │        │
+│  ┌──────────▼────────────┐  │         │                  ┌──────▼─────┐  │
+│  │ node-sched (host)     │──┼─────────┼─────────────────►│ state.db   │  │
+│  │ proxy · audit · gate  │  │         │                  └────────────┘  │
+│  └───────────────────────┘  │         │       GPUs 0..N                  │
+└─────────────────────────────┘         └──────────────────────────────────┘
 ```
 
-## 里程碑
+## Packages
 
-| 阶段 | 内容 | 状态 |
+| Package | Type | Description |
 |---|---|---|
-| M0 | 仓库骨架 | ✅ |
-| M1 | 只读打通：schedProxy + agent 工具 + 最小只读看板 | 🚧 schedProxy 骨架已落，工具待接 dsh-tools API |
-| M2 | 事件流：scheduler.log tail → WS 推送 + HTTP 快照 API | ✅（见 docs/implementation-notes.md）|
-| M3 | 写操作：dry-run 预览流 + submit/cancel/retry/resubmit + GPU 管理 | |
-| M4 | 打磨：依赖图、历史过滤、notify webhook 对接 | |
+| [`packages/node-sched`](packages/node-sched) | host plugin | SSH proxy to the remote `sched` CLI, read-only agent tools, dashboard RPC/WS plumbing, write-op concurrency gate + audit log |
+| [`packages/node-sched-ui`](packages/node-sched-ui) | client plugin | Full-screen dashboard: batch grid with segmented progress bars, GPU panel, live event stream, dry-run-gated submit |
 
-## 安装（目标形态）
+## Features
 
-```sh
+- **Batch grid** — one card per batch with name, project badge, segmented progress bar (done / skipped / running / pending / failed), and task counts. Filter by project via dropdown.
+- **GPU panel** — per-GPU status (free / assigned / unmanaged / quarantined) with the occupying job.
+- **Live event stream** — dispatcher decisions streamed over WebSocket (`tail -F` on `scheduler.log`).
+- **Task log viewer** — click any task to stream its stdout/stderr.
+- **Dry-run-gated submit** — paste a `batch.json`, preview the expansion and SKIP verdicts before committing; destructive operations (cancel / resubmit / GPU free / daemon stop) require typed confirmation.
+- **Multi-project aware** — surfaces per-project GPU quotas, priorities, and hard-affinity isolation as configured by sched's B11c multi-project mode.
+
+## Getting Started
+
+### Prerequisites
+
+- Node.js ≥ 22
+- A reachable host running [sched](https://github.com/Gczmy/sched) with SSH access configured
+- dsh ≥ matching your installed version
+
+### Install
+
+```bash
+# add both packages to a dsh profile
 dsh plugin --profile nodesched add ./packages/node-sched ./packages/node-sched-ui
-dsh --profile nodesched   # 启动 web surface，打印本地 URL
 ```
 
-## 纪律红线（来自 AGENTS.md，实现必须遵守）
+Declare bundle order in the profile's `package.json`:
 
-1. **ssh 入口显式配置**（HPDC / HPDC_outside），绝不自动切换；探活失败报错提示检查网络环境
-2. **写操作不自动重试**——结果未知时报告并请人工核实 `sched status`
-3. **高危操作**（cancel/resubmit 清产物/gpu-free/daemon stop）UI 必须二次确认；
-   resubmit 文案明示"将删除已声明产物"
-4. **状态权威在远程 SQLite**，本地只缓存展示；查状态走 CLI JSON 接口，
-   不 ssh 进节点 ps/nvidia-smi 猜
+```json
+{
+  "dsh": {
+    "profile": {
+      "bundles": [
+        "@deepseek-ai/dsh-base",
+        "@deepseek-ai/dsh-web-app",
+        "@zzc/dsh-node-sched",
+        "@zzc/dsh-node-sched-ui"
+      ]
+    }
+  }
+}
+```
+
+Configure the SSH entry in `cordis.patch.yml` (see [`profile/cordis.patch.yml`](profile/cordis.patch.yml)):
+
+```yaml
+- insert:
+    - id: node-sched-proxy
+      name: "@zzc/dsh-node-sched"
+      config:
+        sshEntry: "my-cluster"      # ssh config Host alias — explicit, never auto-switched
+        connectTimeoutSec: 20
+        pollFallbackSec: 30
+
+    - id: node-sched-ui
+      name: "@zzc/dsh-node-sched-ui"
+```
+
+### Run
+
+```bash
+dsh --profile nodesched
+# open http://127.0.0.1:<port> and click the ⚡ sched entry in the sidebar footer
+```
+
+## HTTP API
+
+All endpoints are served by the host plugin under `/sched/api/*`. Responses are cached server-side by a background refresher, so browser polling is instant and network flakiness upstream is transparent.
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/sched/api/status` | GET | Full snapshot: batches, tasks, jobs, GPUs, projects (+ summary text) |
+| `/sched/api/gpus` | GET | GPU table text |
+| `/sched/api/log?batch=&task=` | GET | Task log tail |
+| `/sched/api/daemon` | GET | Daemon liveness |
+| `/sched/api/dryrun` | POST | Dry-run preview of a batch spec (no side effects) |
+| `/sched/api/op` | POST | Whitelisted operations: `cancel` / `retry` / `resubmit` / `gpu-free` / `gpu-ignore` / `gpu-ok` / `daemon-start` / `daemon-stop` |
+| `/sched/ws/events` | WS | Live dispatcher event stream |
+
+## Safety Model
+
+- **Explicit SSH entry** — the cluster alias is pinned in config; probe failures raise an error instead of silently switching hosts.
+- **Write gate** — write operations are serialized through a single-flight gate; no automatic retries when the outcome is unknown.
+- **Typed confirmation** — cancel, artifact-clearing resubmit, GPU release, and daemon stop all require typing an explicit confirmation word.
+- **Audit log** — every forwarded operation is recorded with caller, arguments, and result.
+- **Server-side cache** — read paths serve from a background refresher; a flaky SSH link degrades staleness, never correctness of past observations.
+
+## Development
+
+```bash
+pnpm install
+pnpm build          # rebuilds the client bundle (esbuild → __ModuleLoader__ factory format)
+node --check packages/*/lib/*.js
+```
+
+Implementation notes and pitfalls live in [`docs/implementation-notes.md`](docs/implementation-notes.md).
+
+## License
+
+MIT — see [LICENSE](LICENSE).

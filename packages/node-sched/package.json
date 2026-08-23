@@ -1,6 +1,6 @@
 {
   "name": "@zzc/dsh-node-sched",
-  "description": "dsh host plugin for the sched node-level scheduler: ssh proxy to remote `sched` CLI, agent tools, and dashboard RPC/WS plumbing",
+  "description": "dsh host plugin for the sched node-level scheduler: SSH proxy to the remote sched CLI, read-only agent tools, dashboard RPC/WS plumbing",
   "version": "0.0.1",
   "private": true,
   "type": "module",
@@ -20,5 +20,13 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1"
-  }
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "gpu-scheduler",
+    "hpc",
+    "ssh-proxy",
+    "agent-tools"
+  ]
 }

@@ -1,6 +1,6 @@
 {
   "name": "@zzc/dsh-node-sched-ui",
-  "description": "dsh client plugin: sched dashboard UI (placeholder skeleton, M3/M4)",
+  "description": "dsh client plugin: full-screen sched dashboard — batch grid with segmented progress, GPU panel, live event stream, dry-run-gated submit",
   "version": "0.0.1",
   "private": true,
   "type": "module",
@@ -23,5 +23,12 @@
   },
   "scripts": {
     "build": "node ../../scripts/build-client.mjs"
-  }
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "dashboard",
+    "gpu-monitor",
+    "react"
+  ]
 }
