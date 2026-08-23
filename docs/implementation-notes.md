@@ -161,3 +161,9 @@ slots 服务在 client plane 由 kernel/runtime 提供；task-board 的 client/i
 - 分段进度条：红=出错(失败/超时) 绿=成功(完成/skip) 蓝=运行中 灰=排队/取消 —— 直观
 - 徽章语义：active→绿色(ok) blocked→灰(label2) —— 符合用户预期
 - 计数与 cancel 按钮分离 12px gap；cancel 列固定 84px
+
+## M4 交互最终版：折叠 + 分段进度条（2026-08-24）
+
+- BatchRow 默认折叠，点击徽章或批次名展开；展开显示依赖 + 失败任务列表（含 retry/resubmit/log 链接）
+- 进度条容器加 `display: flex`，分段条正常渲染颜色：红=出错 绿=成功 蓝=运行中 灰=排队/取消
+- 徽章语义：active→绿（成功色） blocked→灰（次要色）
