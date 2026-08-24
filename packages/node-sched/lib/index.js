@@ -412,6 +412,44 @@ function apply(ctx, config) {
 
 			ctx.webServer.register({
 				kind: "prefix",
+				path: "/sched/api/config",
+				handler: async (req, res) => {
+					try {
+						if (req.method === "GET") {
+							const r = await query(`${S} config get`);
+							await json(res, { ok: r.ok, text: r.text });
+							return;
+						}
+						// POST {patch} -> 上传补丁文件 + WriteGate 串行执行 set --yes
+						const body = await readBodyJson(req);
+						if (!body.patch || typeof body.patch !== "object") {
+							return void json(res, { ok: false, text: "patch (object) required" }, 400);
+						}
+						const remotePath = await uploadRemote(JSON.stringify(body.patch));
+						try {
+							// 配置是双项目共享的 —— 写操作走 WriteGate 单飞 + 审计
+							const r = await gate.run("config-set", async () => {
+								ctx.logger.warn("[node-sched] audit #%d op=config-set", ++auditSeq);
+								return runRemote(
+									`${S} config set -f ${shellQuote(remotePath)} --yes && rm -f ${shellQuote(remotePath)}`,
+									{ timeoutMs: 60_000 },
+								);
+							});
+							await json(res, {
+								ok: r.ok,
+								text: r.ok ? (r.text || "已写入并请求热重载") : (r.stderr || r.text || "set 失败"),
+							});
+						} finally {
+							await runRemote(`rm -f ${shellQuote(remotePath)}`).catch(() => {});
+						}
+					} catch (e) {
+						await json(res, { ok: false, text: String(e.message ?? e) }, 400);
+					}
+				},
+			}),
+
+			ctx.webServer.register({
+				kind: "prefix",
 				path: "/sched/api/dryrun",
 				handler: async (req, res) => {
 					try {

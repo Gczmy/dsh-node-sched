@@ -99,10 +99,11 @@ function apply(cctx, config) {
 		return r.text();
 	}
 
-	function ArmButton({ label, confirmLabel, color, onConfirm }) {
+	function ArmButton({ label, confirmLabel, color, onConfirm, stopProp }) {
 		const [armed, setArmed] = useState(false);
-		if (!armed) return j("button", { onClick: () => setArmed(true), style: btn(color) }, label);
-		return j("button", { onClick: async () => { setArmed(false); await onConfirm(); }, style: btn(color) }, confirmLabel ?? `${label}?`);
+		const guard = (e) => { if (stopProp) e.stopPropagation(); };
+		if (!armed) return j("button", { onClick: (e) => { guard(e); setArmed(true); }, style: btn(color) }, label);
+		return j("button", { onClick: async (e) => { guard(e); setArmed(false); await onConfirm(); }, style: btn(color) }, confirmLabel ?? `${label}?`);
 	}
 
 	function TypedConfirm({ placeholder, color, onConfirm, children }) {
@@ -237,7 +238,8 @@ function apply(cctx, config) {
 				]),
 					j(SegmentedBar, { seg: taskSegments(tasks) }),
 					j("span", { style: { fontSize: 10.5, color: T.label2, textAlign: "right" } }, b.progress ?? ""),
-					j("button", { onClick: (e) => { e.stopPropagation(); runOp("cancel", b.name); }, style: btn(T.err) }, "cancel"),
+					j(ArmButton, { label: "cancel", confirmLabel: "cancel(取消任务!)", color: T.err, stopProp: true,
+					onConfirm: () => runOp("cancel", b.name) }),
 				]),
 				open && jsxs2("div", { style: { marginTop: 6, marginLeft: 76, paddingLeft: 10, borderLeft: `2px solid ${T.border}` } }, [
 					b.depends_on?.length > 0 && j("div", { style: { fontSize: 10, color: T.label2 } }, `依赖: ${b.depends_on.join(", ")}`),
@@ -261,7 +263,8 @@ function apply(cctx, config) {
 				g.job && j("span", { style: { fontSize: 10, marginRight: 8, color: T.label2, flex: 1 } }, g.job),
 				g.quarantined && j("span", { style: { color: T.err, marginRight: 8, fontSize: 10 } }, "[quarantined]"),
 				!g.job && g.status === "free" && j("span", { style: { flex: 1 } }),
-				g.status === "unmanaged" && j("button", { onClick: () => runOp("gpu-free", String(g.idx)), style: btn(T.ok) }, "gpu-free 强制回收"),
+				g.status === "unmanaged" && j(ArmButton, { label: "gpu-free 强制回收", confirmLabel: "确认回收?", color: T.warn,
+					onConfirm: () => runOp("gpu-free", String(g.idx)) }),
 				g.quarantined && j("button", { onClick: () => runOp("gpu-ok", String(g.idx)), style: btn(T.ok) }, "gpu-ok 解除隔离"),
 			]);
 		}
@@ -286,12 +289,189 @@ function apply(cctx, config) {
 						`daemon: ${status ?? ""}`),
 					querying && j("span", { style: { color: T.label2 } }, " …等待查询"),
 				]),
-				j("button", { onClick: async () => { await runOp("daemon-start"); setTimeout(load, 3000); }, style: btn(T.ok) }, "start"),
-				!confirmStop && j("button", { onClick: () => setConfirmStop(true), style: btn(T.err) }, "stop"),
+				// B14: 状态联动 —— 运行中禁用 start, 未运行禁用 stop
+				...(status === null ? [j("span", { key: "dw", style: btn(T.label2, true) }, "…")] : [
+					running
+						? j("button", { key: "s", disabled: true, title: "已在运行", style: btn(T.ok, true) }, "start")
+						: j("button", { key: "s", onClick: async () => { await runOp("daemon-start"); setTimeout(load, 3000); }, style: btn(T.ok) }, "start"),
+					running
+						? (!confirmStop && j("button", { key: "x", onClick: () => setConfirmStop(true), style: btn(T.err) }, "stop"))
+						: j("button", { key: "x", disabled: true, title: "未运行", style: btn(T.err, true) }, "stop"),
+				]),
 				confirmStop && j(TypedConfirm, {
 					placeholder: "输入 stop 确认（会取消未完成任务）", color: T.err,
 					onConfirm: async () => { await runOp("daemon-stop"); setConfirmStop(false); },
 				}, "确认 stop"),
+			]);
+		}
+
+		function ConfigTab() {
+			const [cfgText, setCfgText] = useState("");   // 原始 JSON 文本 (可编辑, 高级模式)
+			const [cfg, setCfg] = useState(null);          // 解析后的工作副本
+			const [msg, setMsg] = useState("");
+			const [advanced, setAdvanced] = useState(false);
+
+			const load = useCallback(() => {
+				fetch("/sched/api/config").then((r) => r.json()).then((d) => {
+					if (!d.ok) { setMsg("❌ 加载失败: " + (d.text || "").slice(0, 120)); return; }
+					setCfg(JSON.parse(d.text));
+					setCfgText(d.text);
+					setMsg("");
+				}).catch(() => setMsg("❌ 加载异常"));
+			}, []);
+			useEffect(() => { load(); }, []);
+
+			if (!cfg) return j("div", { style: { color: T.label2, fontSize: 11 } }, msg || "loading config…");
+
+			const upd = (fn) => setCfg((c) => { const n = JSON.parse(JSON.stringify(c)); fn(n); return n; });
+
+			async function save(patch) {
+				setMsg("保存中…");
+				try {
+					const r = await fetch("/sched/api/config/set", {
+						method: "POST", headers: { "Content-Type": "application/json" },
+						body: JSON.stringify({ patch }),
+					});
+					const d = await r.json();
+					setMsg((d.ok ? "✅ " : "❌ ") + (d.text || "").split("\n")[0]);
+					if (d.ok) load();
+				} catch (e) { setMsg("❌ " + e); }
+			}
+
+			const numInput = (value, onChange, style) => j("input", {
+				value: value ?? "", onChange: (e) => onChange(e.target.value === "" ? null : Number(e.target.value)),
+				style: { ...style, width: 52, background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label, borderRadius: 4, padding: "2px 4px", fontSize: 11 },
+			});
+			const secTitle = (t) => j("div", { style: { fontSize: 11, color: T.brand, margin: "8px 0 4px", fontWeight: 600 } }, t);
+			const rowStyle = { display: "flex", alignItems: "center", gap: 6, marginBottom: 4, fontSize: 11, flexWrap: "wrap" };
+
+			// ---- 项目区 ----
+			const projects = cfg.projects || {};
+			const projRows = Object.entries(projects).map(([name, pj]) => jsxs2("div", { key: name, style: rowStyle }, [
+				j("span", { style: { width: 80, color: T.label } }, name),
+				j("span", { style: { color: T.label2 } }, "配额"),
+				numInput(pj.gpu_quota, (v) => upd((n) => { if (v === null) delete n.projects[name].gpu_quota; else n.projects[name].gpu_quota = v; })),
+				j("span", { style: { color: T.label2 } }, "优先级"),
+				numInput(pj.priority ?? 0, (v) => upd((n) => { n.projects[name].priority = v ?? 0; })),
+				j("span", { style: { color: T.label2 } }, "单卡上限"),
+				numInput(pj.max_jobs, (v) => upd((n) => { if (v === null) delete n.projects[name].max_jobs; else n.projects[name].max_jobs = v; })),
+				j("select", {
+					value: pj.colocate === undefined ? "" : String(pj.colocate),
+					onChange: (e) => upd((n) => {
+						const v = e.target.value;
+						if (v === "") delete n.projects[name].colocate; else n.projects[name].colocate = v === "true";
+					}),
+					style: { background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label, borderRadius: 4, fontSize: 11 },
+				}, [
+					j("option", { value: "" }, "colocate跟随全局"),
+					j("option", { value: "true" }, "允许共享"),
+					j("option", { value: "false" }, "禁用(独占)"),
+				]),
+				j("span", { style: { color: T.label2 } }, "亲和卡 " + JSON.stringify(pj.gpu_affinity || [])),
+			]));
+
+			const buildProjectsPatch = () => {
+				const patch = {};
+				for (const [name, pj] of Object.entries(cfg.projects || {})) {
+					patch.projects = patch.projects || {};
+					patch.projects[name] = {};
+					for (const k of ["gpu_quota", "priority", "max_jobs"]) {
+						if (pj[k] !== undefined && pj[k] !== null) patch.projects[name][k] = pj[k];
+					}
+					if (pj.colocate !== undefined) patch.projects[name].colocate = pj.colocate;
+				}
+				return { projects: patch.projects };
+			};
+
+			// ---- co-location 区 ----
+			const cl = cfg.co_locate;
+			const clPatch = () => ({ co_locate: !!cl, co_locate_safety: Number(cfg.co_locate_safety ?? 0.7), co_locate_max_jobs: Number(cfg.co_locate_max_jobs ?? 3) });
+
+			// ---- 通知区 ----
+			const nf = cfg.notify || {};
+			const evOn = (e) => Array.isArray(nf.on) && nf.on.includes(e);
+			const fileOn = !!(nf.file && nf.file.enabled);
+			const notifyPatch = () => ({
+				notify: {
+					on: ["batch_done", "batch_blocked"].filter((e, i) =>
+						[e === "batch_done" ? evOn("batch_done") : true, e === "batch_blocked" ? evOn("batch_blocked") : true][i] !== false || evOn(e)),
+					file: { ...(nf.file || {}), enabled: fileOn },
+				},
+			});
+
+			return jsxs2("div", { style: { fontSize: 11 } }, [
+				secTitle("项目参数（双项目共享配置 — 保存影响两个代理）"),
+				jsxs2("div", { style: rowStyle }, [
+					j("span", { style: { color: T.err } }, "⚠️ 保存需二次确认；冷键(node/state_dir/gpus 卡集)仅可读，变更须 ssh 重启 daemon"),
+				]),
+				projRows,
+				j(ArmButton, { label: "保存项目参数", confirmLabel: "确认保存?", color: T.brand,
+					onConfirm: () => save(buildProjectsPatch()) }),
+
+				secTitle("co-location 全局"),
+				jsxs2("div", { style: rowStyle }, [
+					j("label", { style: { color: T.label } }, [
+						j("input", { type: "checkbox", checked: !!cl, onChange: (e) => upd((n) => { n.co_locate = e.target.checked; }) }),
+						" 启用共享装箱",
+					]),
+					j("span", { style: { color: T.label2 } }, "safety"),
+					j("input", { value: cfg.co_locate_safety ?? 0.7,
+						onChange: (e) => upd((n) => { n.co_locate_safety = Number(e.target.value); }),
+						style: { width: 50, background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label, borderRadius: 4, fontSize: 11 } }),
+					j("span", { style: { color: T.label2 } }, "每卡上限"),
+					numInput(cfg.co_locate_max_jobs ?? 3, (v) => upd((n) => { if (v !== null) n.co_locate_max_jobs = v; })),
+					j(ArmButton, { label: "保存", confirmLabel: "确认保存?", color: T.brand, onConfirm: () => save(clPatch()) }),
+				]),
+
+				secTitle("通知"),
+				jsxs2("div", { style: rowStyle }, [
+					j("label", { style: { color: T.label } }, [
+						j("input", { type: "checkbox", checked: evOn("batch_done"),
+							onChange: (e) => upd((n) => {
+								n.notify = n.notify || {}; n.notify.on = n.notify.on || [];
+								n.notify.on = e.target.checked
+									? [...new Set([...n.notify.on, "batch_done"])]
+									: n.notify.on.filter((x) => x !== "batch_done");
+							}) }),
+						" batch_done",
+					]),
+					j("label", { style: { color: T.label, marginRight: 10 } }, [
+						j("input", { type: "checkbox", checked: evOn("batch_blocked"),
+							onChange: (e) => upd((n) => {
+								n.notify = n.notify || {}; n.notify.on = n.notify.on || [];
+								n.notify.on = e.target.checked
+									? [...new Set([...n.notify.on, "batch_blocked"])]
+									: n.notify.on.filter((x) => x !== "batch_blocked");
+							}) }),
+						" batch_blocked",
+					]),
+					j("label", { style: { color: T.label, marginRight: 10 } }, [
+						j("input", { type: "checkbox", checked: fileOn,
+							onChange: (e) => upd((n) => { n.notify = n.notify || {}; n.notify.file = { ...(n.notify.file || {}), enabled: e.target.checked }; }) }),
+						" file 渠道",
+					]),
+					j(ArmButton, { label: "保存通知设置", confirmLabel: "确认保存?", color: T.brand, onConfirm: () => save(notifyPatch()) }),
+				]),
+
+				secTitle("冷键（只读）"),
+				jsxs2("div", { style: { ...rowStyle, color: T.label2 } }, [
+					j("span", {}, `node=${cfg.node} · user=${cfg.user} · gpus=${JSON.stringify(cfg.gpus)}`),
+				]),
+
+				jsxs2("div", { style: rowStyle }, [
+					j("button", { onClick: () => setAdvanced(!advanced), style: ghostBtn }, advanced ? "收起高级模式" : "高级模式 (原始 JSON)"),
+					advanced && j(ArmButton, { label: "保存完整 JSON", confirmLabel: "确认保存全部?", color: T.warn,
+						onConfirm: async () => {
+							try { JSON.parse(cfgText); } catch (e) { setMsg("❌ JSON 解析失败"); return; }
+							upd(() => {}); // noop
+							await save(JSON.parse(cfgText));
+						} }),
+				]),
+				advanced && j("textarea", {
+					value: cfgText, onChange: (e) => setCfgText(e.target.value),
+					style: { width: "100%", minHeight: 200, background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label, borderRadius: 6, fontSize: 11, fontFamily: "monospace", padding: 6 },
+				}),
+				msg && j("div", { style: { fontSize: 11, marginTop: 6, color: msg.startsWith("✅") ? T.ok : T.warn } }, msg),
 			]);
 		}
 
@@ -343,7 +523,7 @@ function apply(cctx, config) {
 						j("option", { value: "" }, "all projects"),
 						...projects.map((pr) => j("option", { key: pr, value: pr }, pr)),
 					]),
-					...["batches", "gpus", "events", "submit"].map((t) =>
+					...["batches", "gpus", "events", "submit", "config"].map((t) =>
 						j("button", { key: t, onClick: () => setTab(t), style: tab === t ? btn(T.brand) : ghostBtn }, t)),
 					j("span", { style: { flex: 1 } }),
 					j("button", { onClick: onClose, style: ghostBtn }, "×"),
@@ -372,6 +552,7 @@ function apply(cctx, config) {
 				]),
 				tab === "events" && j("pre", { style: { ...pre, maxHeight: "55vh", overflow: "auto" } }, stream.lines.join("\n") || "(no events yet)"),
 				tab === "submit" && j(SubmitTab, null),
+				tab === "config" && j(ConfigTab, null),
 				logTask && j(LogViewer, { taskId: logTask, onClose: () => setLogTask(null) }),
 			]),
 		]);

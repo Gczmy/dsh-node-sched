@@ -141,10 +141,17 @@ function apply(cctx, config) {
     const r = await fetch(`/sched/api/${action}${params}`);
     return r.text();
   }
-  function ArmButton({ label, confirmLabel, color, onConfirm }) {
+  function ArmButton({ label, confirmLabel, color, onConfirm, stopProp }) {
     const [armed, setArmed] = useState(false);
-    if (!armed) return j("button", { onClick: () => setArmed(true), style: btn(color) }, label);
-    return j("button", { onClick: async () => {
+    const guard = (e) => {
+      if (stopProp) e.stopPropagation();
+    };
+    if (!armed) return j("button", { onClick: (e) => {
+      guard(e);
+      setArmed(true);
+    }, style: btn(color) }, label);
+    return j("button", { onClick: async (e) => {
+      guard(e);
       setArmed(false);
       await onConfirm();
     }, style: btn(color) }, confirmLabel ?? `${label}?`);
@@ -297,10 +304,13 @@ function apply(cctx, config) {
           ]),
           j(SegmentedBar, { seg: taskSegments(tasks) }),
           j("span", { style: { fontSize: 10.5, color: T.label2, textAlign: "right" } }, b.progress ?? ""),
-          j("button", { onClick: (e) => {
-            e.stopPropagation();
-            runOp("cancel", b.name);
-          }, style: btn(T.err) }, "cancel")
+          j(ArmButton, {
+            label: "cancel",
+            confirmLabel: "cancel(\u53D6\u6D88\u4EFB\u52A1!)",
+            color: T.err,
+            stopProp: true,
+            onConfirm: () => runOp("cancel", b.name)
+          })
         ]),
         open && jsxs2("div", { style: { marginTop: 6, marginLeft: 76, paddingLeft: 10, borderLeft: `2px solid ${T.border}` } }, [
           b.depends_on?.length > 0 && j("div", { style: { fontSize: 10, color: T.label2 } }, `\u4F9D\u8D56: ${b.depends_on.join(", ")}`),
@@ -322,7 +332,12 @@ function apply(cctx, config) {
         g.job && j("span", { style: { fontSize: 10, marginRight: 8, color: T.label2, flex: 1 } }, g.job),
         g.quarantined && j("span", { style: { color: T.err, marginRight: 8, fontSize: 10 } }, "[quarantined]"),
         !g.job && g.status === "free" && j("span", { style: { flex: 1 } }),
-        g.status === "unmanaged" && j("button", { onClick: () => runOp("gpu-free", String(g.idx)), style: btn(T.ok) }, "gpu-free \u5F3A\u5236\u56DE\u6536"),
+        g.status === "unmanaged" && j(ArmButton, {
+          label: "gpu-free \u5F3A\u5236\u56DE\u6536",
+          confirmLabel: "\u786E\u8BA4\u56DE\u6536?",
+          color: T.warn,
+          onConfirm: () => runOp("gpu-free", String(g.idx))
+        }),
         g.quarantined && j("button", { onClick: () => runOp("gpu-ok", String(g.idx)), style: btn(T.ok) }, "gpu-ok \u89E3\u9664\u9694\u79BB")
       ]);
     }
@@ -355,11 +370,14 @@ function apply(cctx, config) {
           ),
           querying && j("span", { style: { color: T.label2 } }, " \u2026\u7B49\u5F85\u67E5\u8BE2")
         ]),
-        j("button", { onClick: async () => {
-          await runOp("daemon-start");
-          setTimeout(load, 3e3);
-        }, style: btn(T.ok) }, "start"),
-        !confirmStop && j("button", { onClick: () => setConfirmStop(true), style: btn(T.err) }, "stop"),
+        // B14: 状态联动 —— 运行中禁用 start, 未运行禁用 stop
+        ...status === null ? [j("span", { key: "dw", style: btn(T.label2, true) }, "\u2026")] : [
+          running ? j("button", { key: "s", disabled: true, title: "\u5DF2\u5728\u8FD0\u884C", style: btn(T.ok, true) }, "start") : j("button", { key: "s", onClick: async () => {
+            await runOp("daemon-start");
+            setTimeout(load, 3e3);
+          }, style: btn(T.ok) }, "start"),
+          running ? !confirmStop && j("button", { key: "x", onClick: () => setConfirmStop(true), style: btn(T.err) }, "stop") : j("button", { key: "x", disabled: true, title: "\u672A\u8FD0\u884C", style: btn(T.err, true) }, "stop")
+        ],
         confirmStop && j(TypedConfirm, {
           placeholder: "\u8F93\u5165 stop \u786E\u8BA4\uFF08\u4F1A\u53D6\u6D88\u672A\u5B8C\u6210\u4EFB\u52A1\uFF09",
           color: T.err,
@@ -368,6 +386,212 @@ function apply(cctx, config) {
             setConfirmStop(false);
           }
         }, "\u786E\u8BA4 stop")
+      ]);
+    }
+    function ConfigTab() {
+      const [cfgText, setCfgText] = useState("");
+      const [cfg, setCfg] = useState(null);
+      const [msg, setMsg] = useState("");
+      const [advanced, setAdvanced] = useState(false);
+      const load = useCallback(() => {
+        fetch("/sched/api/config").then((r) => r.json()).then((d) => {
+          if (!d.ok) {
+            setMsg("\u274C \u52A0\u8F7D\u5931\u8D25: " + (d.text || "").slice(0, 120));
+            return;
+          }
+          setCfg(JSON.parse(d.text));
+          setCfgText(d.text);
+          setMsg("");
+        }).catch(() => setMsg("\u274C \u52A0\u8F7D\u5F02\u5E38"));
+      }, []);
+      useEffect(() => {
+        load();
+      }, []);
+      if (!cfg) return j("div", { style: { color: T.label2, fontSize: 11 } }, msg || "loading config\u2026");
+      const upd = (fn) => setCfg((c) => {
+        const n = JSON.parse(JSON.stringify(c));
+        fn(n);
+        return n;
+      });
+      async function save(patch) {
+        setMsg("\u4FDD\u5B58\u4E2D\u2026");
+        try {
+          const r = await fetch("/sched/api/config/set", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ patch })
+          });
+          const d = await r.json();
+          setMsg((d.ok ? "\u2705 " : "\u274C ") + (d.text || "").split("\n")[0]);
+          if (d.ok) load();
+        } catch (e) {
+          setMsg("\u274C " + e);
+        }
+      }
+      const numInput = (value, onChange, style) => j("input", {
+        value: value ?? "",
+        onChange: (e) => onChange(e.target.value === "" ? null : Number(e.target.value)),
+        style: { ...style, width: 52, background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label, borderRadius: 4, padding: "2px 4px", fontSize: 11 }
+      });
+      const secTitle = (t) => j("div", { style: { fontSize: 11, color: T.brand, margin: "8px 0 4px", fontWeight: 600 } }, t);
+      const rowStyle = { display: "flex", alignItems: "center", gap: 6, marginBottom: 4, fontSize: 11, flexWrap: "wrap" };
+      const projects2 = cfg.projects || {};
+      const projRows = Object.entries(projects2).map(([name2, pj]) => jsxs2("div", { key: name2, style: rowStyle }, [
+        j("span", { style: { width: 80, color: T.label } }, name2),
+        j("span", { style: { color: T.label2 } }, "\u914D\u989D"),
+        numInput(pj.gpu_quota, (v) => upd((n) => {
+          if (v === null) delete n.projects[name2].gpu_quota;
+          else n.projects[name2].gpu_quota = v;
+        })),
+        j("span", { style: { color: T.label2 } }, "\u4F18\u5148\u7EA7"),
+        numInput(pj.priority ?? 0, (v) => upd((n) => {
+          n.projects[name2].priority = v ?? 0;
+        })),
+        j("span", { style: { color: T.label2 } }, "\u5355\u5361\u4E0A\u9650"),
+        numInput(pj.max_jobs, (v) => upd((n) => {
+          if (v === null) delete n.projects[name2].max_jobs;
+          else n.projects[name2].max_jobs = v;
+        })),
+        j("select", {
+          value: pj.colocate === void 0 ? "" : String(pj.colocate),
+          onChange: (e) => upd((n) => {
+            const v = e.target.value;
+            if (v === "") delete n.projects[name2].colocate;
+            else n.projects[name2].colocate = v === "true";
+          }),
+          style: { background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label, borderRadius: 4, fontSize: 11 }
+        }, [
+          j("option", { value: "" }, "colocate\u8DDF\u968F\u5168\u5C40"),
+          j("option", { value: "true" }, "\u5141\u8BB8\u5171\u4EAB"),
+          j("option", { value: "false" }, "\u7981\u7528(\u72EC\u5360)")
+        ]),
+        j("span", { style: { color: T.label2 } }, "\u4EB2\u548C\u5361 " + JSON.stringify(pj.gpu_affinity || []))
+      ]));
+      const buildProjectsPatch = () => {
+        const patch = {};
+        for (const [name2, pj] of Object.entries(cfg.projects || {})) {
+          patch.projects = patch.projects || {};
+          patch.projects[name2] = {};
+          for (const k of ["gpu_quota", "priority", "max_jobs"]) {
+            if (pj[k] !== void 0 && pj[k] !== null) patch.projects[name2][k] = pj[k];
+          }
+          if (pj.colocate !== void 0) patch.projects[name2].colocate = pj.colocate;
+        }
+        return { projects: patch.projects };
+      };
+      const cl = cfg.co_locate;
+      const clPatch = () => ({ co_locate: !!cl, co_locate_safety: Number(cfg.co_locate_safety ?? 0.7), co_locate_max_jobs: Number(cfg.co_locate_max_jobs ?? 3) });
+      const nf = cfg.notify || {};
+      const evOn = (e) => Array.isArray(nf.on) && nf.on.includes(e);
+      const fileOn = !!(nf.file && nf.file.enabled);
+      const notifyPatch = () => ({
+        notify: {
+          on: ["batch_done", "batch_blocked"].filter((e, i) => [e === "batch_done" ? evOn("batch_done") : true, e === "batch_blocked" ? evOn("batch_blocked") : true][i] !== false || evOn(e)),
+          file: { ...nf.file || {}, enabled: fileOn }
+        }
+      });
+      return jsxs2("div", { style: { fontSize: 11 } }, [
+        secTitle("\u9879\u76EE\u53C2\u6570\uFF08\u53CC\u9879\u76EE\u5171\u4EAB\u914D\u7F6E \u2014 \u4FDD\u5B58\u5F71\u54CD\u4E24\u4E2A\u4EE3\u7406\uFF09"),
+        jsxs2("div", { style: rowStyle }, [
+          j("span", { style: { color: T.err } }, "\u26A0\uFE0F \u4FDD\u5B58\u9700\u4E8C\u6B21\u786E\u8BA4\uFF1B\u51B7\u952E(node/state_dir/gpus \u5361\u96C6)\u4EC5\u53EF\u8BFB\uFF0C\u53D8\u66F4\u987B ssh \u91CD\u542F daemon")
+        ]),
+        projRows,
+        j(ArmButton, {
+          label: "\u4FDD\u5B58\u9879\u76EE\u53C2\u6570",
+          confirmLabel: "\u786E\u8BA4\u4FDD\u5B58?",
+          color: T.brand,
+          onConfirm: () => save(buildProjectsPatch())
+        }),
+        secTitle("co-location \u5168\u5C40"),
+        jsxs2("div", { style: rowStyle }, [
+          j("label", { style: { color: T.label } }, [
+            j("input", { type: "checkbox", checked: !!cl, onChange: (e) => upd((n) => {
+              n.co_locate = e.target.checked;
+            }) }),
+            " \u542F\u7528\u5171\u4EAB\u88C5\u7BB1"
+          ]),
+          j("span", { style: { color: T.label2 } }, "safety"),
+          j("input", {
+            value: cfg.co_locate_safety ?? 0.7,
+            onChange: (e) => upd((n) => {
+              n.co_locate_safety = Number(e.target.value);
+            }),
+            style: { width: 50, background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label, borderRadius: 4, fontSize: 11 }
+          }),
+          j("span", { style: { color: T.label2 } }, "\u6BCF\u5361\u4E0A\u9650"),
+          numInput(cfg.co_locate_max_jobs ?? 3, (v) => upd((n) => {
+            if (v !== null) n.co_locate_max_jobs = v;
+          })),
+          j(ArmButton, { label: "\u4FDD\u5B58", confirmLabel: "\u786E\u8BA4\u4FDD\u5B58?", color: T.brand, onConfirm: () => save(clPatch()) })
+        ]),
+        secTitle("\u901A\u77E5"),
+        jsxs2("div", { style: rowStyle }, [
+          j("label", { style: { color: T.label } }, [
+            j("input", {
+              type: "checkbox",
+              checked: evOn("batch_done"),
+              onChange: (e) => upd((n) => {
+                n.notify = n.notify || {};
+                n.notify.on = n.notify.on || [];
+                n.notify.on = e.target.checked ? [.../* @__PURE__ */ new Set([...n.notify.on, "batch_done"])] : n.notify.on.filter((x) => x !== "batch_done");
+              })
+            }),
+            " batch_done"
+          ]),
+          j("label", { style: { color: T.label, marginRight: 10 } }, [
+            j("input", {
+              type: "checkbox",
+              checked: evOn("batch_blocked"),
+              onChange: (e) => upd((n) => {
+                n.notify = n.notify || {};
+                n.notify.on = n.notify.on || [];
+                n.notify.on = e.target.checked ? [.../* @__PURE__ */ new Set([...n.notify.on, "batch_blocked"])] : n.notify.on.filter((x) => x !== "batch_blocked");
+              })
+            }),
+            " batch_blocked"
+          ]),
+          j("label", { style: { color: T.label, marginRight: 10 } }, [
+            j("input", {
+              type: "checkbox",
+              checked: fileOn,
+              onChange: (e) => upd((n) => {
+                n.notify = n.notify || {};
+                n.notify.file = { ...n.notify.file || {}, enabled: e.target.checked };
+              })
+            }),
+            " file \u6E20\u9053"
+          ]),
+          j(ArmButton, { label: "\u4FDD\u5B58\u901A\u77E5\u8BBE\u7F6E", confirmLabel: "\u786E\u8BA4\u4FDD\u5B58?", color: T.brand, onConfirm: () => save(notifyPatch()) })
+        ]),
+        secTitle("\u51B7\u952E\uFF08\u53EA\u8BFB\uFF09"),
+        jsxs2("div", { style: { ...rowStyle, color: T.label2 } }, [
+          j("span", {}, `node=${cfg.node} \xB7 user=${cfg.user} \xB7 gpus=${JSON.stringify(cfg.gpus)}`)
+        ]),
+        jsxs2("div", { style: rowStyle }, [
+          j("button", { onClick: () => setAdvanced(!advanced), style: ghostBtn }, advanced ? "\u6536\u8D77\u9AD8\u7EA7\u6A21\u5F0F" : "\u9AD8\u7EA7\u6A21\u5F0F (\u539F\u59CB JSON)"),
+          advanced && j(ArmButton, {
+            label: "\u4FDD\u5B58\u5B8C\u6574 JSON",
+            confirmLabel: "\u786E\u8BA4\u4FDD\u5B58\u5168\u90E8?",
+            color: T.warn,
+            onConfirm: async () => {
+              try {
+                JSON.parse(cfgText);
+              } catch (e) {
+                setMsg("\u274C JSON \u89E3\u6790\u5931\u8D25");
+                return;
+              }
+              upd(() => {
+              });
+              await save(JSON.parse(cfgText));
+            }
+          })
+        ]),
+        advanced && j("textarea", {
+          value: cfgText,
+          onChange: (e) => setCfgText(e.target.value),
+          style: { width: "100%", minHeight: 200, background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label, borderRadius: 6, fontSize: 11, fontFamily: "monospace", padding: 6 }
+        }),
+        msg && j("div", { style: { fontSize: 11, marginTop: 6, color: msg.startsWith("\u2705") ? T.ok : T.warn } }, msg)
       ]);
     }
     function SubmitTab() {
@@ -429,7 +653,7 @@ function apply(cctx, config) {
             j("option", { value: "" }, "all projects"),
             ...projects.map((pr) => j("option", { key: pr, value: pr }, pr))
           ]),
-          ...["batches", "gpus", "events", "submit"].map((t) => j("button", { key: t, onClick: () => setTab(t), style: tab === t ? btn(T.brand) : ghostBtn }, t)),
+          ...["batches", "gpus", "events", "submit", "config"].map((t) => j("button", { key: t, onClick: () => setTab(t), style: tab === t ? btn(T.brand) : ghostBtn }, t)),
           j("span", { style: { flex: 1 } }),
           j("button", { onClick: onClose, style: ghostBtn }, "\xD7")
         ]),
@@ -454,6 +678,7 @@ function apply(cctx, config) {
         ]),
         tab === "events" && j("pre", { style: { ...pre, maxHeight: "55vh", overflow: "auto" } }, stream.lines.join("\n") || "(no events yet)"),
         tab === "submit" && j(SubmitTab, null),
+        tab === "config" && j(ConfigTab, null),
         logTask && j(LogViewer, { taskId: logTask, onClose: () => setLogTask(null) })
       ])
     ]);
