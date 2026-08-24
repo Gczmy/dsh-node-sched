@@ -388,6 +388,126 @@ function apply(cctx, config) {
         }, "\u786E\u8BA4 stop")
       ]);
     }
+    function IncidentsTab() {
+      const [list, setList] = useState(null);
+      const [detail, setDetail] = useState(null);
+      const [msg, setMsg] = useState("");
+      const load = useCallback(() => {
+        fetch("/sched/api/incidents?limit=30").then((r) => r.json()).then((d) => {
+          if (!d.ok) {
+            setMsg("\u274C " + (d.text || "").slice(0, 120));
+            return;
+          }
+          const parsed = JSON.parse(d.text);
+          setList(parsed.incidents || []);
+        }).catch(() => setMsg("\u274C \u52A0\u8F7D\u5F02\u5E38"));
+      }, []);
+      useEffect(() => {
+        load();
+      }, [load]);
+      const view = (id) => {
+        setDetail({ loading: true });
+        fetch(`/sched/api/incidents?id=${id}`).then((r) => r.json()).then((d) => {
+          if (!d.ok) {
+            setDetail({ error: d.text });
+            return;
+          }
+          setDetail(JSON.parse(d.text).incident);
+        }).catch(() => setDetail({ error: "\u52A0\u8F7D\u5931\u8D25" }));
+      };
+      if (msg && !list) return j("div", { style: { color: T.err, fontSize: 11 } }, msg);
+      if (!list) return j("div", { style: { color: T.label2, fontSize: 11 } }, "loading\u2026");
+      const p = detail && !detail.loading && !detail.error ? detail.payload || {} : null;
+      const failed = p ? p.failed || {} : {};
+      const mem = p ? p.memory || {} : {};
+      return jsxs2("div", { style: { fontSize: 11 } }, [
+        jsxs2("div", { style: { display: "flex", alignItems: "center", marginBottom: 6 } }, [
+          j(
+            "span",
+            { style: { fontWeight: 600, color: T.brand } },
+            `OOM/\u6545\u969C\u4E8B\u6545\u5FEB\u7167 (${list.length})`
+          ),
+          j("span", { style: { flex: 1 } }),
+          j(ArmButton, { label: "\u5237\u65B0", color: T.brand, onConfirm: load })
+        ]),
+        list.length === 0 && j(
+          "div",
+          { style: { color: T.label2 } },
+          "\u6682\u65E0\u4E8B\u6545\u5FEB\u7167 (OOM/gpu_fault \u53D1\u751F\u65F6\u81EA\u52A8\u91C7\u96C6)"
+        ),
+        list.map((r) => jsxs2("div", {
+          key: r.id,
+          onClick: () => view(r.id),
+          style: {
+            display: "flex",
+            gap: 8,
+            padding: "4px 6px",
+            cursor: "pointer",
+            borderRadius: 4,
+            background: detail && detail.id === r.id ? T.bgLayer : "transparent"
+          }
+        }, [
+          j("span", { style: { width: 30, color: T.label2 } }, "#" + r.id),
+          j("span", { style: { width: 130, color: T.label } }, r.ts),
+          j("span", { style: { width: 70, color: r.kind === "oom" ? T.err : T.warn } }, r.kind),
+          j("span", { style: { width: 36 } }, "gpu" + (r.gpu_idx ?? "-")),
+          j(
+            "span",
+            { style: { flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
+            r.job_id
+          )
+        ])),
+        detail && !detail.loading && !detail.error && jsxs2("div", {
+          style: { border: `1px solid ${T.border}`, borderRadius: 6, padding: 8, marginTop: 8 }
+        }, [
+          jsxs2("div", { style: { marginBottom: 4 } }, [
+            j(
+              "span",
+              { style: { fontWeight: 600, color: T.brand } },
+              `#${detail.id} ${detail.kind} @ gpu${detail.gpu_idx ?? "-"}`
+            ),
+            j("button", { onClick: () => setDetail(null), style: { ...ghostBtn, marginLeft: 8 } }, "\u6536\u8D77")
+          ]),
+          j(
+            "div",
+            { style: { color: T.label2, fontSize: 10, marginBottom: 4 } },
+            `${detail.ts} \xB7 job ${detail.job_id} \xB7 batch ${detail.batch_id}`
+          ),
+          failed.dispatch_mode && j(
+            "div",
+            {},
+            `\u6D3E\u53D1\u65B9\u5F0F: ${failed.dispatch_mode} \xB7 \u58F0\u660E ${failed.declared_vram_gib ?? "-"} GiB \xB7 \u5386\u53F2\u5CF0\u503C ${failed.profile_peak_gib ?? "-"}`
+          ),
+          mem.packed_sum_gib !== void 0 && j(
+            "div",
+            {},
+            `\u663E\u5B58: cap=${mem.cap_gib ?? "?"} packed=${mem.packed_sum_gib} actual=${mem.actual_used_gib ?? "?"}${mem.degraded ? " [\u964D\u7EA7]" : ""}`
+          ),
+          (mem.external_pids || []).length > 0 && jsxs2(
+            "div",
+            { style: { color: T.warn } },
+            ["\u5916\u90E8\u8FDB\u7A0B: ", ...(mem.external_pids || []).map((e) => j("span", { key: e.pid }, `pid${e.pid}(${e.mem_mib ?? "?"}MiB) `))]
+          ),
+          (p.co_runners || []).length > 0 && jsxs2("div", {}, [
+            j("div", { style: { color: T.label2, marginTop: 4 } }, "\u540C\u5361\u90BB\u5C45:"),
+            ...p.co_runners.map((c) => j(
+              "div",
+              { key: c.job_id, style: { paddingLeft: 10 } },
+              `${c.task} [${c.status}] declared=${c.declared_vram_gib} peak=${c.profile_peak_gib} runtime=${c.runtime_sec}s`
+            ))
+          ]),
+          (detail.verdicts || []).length > 0 && jsxs2("div", { style: { marginTop: 6 } }, [
+            j("div", { style: { color: T.warn, fontWeight: 600 } }, "\u5224\u8BFB\u5047\u8BBE:"),
+            ...detail.verdicts.map((v, i) => j("div", { key: i, style: { color: T.warn, paddingLeft: 10 } }, "? " + v))
+          ]),
+          p.log_excerpt && jsxs2("div", {}, [
+            j("div", { style: { color: T.label2, marginTop: 6 } }, "\u65E5\u5FD7\u6458\u5F55:"),
+            j("pre", { style: { ...pre, maxHeight: 120, margin: "2px 0" } }, p.log_excerpt)
+          ])
+        ]),
+        msg && j("div", { style: { color: T.err, fontSize: 11 } }, msg)
+      ]);
+    }
     function ConfigTab() {
       const [cfgText, setCfgText] = useState("");
       const [cfg, setCfg] = useState(null);
@@ -653,7 +773,7 @@ function apply(cctx, config) {
             j("option", { value: "" }, "all projects"),
             ...projects.map((pr) => j("option", { key: pr, value: pr }, pr))
           ]),
-          ...["batches", "gpus", "events", "submit", "config"].map((t) => j("button", { key: t, onClick: () => setTab(t), style: tab === t ? btn(T.brand) : ghostBtn }, t)),
+          ...["batches", "gpus", "events", "submit", "config", "incidents"].map((t) => j("button", { key: t, onClick: () => setTab(t), style: tab === t ? btn(T.brand) : ghostBtn }, t)),
           j("span", { style: { flex: 1 } }),
           j("button", { onClick: onClose, style: ghostBtn }, "\xD7")
         ]),
@@ -679,6 +799,7 @@ function apply(cctx, config) {
         tab === "events" && j("pre", { style: { ...pre, maxHeight: "55vh", overflow: "auto" } }, stream.lines.join("\n") || "(no events yet)"),
         tab === "submit" && j(SubmitTab, null),
         tab === "config" && j(ConfigTab, null),
+        tab === "incidents" && j(IncidentsTab, null),
         logTask && j(LogViewer, { taskId: logTask, onClose: () => setLogTask(null) })
       ])
     ]);

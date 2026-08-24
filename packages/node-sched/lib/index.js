@@ -412,6 +412,31 @@ function apply(ctx, config) {
 
 			ctx.webServer.register({
 				kind: "prefix",
+				path: "/sched/api/incidents",
+				handler: async (req, res) => {
+					try {
+						const u = new URL(req.url, "http://x");
+						const id = u.searchParams.get("id");
+						const job = u.searchParams.get("job");
+						const gpu = u.searchParams.get("gpu");
+						const lim = parseInt(u.searchParams.get("limit") || "30", 10) || 30;
+						let cmd = `${S} incidents --json --limit ${lim}`;
+						if (id && /^\d+$/.test(id)) {
+							cmd = `${S} incidents ${parseInt(id, 10)} --json`;
+						} else {
+							if (job) cmd += ` --job ${shellQuote(job)}`;
+							if (gpu !== null && /^\d+$/.test(gpu)) cmd += ` --gpu ${parseInt(gpu, 10)}`;
+						}
+						const r = await query(cmd);
+						await json(res, { ok: r.ok, text: r.text });
+					} catch (e) {
+						await json(res, { ok: false, text: String(e.message ?? e) }, 400);
+					}
+				},
+			}),
+
+			ctx.webServer.register({
+				kind: "prefix",
 				path: "/sched/api/config",
 				handler: async (req, res) => {
 					try {
