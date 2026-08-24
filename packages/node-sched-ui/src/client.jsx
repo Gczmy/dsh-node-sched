@@ -41,7 +41,7 @@ const COLORS = {
 };
 
 function apply(cctx, config) {
-	const { useEffect, useState, useCallback } = require("react");
+	const { useEffect, useState, useCallback, useRef, memo } = require("react");
 	const { jsx: _jsx } = require("react/jsx-runtime");
 	const j = (tag, props, ...kids) => {
 		const p = { ...(props ?? {}) };
@@ -305,39 +305,59 @@ function apply(cctx, config) {
 			]);
 		}
 
-		function IncidentsTab() {
+		const IncidentsTab = memo(function IncidentsTab() {
+			// 冻结式阅读: 挂载时取一次快照, 阅读期间绝不自动刷新;
+			// 手动刷新静默更新(不折叠已展开详情); 切走再回来 = 新快照重新冻结。
 			const [list, setList] = useState(null);
 			const [detail, setDetail] = useState(null);
+			const [frozenAt, setFrozenAt] = useState("");
 			const [msg, setMsg] = useState("");
-			const load = useCallback(() => {
-				fetch("/sched/api/incidents?limit=30").then((r) => r.json()).then((d) => {
-					if (!d.ok) { setMsg("❌ " + (d.text || "").slice(0, 120)); return; }
-					const parsed = JSON.parse(d.text);
-					setList(parsed.incidents || []);
-				}).catch(() => setMsg("❌ 加载异常"));
-			}, []);
-			useEffect(() => { load(); }, [load]);
-			const view = (id) => {
-				setDetail({ loading: true });
-				fetch(`/sched/api/incidents?id=${id}`).then((r) => r.json()).then((d) => {
-					if (!d.ok) { setDetail({ error: d.text }); return; }
-					setDetail(JSON.parse(d.text).incident);
-				}).catch(() => setDetail({ error: "加载失败" }));
-			};
+			const detailIdRef = useRef(null);
+			const busyRef = useRef(false);
 
-			if (msg && !list) return j("div", { style: { color: T.err, fontSize: 11 } }, msg);
-			if (!list) return j("div", { style: { color: T.label2, fontSize: 11 } }, "loading…");
+			const view = useCallback(async (id, silent) => {
+				if (!silent) setDetail({ id, loading: true });
+				detailIdRef.current = id;
+				try {
+					const r = await fetch(`/sched/api/incidents?id=${id}`);
+					const d = await r.json();
+					if (!d.ok) { setDetail({ id, error: d.text }); return; }
+					setDetail(JSON.parse(d.text).incident);
+				} catch (e) { setDetail({ id, error: String(e) }); }
+			}, []);
+
+			const load = useCallback(async () => {
+				if (busyRef.current) return;
+				busyRef.current = true;
+				try {
+					const r = await fetch("/sched/api/incidents?limit=30");
+					const d = await r.json();
+					if (!d.ok) { setMsg("❌ " + (d.text || "").slice(0, 120)); return; }
+					setList(JSON.parse(d.text).incidents || []);
+					setFrozenAt(new Date().toLocaleTimeString("zh-CN", { hour12: false }));
+					// 静默刷新已展开的详情 (不折叠、不闪加载态)
+					if (detailIdRef.current) await view(detailIdRef.current, true);
+				} catch (e) { setMsg("❌ " + String(e)); }
+				finally { busyRef.current = false; }
+			}, [view]);
+
+			useEffect(() => { load(); }, [load]);
+
+			if (!list) return j("div", { style: { color: T.label2, fontSize: 11 } }, msg || "loading…");
 
 			const p = detail && !detail.loading && !detail.error ? detail.payload || {} : null;
 			const failed = p ? p.failed || {} : {};
 			const mem = p ? p.memory || {} : {};
 
 			return jsxs2("div", { style: { fontSize: 11 } }, [
-				jsxs2("div", { style: { display: "flex", alignItems: "center", marginBottom: 6 } }, [
-					j("span", { style: { fontWeight: 600, color: T.brand } },
-						`OOM/故障事故快照 (${list.length})`),
+				jsxs2("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 6,
+					padding: "5px 8px", borderRadius: 6, background: T.bgLayer,
+					border: `1px solid ${T.border}` } }, [
+					j("span", { style: { color: T.warn } }, "⏸ 冻结"),
+					j("span", { style: { color: T.label2 } },
+						`快照时间 ${frozenAt || "…"} —— 阅读期间内容不变。点「刷新」或切走再回来获取最新。`),
 					j("span", { style: { flex: 1 } }),
-					j(ArmButton, { label: "刷新", color: T.brand, onConfirm: load }),
+					j("button", { onClick: () => load(), style: btn(T.brand) }, "刷新"),
 				]),
 				list.length === 0 && j("div", { style: { color: T.label2 } },
 					"暂无事故快照 (OOM/gpu_fault 发生时自动采集)"),
@@ -359,7 +379,8 @@ function apply(cctx, config) {
 					jsxs2("div", { style: { marginBottom: 4 } }, [
 						j("span", { style: { fontWeight: 600, color: T.brand } },
 							`#${detail.id} ${detail.kind} @ gpu${detail.gpu_idx ?? "-"}`),
-						j("button", { onClick: () => setDetail(null), style: { ...ghostBtn, marginLeft: 8 } }, "收起"),
+						j("button", { onClick: () => { setDetail(null); detailIdRef.current = null; },
+							style: { ...ghostBtn, marginLeft: 8 } }, "收起"),
 					]),
 					j("div", { style: { color: T.label2, fontSize: 10, marginBottom: 4 } },
 						`${detail.ts} · job ${detail.job_id} · batch ${detail.batch_id}`),
@@ -377,7 +398,7 @@ function apply(cctx, config) {
 					]),
 					(detail.verdicts || []).length > 0 && jsxs2("div", { style: { marginTop: 6 } }, [
 						j("div", { style: { color: T.warn, fontWeight: 600 } }, "判读假设:"),
-						...detail.verdicts.map((v, i) => j("div", { key: i, style: { color: T.warn, paddingLeft: 10 } }, "? " + v)),
+						...detail.verdicts.map((v, i2) => j("div", { key: i2, style: { color: T.warn, paddingLeft: 10 } }, "? " + v)),
 					]),
 					p.log_excerpt && jsxs2("div", {}, [
 						j("div", { style: { color: T.label2, marginTop: 6 } }, "日志摘录:"),
@@ -386,7 +407,7 @@ function apply(cctx, config) {
 				]),
 				msg && j("div", { style: { color: T.err, fontSize: 11 } }, msg),
 			]);
-		}
+		});
 
 		function ConfigTab() {
 			const [cfgText, setCfgText] = useState("");   // 原始 JSON 文本 (可编辑, 高级模式)
@@ -629,14 +650,14 @@ function apply(cctx, config) {
 						.map((b) => j(BatchRow, { key: b.id ?? b.name, b })),
 				]),
 				]),
-				tab === "gpus" && jsxs2("div", null, [
+				tab === "gpus" && jsxs2("div", { key: "tab-gpus" }, [
 					raw && (raw.gpus ?? []).map((g) => j(GpuRow, { key: g.idx, g })),
 					!raw && j("div", null, "loading…"),
 				]),
-				tab === "events" && j("pre", { style: { ...pre, maxHeight: "55vh", overflow: "auto" } }, stream.lines.join("\n") || "(no events yet)"),
-				tab === "submit" && j(SubmitTab, null),
-				tab === "config" && j(ConfigTab, null),
-				tab === "incidents" && j(IncidentsTab, null),
+				tab === "events" && j("pre", { key: "tab-events", style: { ...pre, maxHeight: "55vh", overflow: "auto" } }, stream.lines.join("\n") || "(no events yet)"),
+				tab === "submit" && j(SubmitTab, { key: "tab-submit" }),
+				tab === "config" && j(ConfigTab, { key: "tab-config" }),
+				tab === "incidents" && j(IncidentsTab, { key: "tab-incidents" }),
 				logTask && j(LogViewer, { taskId: logTask, onClose: () => setLogTask(null) }),
 			]),
 		]);

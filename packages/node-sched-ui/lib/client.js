@@ -67,7 +67,7 @@ var COLORS = {
   queued: T.label2
 };
 function apply(cctx, config) {
-  const { useEffect, useState, useCallback } = require("react");
+  const { useEffect, useState, useCallback, useRef, memo } = require("react");
   const { jsx: _jsx } = require("react/jsx-runtime");
   const j = (tag, props, ...kids) => {
     const p = { ...props ?? {} };
@@ -388,47 +388,73 @@ function apply(cctx, config) {
         }, "\u786E\u8BA4 stop")
       ]);
     }
-    function IncidentsTab() {
+    const IncidentsTab = memo(function IncidentsTab2() {
       const [list, setList] = useState(null);
       const [detail, setDetail] = useState(null);
+      const [frozenAt, setFrozenAt] = useState("");
       const [msg, setMsg] = useState("");
-      const load = useCallback(() => {
-        fetch("/sched/api/incidents?limit=30").then((r) => r.json()).then((d) => {
+      const detailIdRef = useRef(null);
+      const busyRef = useRef(false);
+      const view = useCallback(async (id, silent) => {
+        if (!silent) setDetail({ id, loading: true });
+        detailIdRef.current = id;
+        try {
+          const r = await fetch(`/sched/api/incidents?id=${id}`);
+          const d = await r.json();
+          if (!d.ok) {
+            setDetail({ id, error: d.text });
+            return;
+          }
+          setDetail(JSON.parse(d.text).incident);
+        } catch (e) {
+          setDetail({ id, error: String(e) });
+        }
+      }, []);
+      const load = useCallback(async () => {
+        if (busyRef.current) return;
+        busyRef.current = true;
+        try {
+          const r = await fetch("/sched/api/incidents?limit=30");
+          const d = await r.json();
           if (!d.ok) {
             setMsg("\u274C " + (d.text || "").slice(0, 120));
             return;
           }
-          const parsed = JSON.parse(d.text);
-          setList(parsed.incidents || []);
-        }).catch(() => setMsg("\u274C \u52A0\u8F7D\u5F02\u5E38"));
-      }, []);
+          setList(JSON.parse(d.text).incidents || []);
+          setFrozenAt((/* @__PURE__ */ new Date()).toLocaleTimeString("zh-CN", { hour12: false }));
+          if (detailIdRef.current) await view(detailIdRef.current, true);
+        } catch (e) {
+          setMsg("\u274C " + String(e));
+        } finally {
+          busyRef.current = false;
+        }
+      }, [view]);
       useEffect(() => {
         load();
       }, [load]);
-      const view = (id) => {
-        setDetail({ loading: true });
-        fetch(`/sched/api/incidents?id=${id}`).then((r) => r.json()).then((d) => {
-          if (!d.ok) {
-            setDetail({ error: d.text });
-            return;
-          }
-          setDetail(JSON.parse(d.text).incident);
-        }).catch(() => setDetail({ error: "\u52A0\u8F7D\u5931\u8D25" }));
-      };
-      if (msg && !list) return j("div", { style: { color: T.err, fontSize: 11 } }, msg);
-      if (!list) return j("div", { style: { color: T.label2, fontSize: 11 } }, "loading\u2026");
+      if (!list) return j("div", { style: { color: T.label2, fontSize: 11 } }, msg || "loading\u2026");
       const p = detail && !detail.loading && !detail.error ? detail.payload || {} : null;
       const failed = p ? p.failed || {} : {};
       const mem = p ? p.memory || {} : {};
       return jsxs2("div", { style: { fontSize: 11 } }, [
-        jsxs2("div", { style: { display: "flex", alignItems: "center", marginBottom: 6 } }, [
+        jsxs2("div", { style: {
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          marginBottom: 6,
+          padding: "5px 8px",
+          borderRadius: 6,
+          background: T.bgLayer,
+          border: `1px solid ${T.border}`
+        } }, [
+          j("span", { style: { color: T.warn } }, "\u23F8 \u51BB\u7ED3"),
           j(
             "span",
-            { style: { fontWeight: 600, color: T.brand } },
-            `OOM/\u6545\u969C\u4E8B\u6545\u5FEB\u7167 (${list.length})`
+            { style: { color: T.label2 } },
+            `\u5FEB\u7167\u65F6\u95F4 ${frozenAt || "\u2026"} \u2014\u2014 \u9605\u8BFB\u671F\u95F4\u5185\u5BB9\u4E0D\u53D8\u3002\u70B9\u300C\u5237\u65B0\u300D\u6216\u5207\u8D70\u518D\u56DE\u6765\u83B7\u53D6\u6700\u65B0\u3002`
           ),
           j("span", { style: { flex: 1 } }),
-          j(ArmButton, { label: "\u5237\u65B0", color: T.brand, onConfirm: load })
+          j("button", { onClick: () => load(), style: btn(T.brand) }, "\u5237\u65B0")
         ]),
         list.length === 0 && j(
           "div",
@@ -466,7 +492,13 @@ function apply(cctx, config) {
               { style: { fontWeight: 600, color: T.brand } },
               `#${detail.id} ${detail.kind} @ gpu${detail.gpu_idx ?? "-"}`
             ),
-            j("button", { onClick: () => setDetail(null), style: { ...ghostBtn, marginLeft: 8 } }, "\u6536\u8D77")
+            j("button", {
+              onClick: () => {
+                setDetail(null);
+                detailIdRef.current = null;
+              },
+              style: { ...ghostBtn, marginLeft: 8 }
+            }, "\u6536\u8D77")
           ]),
           j(
             "div",
@@ -498,7 +530,7 @@ function apply(cctx, config) {
           ]),
           (detail.verdicts || []).length > 0 && jsxs2("div", { style: { marginTop: 6 } }, [
             j("div", { style: { color: T.warn, fontWeight: 600 } }, "\u5224\u8BFB\u5047\u8BBE:"),
-            ...detail.verdicts.map((v, i) => j("div", { key: i, style: { color: T.warn, paddingLeft: 10 } }, "? " + v))
+            ...detail.verdicts.map((v, i2) => j("div", { key: i2, style: { color: T.warn, paddingLeft: 10 } }, "? " + v))
           ]),
           p.log_excerpt && jsxs2("div", {}, [
             j("div", { style: { color: T.label2, marginTop: 6 } }, "\u65E5\u5FD7\u6458\u5F55:"),
@@ -507,7 +539,7 @@ function apply(cctx, config) {
         ]),
         msg && j("div", { style: { color: T.err, fontSize: 11 } }, msg)
       ]);
-    }
+    });
     function ConfigTab() {
       const [cfgText, setCfgText] = useState("");
       const [cfg, setCfg] = useState(null);
@@ -792,14 +824,14 @@ function apply(cctx, config) {
             (raw.batches ?? []).filter((b) => !["done", "skip"].includes(b.status)).filter((b) => !projFilter || b.project === projFilter).map((b) => j(BatchRow, { key: b.id ?? b.name, b }))
           ])
         ]),
-        tab === "gpus" && jsxs2("div", null, [
+        tab === "gpus" && jsxs2("div", { key: "tab-gpus" }, [
           raw && (raw.gpus ?? []).map((g) => j(GpuRow, { key: g.idx, g })),
           !raw && j("div", null, "loading\u2026")
         ]),
-        tab === "events" && j("pre", { style: { ...pre, maxHeight: "55vh", overflow: "auto" } }, stream.lines.join("\n") || "(no events yet)"),
-        tab === "submit" && j(SubmitTab, null),
-        tab === "config" && j(ConfigTab, null),
-        tab === "incidents" && j(IncidentsTab, null),
+        tab === "events" && j("pre", { key: "tab-events", style: { ...pre, maxHeight: "55vh", overflow: "auto" } }, stream.lines.join("\n") || "(no events yet)"),
+        tab === "submit" && j(SubmitTab, { key: "tab-submit" }),
+        tab === "config" && j(ConfigTab, { key: "tab-config" }),
+        tab === "incidents" && j(IncidentsTab, { key: "tab-incidents" }),
         logTask && j(LogViewer, { taskId: logTask, onClose: () => setLogTask(null) })
       ])
     ]);
