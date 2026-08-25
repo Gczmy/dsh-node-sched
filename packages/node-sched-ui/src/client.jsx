@@ -48,6 +48,7 @@ function apply(cctx, config) {
 	let INC_CACHE = null;        // {list, frozenAt}
 	let INC_OPEN_ID = null;      // 当前展开的 incident id
 	let INC_DETAIL = null;       // {id -> incident} 已取详情缓存
+	let INC_VIEW_GEN = 0;        // 详情请求代数 —— 收起后丢弃在途响应, 防竞态重展开
 	const { jsx: _jsx } = require("react/jsx-runtime");
 	const j = (tag, props, ...kids) => {
 		const p = { ...(props ?? {}) };
@@ -332,14 +333,19 @@ function apply(cctx, config) {
 			};
 
 			const view = useCallback(async (id, silent) => {
+				const gen = ++INC_VIEW_GEN;
 				if (!silent) setDetail({ id, loading: true });
 				INC_OPEN_ID = id;
 				try {
 					const r = await fetch(`/sched/api/incidents?id=${id}`);
 					const d = await r.json();
+					// 响应返回时若已收起/切换, 丢弃过期结果 (防竞态重展开)
+					if (gen !== INC_VIEW_GEN || INC_OPEN_ID !== id) return;
 					if (!d.ok) { setDetail({ id, error: d.text }); return; }
 					applyDetail(JSON.parse(d.text).incident);
-				} catch (e) { setDetail({ id, error: String(e) }); }
+				} catch (e) {
+					if (gen === INC_VIEW_GEN && INC_OPEN_ID === id) setDetail({ id, error: String(e) });
+				}
 			}, []);
 
 			const load = useCallback(async () => {
@@ -394,7 +400,7 @@ function apply(cctx, config) {
 					jsxs2("div", { style: { marginBottom: 4 } }, [
 						j("span", { style: { fontWeight: 600, color: T.brand } },
 							`#${detail.id} ${detail.kind} @ gpu${detail.gpu_idx ?? "-"}`),
-						j("button", { onClick: () => { setDetail(null); INC_OPEN_ID = null; },
+						j("button", { onClick: () => { INC_VIEW_GEN++; setDetail(null); INC_OPEN_ID = null; },
 							style: { ...ghostBtn, marginLeft: 8 } }, "收起"),
 					]),
 					j("div", { style: { color: T.label2, fontSize: 10, marginBottom: 4 } },

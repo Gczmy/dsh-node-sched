@@ -71,6 +71,7 @@ function apply(cctx, config) {
   let INC_CACHE = null;
   let INC_OPEN_ID = null;
   let INC_DETAIL = null;
+  let INC_VIEW_GEN = 0;
   const { jsx: _jsx } = require("react/jsx-runtime");
   const j = (tag, props, ...kids) => {
     const p = { ...props ?? {} };
@@ -409,18 +410,20 @@ function apply(cctx, config) {
         INC_DETAIL[inc.id] = inc;
       };
       const view = useCallback(async (id, silent) => {
+        const gen = ++INC_VIEW_GEN;
         if (!silent) setDetail({ id, loading: true });
         INC_OPEN_ID = id;
         try {
           const r = await fetch(`/sched/api/incidents?id=${id}`);
           const d = await r.json();
+          if (gen !== INC_VIEW_GEN || INC_OPEN_ID !== id) return;
           if (!d.ok) {
             setDetail({ id, error: d.text });
             return;
           }
           applyDetail(JSON.parse(d.text).incident);
         } catch (e) {
-          setDetail({ id, error: String(e) });
+          if (gen === INC_VIEW_GEN && INC_OPEN_ID === id) setDetail({ id, error: String(e) });
         }
       }, []);
       const load = useCallback(async () => {
@@ -507,6 +510,7 @@ function apply(cctx, config) {
             ),
             j("button", {
               onClick: () => {
+                INC_VIEW_GEN++;
                 setDetail(null);
                 INC_OPEN_ID = null;
               },
