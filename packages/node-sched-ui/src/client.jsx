@@ -736,6 +736,11 @@ function apply(cctx, config) {
 	// ── sidebar footer entry: button toggling the fullscreen dashboard ──────
 	function FooterEntry(props) {
 		const [open, setOpen] = useState(false);
+		useEffect(() => {
+			const h = () => setOpen(true);
+			window.addEventListener("nodesched-open", h);
+			return () => window.removeEventListener("nodesched-open", h);
+		}, []);
 		return jsxs2("span", {}, [
 			j("button", {
 				onClick: () => setOpen(true),
@@ -746,19 +751,38 @@ function apply(cctx, config) {
 		]);
 	}
 
-	// ── settings card: compact status + entry hint ──────────────────────────
+	// ── settings card: 标准卡片样式 (与其余组件卡对齐) ─────────────────────
 	function StatusCard() {
 		const [snap] = useSnapshot("/sched/api/status", 30000);
 		const raw = snap?.raw;
-		const gpus = (raw?.gpus ?? []).map((g) => `${g.idx}:${g.status}`).join(" ");
-		const active = (raw?.batches ?? []).filter((b) => !["done", "skip"].includes(b.status)).length;
-		return jsxs2("div", { style: { fontFamily: "ui-monospace,monospace", fontSize: 11, lineHeight: 1.6 } }, [
-			jsxs2("div", {}, [
-				j("b", null, "node-sched"),
-				j("span", { style: { margin: "0 6px", color: T.label2 } }, "GPU"),
-				gpus || "?",
+		const gpus = raw?.gpus ?? [];
+		const batches = raw?.batches ?? [];
+		const stColor = { free: "#22c55e", assigned: "#3b82f6", releasing: "#eab308",
+			unmanaged: "#f97316", quarantined: "#ef4444" };
+		const act = batches.filter((b) => b.status === "active").length;
+		const blk = batches.filter((b) => b.status === "blocked").length;
+		const done = batches.filter((b) => ["done", "skip"].includes(b.status)).length;
+		const openPanel = () => window.dispatchEvent(new CustomEvent("nodesched-open"));
+		return jsxs2("div", { style: {
+			border: `1px solid ${T.border}`, borderRadius: 8, padding: "10px 12px",
+			background: T.bgLayer, fontSize: 11, fontFamily: "ui-monospace,monospace",
+		} }, [
+			jsxs2("div", { style: { display: "flex", alignItems: "center", marginBottom: 8 } }, [
+				j("span", { style: { fontWeight: 700, color: T.brand, fontSize: 12 } },
+					"⚡ node-sched 调度器"),
+				j("span", { style: { flex: 1 } }),
+				j("button", { onClick: openPanel, style: btn(T.brand) }, "打开面板"),
 			]),
-			j("div", { style: { color: T.label2 } }, `活跃/阻塞批次: ${active}；点侧栏底部「⚡ sched 看板」打开完整面板`),
+			jsxs2("div", { style: { display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 } },
+				gpus.map((g) => jsxs2("span", { key: g.idx, style: {
+					border: `1px solid ${T.border}`, borderRadius: 4, padding: "2px 6px",
+					color: stColor[g.status] || T.label2,
+				} }, [
+					j("span", { style: { marginRight: 4, color: T.label } }, "GPU" + g.idx),
+					g.status,
+				]))),
+			jsxs2("div", { style: { color: T.label2 } },
+				`活跃 ${act} · 阻塞 ${blk} · 完成 ${done}`),
 		]);
 	}
 
