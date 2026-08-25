@@ -1145,6 +1145,11 @@ function apply(cctx, config) {
   }
   var retries = 0;
   setTimeout(tryPlaceEntry, 800);
+  setInterval(function() {
+    if (entryPlaced && !document.body.contains(schedEntryBtn)) {
+      tryPlaceEntry();
+    }
+  }, 3e3);
   document.addEventListener("dsh-panel-activate", function(e) {
     if (e.detail !== "sched" && schedIsActive) deactivateSchedPage();
   });

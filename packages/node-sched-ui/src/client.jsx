@@ -941,6 +941,12 @@ function apply(cctx, config) {
 	}
 	var retries = 0;
 	setTimeout(tryPlaceEntry, 800);
+	// 定期检查按钮是否仍在侧栏中 (外壳重渲染会移除手动插入的 DOM)
+	setInterval(function() {
+		if (entryPlaced && !document.body.contains(schedEntryBtn)) {
+			tryPlaceEntry();
+		}
+	}, 3000);
 
 	// 监听其他面板激活 -> 关闭本面板
 	document.addEventListener("dsh-panel-activate", function(e) {
