@@ -959,7 +959,7 @@ function apply(ctx, config) {
 					try {
 						const body = await readBodyJson(req);
 						const id = String(body.id ?? "");
-						const code = String(body.code ?? "");
+						const answer = body.answer ?? {};
 						const resolver = pending2fa.get(id);
 						if (!resolver) {
 							return void json(res, { ok: false, error: "\u8bf7\u6c42\u4e0d\u5b58\u5728\u6216\u5df2\u8fc7\u671f" }, 404);
@@ -967,7 +967,7 @@ function apply(ctx, config) {
 						pending2fa.delete(id);
 						if (answer.kind === "cancel") {
 							ctx.logger.warn("[node-sched] audit 2fa-cancel id=%s (user)", id);
-							resolver(""); // 答案交给引擎；对错由下一次握手结果说话
+							resolver(""); // 空应答 = 放弃握手
 						} else {
 							const code = String(answer.code ?? "");
 							ctx.logger.warn("[node-sched] audit 2fa-answer id=%s", id);
