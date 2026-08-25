@@ -201,6 +201,8 @@ function normalizePayload(payload, requireAll) {
 		const kind = auth.kind;
 		if (!["key", "password", "agent"].includes(kind)) throw new Error("invalid auth kind");
 		out.auth = { kind };
+		// 二因子质询应答（可选，任意主认证方式旁均可携带）
+		if (auth.kbdintPassword) out.auth.kbdintPassword = String(auth.kbdintPassword);
 		if (kind === "key") {
 			out.auth.keyPath = auth.keyPath ? String(auth.keyPath) : undefined;
 			out.auth.passphrase = auth.passphrase !== "" && auth.passphrase !== undefined ? String(auth.passphrase) : undefined;
@@ -303,6 +305,13 @@ export function buildConnectConfig(entry, sock, opts) {
 		keepaliveCountMax: 3,
 	};
 	if (sock !== undefined) config.sock = sock;
+	// B24b: 双因子 —— 服务端在 publickey 部分成功后要求 keyboard-interactive 时，
+	// 用条目内可选的 kbdintPassword 自动应答（HPC 登录节点常见策略）
+	const kbdintAnswer = entry.auth.kbdintPassword ?? (entry.auth.kind === "password" ? entry.auth.password : undefined);
+	if (kbdintAnswer) {
+		config.tryKeyboard = true;
+		config._kbdintAnswer = kbdintAnswer; // 内部约定字段，connectClient 消费
+	}
 	if (entry.auth.kind === "password") {
 		config.password = entry.auth.password;
 	} else if (entry.auth.kind === "agent") {
@@ -340,6 +349,10 @@ function connectClient(config) {
 			reject(error instanceof Error ? error : new Error(String(error)));
 		};
 		client.once("ready", () => { if (!settled) { settled = true; resolve(client); } });
+		// keyboard-interactive 质询：有预存应答则自动回应（无则保持默认失败路径）
+		config._kbdintAnswer !== undefined && client.on("keyboard-interactive", (_name, _instr, _lang, prompts, finish) => {
+			finish(new Array(prompts.length).fill(config._kbdintAnswer));
+		});
 		// Persistent error listener: ssh2 can emit a second 'error' after the
 		// once-listener is consumed (TCP ok, handshake drop); without it that
 		// surfaces as an unhandled 'error' event crashing the host process.
