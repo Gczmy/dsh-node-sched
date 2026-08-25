@@ -926,6 +926,105 @@ function apply(cctx, config) {
     ]);
   }
   function StatusCard() {
+    const [open, setOpen] = useState(false);
+    const [snap] = useSnapshot("/sched/api/status", 3e4);
+    const raw = snap?.raw;
+    const gpus = raw?.gpus ?? [];
+    const batches = raw?.batches ?? [];
+    const stColor = {
+      free: "#22c55e",
+      assigned: "#3b82f6",
+      releasing: "#eab308",
+      unmanaged: "#f97316",
+      quarantined: "#ef4444"
+    };
+    const act = batches.filter((b) => b.status === "active").length;
+    const blk = batches.filter((b) => b.status === "blocked").length;
+    const done = batches.filter((b) => ["done", "skip"].includes(b.status)).length;
+    const freeN = gpus.filter((g) => g.status === "free").length;
+    return jsxs2("div", { style: {
+      border: `1px solid ${T.border}`,
+      borderRadius: 8,
+      background: T.bgLayer,
+      fontSize: 11,
+      overflow: "hidden"
+    } }, [
+      // 收起态摘要行 (点击整行切换)
+      jsxs2("div", {
+        onClick: () => setOpen(!open),
+        style: {
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          padding: "8px 12px",
+          cursor: "pointer",
+          userSelect: "none"
+        }
+      }, [
+        j("span", { style: { color: T.brand } }, "\u26A1"),
+        j("span", { style: { fontWeight: 700 } }, "node-sched \u8C03\u5EA6\u5668"),
+        j(
+          "span",
+          { style: { color: freeN > 0 ? "#22c55e" : T.label2 } },
+          `${freeN}/${gpus.length || "?"} GPU \u7A7A\u95F2`
+        ),
+        (act > 0 || blk > 0) && j(
+          "span",
+          { style: { color: T.label2 } },
+          `\u6D3B\u8DC3 ${act}\xB7 \u963B\u585E ${blk}`
+        ),
+        j("span", { style: { flex: 1 } }),
+        j("span", { style: { color: T.label2, fontSize: 10 } }, open ? "\u25BE" : "\u25B8")
+      ]),
+      // 展开态: GPU 彩片 + 批次统计 + 打开面板按钮
+      open && jsxs2("div", { style: { padding: "0 12px 10px" } }, [
+        jsxs2(
+          "div",
+          { style: { display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 } },
+          gpus.map((g) => jsxs2("span", { key: g.idx, style: {
+            border: `1px solid ${T.border}`,
+            borderRadius: 4,
+            padding: "2px 6px",
+            color: stColor[g.status] || T.label2
+          } }, [
+            j("span", { style: { marginRight: 4, color: T.label } }, "GPU" + g.idx),
+            g.status
+          ]))
+        ),
+        jsxs2("div", { style: { display: "flex", alignItems: "center" } }, [
+          j(
+            "span",
+            { style: { color: T.label2 } },
+            `\u6279\u6B21: \u6D3B\u8DC3 ${act} \xB7 \u963B\u585E ${blk} \xB7 \u5B8C\u6210 ${done}`
+          ),
+          j("span", { style: { flex: 1 } }),
+          j("button", {
+            onClick: () => window.dispatchEvent(new CustomEvent("nodesched-open")),
+            style: btn(T.brand)
+          }, "\u6253\u5F00\u9762\u677F")
+        ])
+      ])
+    ]);
+  }
+  function FooterEntry(props) {
+    const [open, setOpen] = useState(false);
+    useEffect(() => {
+      const h = () => setOpen(true);
+      window.addEventListener("nodesched-open", h);
+      return () => window.removeEventListener("nodesched-open", h);
+    }, []);
+    return jsxs2("span", {}, [
+      j("button", {
+        onClick: () => setOpen(true),
+        title: "node-sched GPU/CPU \u8C03\u5EA6\u770B\u677F",
+        style: { ...ghostBtn, width: "100%", textAlign: "left", padding: "6px 10px", fontSize: 12 }
+      }, "\u26A1 sched \u770B\u677F"),
+      open && j(Dashboard, { onClose: () => {
+        setOpen(false);
+      } })
+    ]);
+  }
+  function StatusCard() {
     const [snap] = useSnapshot("/sched/api/status", 3e4);
     const raw = snap?.raw;
     const gpus = raw?.gpus ?? [];
