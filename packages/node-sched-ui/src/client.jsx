@@ -826,11 +826,9 @@ function apply(cctx, config) {
 			open && jsxs2("div", { style: stBody }, [
 				jsxs2("div", { style: { display: "flex", gap: 6, flexWrap: "wrap" } },
 					gpus.map((g) => jsxs2("span", { key: g.idx, style: {
-						border: `1px solid var(--dsw-alias-border-l2)`, borderRadius: 4,
+						border: `1px solid ${gpuColor[g.status] || "var(--dsw-alias-border-l2)"}`, borderRadius: 4,
 						padding: "2px 6px", fontSize: 11,
-						color: g.status === "free"
-							? "var(--dsw-alias-label-secondary)"
-							: "var(--dsw-alias-label-primary)",
+						color: gpuColor[g.status] || T.label2,
 					} }, [
 						j("b", { style: { marginRight: 4 } }, "GPU" + g.idx),
 						g.status,
