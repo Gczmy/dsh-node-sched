@@ -6644,14 +6644,16 @@ function apply(cctx, config) {
   }
   function KbdintModal({ req }) {
     const [code, setCode] = useState("");
-    const [sending, setSending] = useState(false);
+    const [busy, setBusy] = useState(false);
+    const [dismissedId, setDismissedId] = useState(null);
     useEffect(() => {
       setCode("");
-      setSending(false);
+      setBusy(false);
     }, [req?.id]);
-    if (!req) return null;
+    if (!req || dismissedId === req.id) return null;
     const sendAnswer = async (answer) => {
-      setSending(true);
+      if (busy) return;
+      setBusy(true);
       try {
         await fetch("/sched/ssh/2fa-answer", {
           method: "POST",
@@ -6660,13 +6662,13 @@ function apply(cctx, config) {
         });
       } catch {
       }
+      setDismissedId(req.id);
     };
     const submit = async () => {
-      if (!code.trim() || sending) return;
+      if (!code.trim() || busy) return;
       await sendAnswer({ kind: "code", code: code.trim() });
     };
     const cancel = async () => {
-      if (sending) return;
       await sendAnswer({ kind: "cancel" });
     };
     return j("div", { style: {
@@ -6723,10 +6725,10 @@ function apply(cctx, config) {
           }),
           j(
             "button",
-            { onClick: submit, disabled: !code.trim() || sending, style: btn(T.ok, !code.trim() || sending) },
-            sending ? "\u63D0\u4EA4\u4E2D\u2026" : "\u786E\u8BA4"
+            { onClick: submit, disabled: !code.trim() || busy, style: btn(T.ok, !code.trim() || busy) },
+            busy ? "\u63D0\u4EA4\u4E2D\u2026" : "\u786E\u8BA4"
           ),
-          j("button", { onClick: cancel, disabled: sending, title: "\u653E\u5F03\u672C\u6B21\u8FDE\u63A5", style: { ...ghostBtn, flexShrink: 0 } }, "\u53D6\u6D88")
+          j("button", { onClick: cancel, disabled: busy, title: "\u653E\u5F03\u672C\u6B21\u8FDE\u63A5", style: { ...ghostBtn, flexShrink: 0 } }, "\u53D6\u6D88")
         ]),
         j("div", { style: { fontSize: 11, color: T.label2 } }, "180 \u79D2\u5185\u672A\u63D0\u4EA4\u5C06\u81EA\u52A8\u653E\u5F03\u672C\u6B21\u8FDE\u63A5")
       ])

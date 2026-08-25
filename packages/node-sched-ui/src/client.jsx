@@ -259,25 +259,28 @@ function apply(cctx, config) {
 	// B24c: SSH 2FA 质询弹窗 —— 用户输入动态码回传引擎，连接继续握手
 	function KbdintModal({ req }) {
 		const [code, setCode] = useState("");
-		const [sending, setSending] = useState(false);
-		useEffect(() => { setCode(""); setSending(false); }, [req?.id]);
-		if (!req) return null;
+		const [busy, setBusy] = useState(false);
+		// 已处理过的质询 id：本地关窗（WS 帧不会撤回，需自行记住）
+		const [dismissedId, setDismissedId] = useState(null);
+		useEffect(() => { setCode(""); setBusy(false); }, [req?.id]);
+		if (!req || dismissedId === req.id) return null;
 		const sendAnswer = async (answer) => {
-			setSending(true);
+			if (busy) return;
+			setBusy(true);
 			try {
 				await fetch("/sched/ssh/2fa-answer", {
 					method: "POST", headers: { "content-type": "application/json" },
 					body: JSON.stringify({ id: req.id, answer }),
 				});
 			} catch { /* 引擎侧超时/过期会以连接失败形式呈现 */ }
+			setDismissedId(req.id); // 无论成败，本地质询已了结 → 关窗
 		};
 		const submit = async () => {
-			if (!code.trim() || sending) return;
+			if (!code.trim() || busy) return;
 			await sendAnswer({ kind: "code", code: code.trim() });
 		};
-		// 取消：通知引擎立即放弃本次握手，本地关窗
+		// 取消：通知引擎立即放弃本次握手，并本地关窗
 		const cancel = async () => {
-			if (sending) return;
 			await sendAnswer({ kind: "cancel" });
 		};
 		return j("div", { style: {
@@ -307,9 +310,9 @@ function apply(cctx, config) {
 							border: `1px solid ${T.border2}`, borderRadius: 8, outline: "none",
 							color: T.label, background: "var(--dsw-alias-bg-base)" },
 					}),
-					j("button", { onClick: submit, disabled: !code.trim() || sending, style: btn(T.ok, !code.trim() || sending) },
-						sending ? "\u63d0\u4ea4\u4e2d\u2026" : "\u786e\u8ba4"),
-					j("button", { onClick: cancel, disabled: sending, title: "放弃本次连接", style: { ...ghostBtn, flexShrink: 0 } }, "\u53d6\u6d88"),
+					j("button", { onClick: submit, disabled: !code.trim() || busy, style: btn(T.ok, !code.trim() || busy) },
+						busy ? "\u63d0\u4ea4\u4e2d\u2026" : "\u786e\u8ba4"),
+					j("button", { onClick: cancel, disabled: busy, title: "放弃本次连接", style: { ...ghostBtn, flexShrink: 0 } }, "\u53d6\u6d88"),
 				]),
 				j("div", { style: { fontSize: 11, color: T.label2 } }, "180 秒内未提交将自动放弃本次连接"),
 			]),
