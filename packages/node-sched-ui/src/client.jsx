@@ -260,13 +260,39 @@ function apply(cctx, config) {
 		const [confirmAlias, setConfirmAlias] = useState(null);
 		const [termAlias, setTermAlias] = useState(null);
 
+		const [binding, setBinding] = useState(null); // {alias, mode, sshEntry}
 		const load = useCallback(async () => {
 			try {
-				const r = await fetch("/sched/ssh/hosts").then((r) => r.json());
-				setHosts(r.hosts ?? []);
+				const [h, b] = await Promise.all([
+					fetch("/sched/ssh/hosts").then((r) => r.json()),
+					fetch("/sched/ssh/binding").then((r) => r.json()),
+				]);
+				setHosts(h.hosts ?? []);
+				setBinding(b);
 			} catch { setHosts([]); }
 		}, []);
 		useEffect(() => { load(); }, [load]);
+
+		// B24: 绑定/解绑 sched 主机（诚实反馈：主机必须可达；daemon 状态仅提示）
+		const doBind = async (alias) => {
+			setBusy("bind:" + alias);
+			try {
+				const r = await fetch("/sched/ssh/bind", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ alias }) }).then((r) => r.json());
+				if (r.ok) setMsg(`✅ ${alias} 已设为 SCHED 主机 (${r.latencyMs}ms) · daemon: ${r.probeText || "?"}`);
+				else setMsg(`绑定失败: ${r.error}`);
+				await load();
+			} catch (e) { setMsg("绑定失败: " + e.message); }
+			setBusy("");
+		};
+		const doUnbind = async () => {
+			setBusy("unbind");
+			try {
+				await fetch("/sched/ssh/unbind", { method: "POST" });
+				setMsg(`已解绑，回到 CLI 模式 (sshEntry: ${binding?.sshEntry ?? "?"})`);
+				await load();
+			} catch (e) { setMsg("解绑失败: " + e.message); }
+			setBusy("");
+		};
 
 		const doImport = async () => {
 			setBusy("import");
@@ -298,6 +324,18 @@ function apply(cctx, config) {
 		if (termAlias) return j(SshTerminal, { alias: termAlias, onClose: () => { setTermAlias(null); } });
 
 		return jsxs2("div", { style: { display: "flex", flexDirection: "column", gap: 10 } }, [
+			// B24: SCHED 绑定状态条
+			jsxs2("div", { style: { display: "flex", gap: 10, alignItems: "center", padding: "8px 12px", background: binding?.mode === "engine" ? `color-mix(in srgb, ${T.ok} 10%, transparent)` : T.bgLayer, borderRadius: 10, border: `1px solid ${binding?.mode === "engine" ? `color-mix(in srgb, ${T.ok} 30%, transparent)` : T.border}` } }, [
+				j("span", { style: { fontSize: 13, fontWeight: 700 } }, "SCHED"),
+				j("span", {
+					style: { fontSize: 13, color: binding?.mode === "engine" ? T.ok : T.label2, fontWeight: binding?.mode === "engine" ? 700 : 400 },
+				}, binding?.mode === "engine"
+					? `→ ${binding.alias}（引擎模式，连接池复用）`
+					: `→ sshEntry ${binding?.sshEntry ?? "?"}（CLI 模式）`),
+				j("span", { style: { flex: 1 } }),
+				binding?.mode === "engine" && j("button", { onClick: doUnbind, disabled: !!busy, title: "回到传统 ssh CLI 模式", style: ghostBtn },
+					busy === "unbind" ? "解绑中…" : "解绑"),
+			]),
 			jsxs2("div", { style: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" } }, [
 				j("button", { onClick: doImport, disabled: !!busy, style: btn(T.brand, !!busy) },
 					busy === "import" ? "导入中…" : "从 ~/.ssh/config 导入"),
@@ -306,12 +344,14 @@ function apply(cctx, config) {
 				msg && j("span", { style: { color: msg.includes("失败") ? T.err : T.ok, fontSize: 13 } }, msg),
 			]),
 			hosts === null && j("div", { style: { color: T.label2 } }, "loading…"),
-			hosts !== null && jsxs2("div", { style: { display: "grid", gridTemplateColumns: "minmax(140px,1.2fr) minmax(160px,1.4fr) 90px 90px minmax(120px,1fr) auto auto", gap: "0 10px", alignItems: "center", fontSize: 13 } }, [
+			hosts !== null && jsxs2("div", { style: { display: "grid", gridTemplateColumns: "minmax(140px,1fr) minmax(150px,1.3fr) 70px 80px minmax(110px,1fr) auto auto auto auto", gap: "0 10px", alignItems: "center", fontSize: 13 } }, [
 				j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "别名"),
 				j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "主机"),
 				j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "端口"),
 				j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "认证"),
 				j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "备注/跳板"),
+				j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "SCHED"),
+				j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, ""),
 				j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, ""),
 				j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, ""),
 				...hosts.flatMap((h) => [
@@ -325,6 +365,10 @@ function apply(cctx, config) {
 						? j("button", { key: h.alias + "-c", onClick: () => doDelete(h.alias), style: btn(T.err) }, "确认删除")
 						: j("button", { key: h.alias + "-t", onClick: () => doTest(h.alias), disabled: !!busy, style: ghostBtn },
 							busy === "test:" + h.alias ? "测试中…" : "测试"),
+					binding?.alias === h.alias
+						? j("span", { key: h.alias + "-sb", style: { color: T.ok, fontWeight: 700, fontSize: 12, whiteSpace: "nowrap" } }, "✔ SCHED")
+						: j("button", { key: h.alias + "-bnd", onClick: () => doBind(h.alias), disabled: !!busy, title: "设为 sched 数据源主机（引擎模式，看板数据直连该机）", style: btn(T.brand, !!busy) },
+							busy === "bind:" + h.alias ? "绑定中…" : "设为SCHED"),
 					confirmAlias === h.alias
 						? j("button", { key: h.alias + "-x", onClick: () => setConfirmAlias(null), style: ghostBtn }, "取消")
 						: j("button", { key: h.alias + "-o", onClick: () => setTermAlias(h.alias), style: btn(T.ok) }, "终端"),

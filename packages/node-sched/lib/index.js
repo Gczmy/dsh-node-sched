@@ -25,7 +25,7 @@ import path from "node:path";
 import z from "@deepseek-ai/schemastery";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { WebSocketServer } from "ws";
-import { HostStore, SshEngine } from "./ssh-engine.js";
+import { HostStore, SshEngine, openExecStream } from "./ssh-engine.js";
 
 const name = "node-sched";
 
@@ -157,7 +157,35 @@ function summarizeStatus(d) {
  * instead of failing the mount.
  */
 function apply(ctx, config) {
-	const runRemote = makeRunner(cp, config);
+	// ── B24: 内嵌 SSH 引擎（先于 runRemote 创建：绑定后 sched 命令走引擎通道）──
+	const sshStore = new HostStore();
+	const sshEngine = new SshEngine(sshStore);
+	/** 绑定的 sched 主机别名；null = 传统 ssh CLI 模式 (config.sshEntry)。 */
+	let boundAlias = null;
+
+	const runRemoteCli = makeRunner(cp, config);
+	/**
+	 * B24: 双通道调度。绑定 sched 主机（ssh 面板设置）后，所有 sched 命令
+	 * 走内嵌引擎的 ssh2 持久连接池（复用 TCP、无进程 fork 开销）；未绑定时
+	 * 回落传统 ssh CLI 子进程 (config.sshEntry)。引擎故障诚实报错，不静默回退。
+	 */
+	function runRemote(args, opts = {}) {
+		if (boundAlias) {
+			return sshEngine.exec(boundAlias, args, opts.timeoutMs).then(
+				(r) => ({
+					ok: r.success,
+					code: r.exitCode ?? -1,
+					stdout: r.stdout,
+					stderr: r.stderr + (r.error ? `\n${r.error}` : ""),
+				}),
+				(e) => ({
+					ok: false, code: -1, stdout: "",
+					stderr: `[ssh-engine:${boundAlias}] ${String(e?.message ?? e)}`,
+				}),
+			);
+		}
+		return runRemoteCli(args, opts);
+	}
 	const gate = new WriteGate();
 	let auditSeq = 0;
 
@@ -370,36 +398,48 @@ function apply(ctx, config) {
 
 		// batch.json 上传：内容经 ssh stdin 写远端临时文件（本地不落盘），
 		// dry-run 纯只读预览；submit 走 operate() 门+审计。两者用后即删临时文件。
-		const uploadRemote = (content) => new Promise((resolve, reject) => {
-			const name = `nodesched-upload-${Date.now()}.json`;
-			if (!/^\s*\{/.test(content)) return reject(new Error("content is not a JSON object"));
+		const uploadRemote = async (content) => {
+			if (!/^\s*\{/.test(content)) throw new Error("content is not a JSON object");
 			JSON.parse(content);
-			const child = cp.spawn(
-				"ssh",
-				["-o", `ConnectTimeout=${config.connectTimeoutSec}`, "-o", "BatchMode=yes",
-					config.sshEntry, `cat > /tmp/${name}`],
-			);
-			let err = "";
-			child.stderr.on("data", (d) => { err += d; });
-			child.on("error", reject);
-			child.on("close", (code) => code === 0 ? resolve(`/tmp/${name}`) : reject(new Error(err || "upload failed")));
-			child.stdin.end(content);
-		});
+			const name = `nodesched-upload-${Date.now()}.json`;
+			// B24: 引擎模式走连接池 exec+stdin；CLI 模式走 ssh 子进程 stdin
+			if (boundAlias) {
+				const r = await sshEngine.execStdin(boundAlias, `cat > /tmp/${name}`, content, 60_000);
+				if (!r.success) throw new Error(r.stderr || r.error || "upload failed");
+				return `/tmp/${name}`;
+			}
+			return await new Promise((resolve, reject) => {
+				const child = cp.spawn(
+					"ssh",
+					["-o", `ConnectTimeout=${config.connectTimeoutSec}`, "-o", "BatchMode=yes",
+						config.sshEntry, `cat > /tmp/${name}`],
+				);
+				let err = "";
+				child.stderr.on("data", (d) => { err += d; });
+				child.on("error", reject);
+				child.on("close", (code) => code === 0 ? resolve(`/tmp/${name}`) : reject(new Error(err || "upload failed")));
+				child.stdin.end(content);
+			});
+		};
 		const readBodyJson = async (req) => {
 			let body = "";
 			for await (const chunk of req) body += chunk;
 			return JSON.parse(body);
 		};
 
-		// B20: 双网络入口 —— 支持运行时切换 (校园网内 HPDC / 外 HPDC_outside)。
-		// 覆盖文件优先于 profile 配置; 看板可切换并持久化到该文件。
+		// B20/B24: 双网络入口 + sched 主机绑定。覆盖文件优先于 profile 配置；
+		// ssh 面板可绑定主机（引擎模式）并持久化到该文件。
 		const entryFile = path.join(os.homedir(), ".dsh", "nodesched_entry.json");
 		try {
 			if (fs.existsSync(entryFile)) {
 				const ov = JSON.parse(fs.readFileSync(entryFile, "utf-8"));
 				if (ov && typeof ov.sshEntry === "string" && ov.sshEntry.trim()) {
 					config.sshEntry = ov.sshEntry.trim();
-					ctx.logger.info("[node-sched] ssh 入口覆盖(持久化): %s", cfg.sshEntry);
+					ctx.logger.info("[node-sched] ssh 入口覆盖(持久化): %s", config.sshEntry);
+				}
+				if (ov && typeof ov.schedAlias === "string" && ov.schedAlias.trim()) {
+					boundAlias = ov.schedAlias.trim();
+					ctx.logger.info("[node-sched] sched 主机绑定(持久化): %s (引擎模式)", boundAlias);
 				}
 			}
 		} catch (e) {
@@ -619,6 +659,8 @@ function apply(ctx, config) {
 		const clients = new Set();
 		/** @type {import('node:child_process').ChildProcess | undefined} */
 		let tailChild;
+		/** @type {import('./ssh-engine.js').ExecStream | undefined} */
+		let tailStream;
 		let tailRestartTimer;
 
 		function broadcast(obj) {
@@ -648,30 +690,45 @@ function apply(ctx, config) {
 			}
 			const safeNode = String(nodeName).replace(/[^a-zA-Z0-9.-]/g, "");
 			const remoteCmd = `tail -n 50 -F $HOME/.sched/${safeNode}/scheduler.log 2>/dev/null`;
-			const child = cp.spawn(
-				"ssh",
-				["-o", `ConnectTimeout=${config.connectTimeoutSec}`, "-o", "BatchMode=yes", config.sshEntry, remoteCmd],
-			);
-			tailChild = child;
 			let buffer = "";
-			child.stdout.on("data", (d) => {
-				buffer += d.toString();
+			const onLine = (text) => {
+				buffer += text;
 				let at;
 				while ((at = buffer.indexOf("\n")) !== -1) {
 					const line = buffer.slice(0, at).trimEnd();
 					buffer = buffer.slice(at + 1);
 					if (line) broadcast({ type: "log", line });
 				}
-			});
-			child.on("close", () => {
-				tailChild = undefined;
+			};
+			const onEnd = () => {
+				tailChild = undefined; tailStream = undefined;
 				if (clients.size > 0 && !tailRestartTimer) {
 					tailRestartTimer = setTimeout(() => {
 						tailRestartTimer = undefined;
 						startTail().catch(() => {});
 					}, 5_000);
 				}
-			});
+			};
+			// B24: 引擎模式走独立 exec 流通道；CLI 模式走 ssh 子进程
+			if (boundAlias) {
+				openExecStream(sshEngine, boundAlias, remoteCmd).then((stream) => {
+					if (tailChild || tailStream) { try { stream.close(); } catch {} return; }
+					tailStream = stream;
+					stream.onData = (chunk) => onLine(chunk.toString("utf8"));
+					stream.onClose = onEnd;
+				}).catch((e) => {
+					ctx.logger.warn("[node-sched] engine tail failed (%s): %s", boundAlias, String(e.message ?? e));
+					onEnd();
+				});
+				return;
+			}
+			const child = cp.spawn(
+				"ssh",
+				["-o", `ConnectTimeout=${config.connectTimeoutSec}`, "-o", "BatchMode=yes", config.sshEntry, remoteCmd],
+			);
+			tailChild = child;
+			child.stdout.on("data", (d) => onLine(d.toString()));
+			child.on("close", onEnd);
 		}
 
 		// Periodic status heartbeat so quiet stretches still refresh dashboards.
@@ -698,11 +755,7 @@ function apply(ctx, config) {
 		);
 
 		// ── B22: 内嵌 SSH 引擎（复刻自 Apache-2.0 dsh-ssh，见 ssh-engine.js）──
-		// 主机 CRUD + ~/.ssh/config 导入 + 连接池 exec + xterm WS PTY 终端。
-		// 安全模型：所有路由仅限 loopback（这些接口能在远程服务器执行命令），
-		// 秘密只存 ~/.dsh/dsh-ssh.json (0600)，浏览器只见无秘密摘要。
-		const sshStore = new HostStore();
-		const sshEngine = new SshEngine(sshStore);
+		// 引擎实例在 apply() 顶部创建（B24: runRemote 双通道需要）；此处仅注册清理。
 		postApplyCleanup = () => sshEngine.dispose();
 		/** Loopback-only fence: these endpoints execute remote commands. */
 		const loopbackOnly = (req, res) => {
@@ -792,6 +845,73 @@ function apply(ctx, config) {
 					} catch (e) {
 						json(res, { success: false, exitCode: null, timedOut: false, stdout: "", stderr: "", durationMs: 0, error: String(e.message ?? e) });
 					}
+				},
+			}),
+
+			ctx.webServer.register({
+				kind: "prefix",
+				path: "/sched/ssh/binding",
+				handler: async (req, res) => {
+					if (!loopbackOnly(req, res)) return;
+					json(res, {
+						alias: boundAlias,
+						mode: boundAlias ? "engine" : "cli",
+						sshEntry: config.sshEntry,
+					});
+				},
+			}),
+
+			ctx.webServer.register({
+				kind: "prefix",
+				path: "/sched/ssh/bind",
+				handler: async (req, res) => {
+					if (!loopbackOnly(req, res)) return;
+					try {
+						const body = await readBodyJson(req);
+						const alias = String(body.alias ?? "").trim();
+						if (!alias || !/^[A-Za-z0-9_.-]+$/.test(alias)) {
+							return void json(res, { ok: false, error: "invalid alias" }, 400);
+						}
+						if (!sshStore.find(alias)) {
+							return void json(res, { ok: false, error: `alias '${alias}' not in host store` }, 404);
+						}
+						// 诚实反馈：主机必须可达才允许绑定；daemon 状态只提示不强阻
+						const reach = await sshEngine.test(alias);
+						if (!reach.ok) {
+							return void json(res, { ok: false, error: `\u4e3b\u673a\u4e0d\u53ef\u8fbe: ${reach.error ?? "?"}`, reachable: false });
+						}
+						let probeText = "";
+						try {
+							const pr = await sshEngine.exec(alias, `${S} daemon status`, 25_000);
+							probeText = (pr.stdout || pr.stderr || "").split("\n")[0].slice(0, 100);
+						} catch (e) {
+							probeText = "\u63a2\u6d4b\u5931\u8d25: " + String(e.message ?? e).slice(0, 80);
+						}
+						boundAlias = alias;
+						fs.mkdirSync(path.dirname(entryFile), { recursive: true });
+						fs.writeFileSync(entryFile,
+							JSON.stringify({ sshEntry: config.sshEntry, schedAlias: alias }, null, 2));
+						ctx.logger.warn("[node-sched] audit #%d sched-bind -> %s (engine mode)", ++auditSeq, alias);
+						json(res, { ok: true, mode: "engine", alias, latencyMs: reach.latencyMs, probeText });
+					} catch (e) {
+						json(res, { ok: false, error: String(e.message ?? e) }, 400);
+					}
+				},
+			}),
+
+			ctx.webServer.register({
+				kind: "prefix",
+				path: "/sched/ssh/unbind",
+				handler: async (req, res) => {
+					if (!loopbackOnly(req, res)) return;
+					const prev = boundAlias;
+					boundAlias = null;
+					try {
+						fs.writeFileSync(entryFile,
+							JSON.stringify({ sshEntry: config.sshEntry }, null, 2));
+					} catch { /* \u6301\u4e45\u5316\u5931\u8d25\u4e0d\u963b\u585e\u89e3\u7ed1 */ }
+					ctx.logger.warn("[node-sched] audit #%d sched-unbind <- %s", ++auditSeq, prev);
+					json(res, { ok: true, prev, mode: "cli", sshEntry: config.sshEntry });
 				},
 			}),
 		);

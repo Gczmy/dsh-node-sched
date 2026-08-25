@@ -6647,10 +6647,15 @@ function apply(cctx, config) {
     const [msg, setMsg] = useState("");
     const [confirmAlias, setConfirmAlias] = useState(null);
     const [termAlias, setTermAlias] = useState(null);
+    const [binding, setBinding] = useState(null);
     const load = useCallback(async () => {
       try {
-        const r = await fetch("/sched/ssh/hosts").then((r2) => r2.json());
-        setHosts(r.hosts ?? []);
+        const [h, b] = await Promise.all([
+          fetch("/sched/ssh/hosts").then((r) => r.json()),
+          fetch("/sched/ssh/binding").then((r) => r.json())
+        ]);
+        setHosts(h.hosts ?? []);
+        setBinding(b);
       } catch {
         setHosts([]);
       }
@@ -6658,6 +6663,29 @@ function apply(cctx, config) {
     useEffect(() => {
       load();
     }, [load]);
+    const doBind = async (alias) => {
+      setBusy("bind:" + alias);
+      try {
+        const r = await fetch("/sched/ssh/bind", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ alias }) }).then((r2) => r2.json());
+        if (r.ok) setMsg(`\u2705 ${alias} \u5DF2\u8BBE\u4E3A SCHED \u4E3B\u673A (${r.latencyMs}ms) \xB7 daemon: ${r.probeText || "?"}`);
+        else setMsg(`\u7ED1\u5B9A\u5931\u8D25: ${r.error}`);
+        await load();
+      } catch (e) {
+        setMsg("\u7ED1\u5B9A\u5931\u8D25: " + e.message);
+      }
+      setBusy("");
+    };
+    const doUnbind = async () => {
+      setBusy("unbind");
+      try {
+        await fetch("/sched/ssh/unbind", { method: "POST" });
+        setMsg(`\u5DF2\u89E3\u7ED1\uFF0C\u56DE\u5230 CLI \u6A21\u5F0F (sshEntry: ${binding?.sshEntry ?? "?"})`);
+        await load();
+      } catch (e) {
+        setMsg("\u89E3\u7ED1\u5931\u8D25: " + e.message);
+      }
+      setBusy("");
+    };
     const doImport = async () => {
       setBusy("import");
       try {
@@ -6694,6 +6722,19 @@ function apply(cctx, config) {
       setTermAlias(null);
     } });
     return jsxs2("div", { style: { display: "flex", flexDirection: "column", gap: 10 } }, [
+      // B24: SCHED 绑定状态条
+      jsxs2("div", { style: { display: "flex", gap: 10, alignItems: "center", padding: "8px 12px", background: binding?.mode === "engine" ? `color-mix(in srgb, ${T.ok} 10%, transparent)` : T.bgLayer, borderRadius: 10, border: `1px solid ${binding?.mode === "engine" ? `color-mix(in srgb, ${T.ok} 30%, transparent)` : T.border}` } }, [
+        j("span", { style: { fontSize: 13, fontWeight: 700 } }, "SCHED"),
+        j("span", {
+          style: { fontSize: 13, color: binding?.mode === "engine" ? T.ok : T.label2, fontWeight: binding?.mode === "engine" ? 700 : 400 }
+        }, binding?.mode === "engine" ? `\u2192 ${binding.alias}\uFF08\u5F15\u64CE\u6A21\u5F0F\uFF0C\u8FDE\u63A5\u6C60\u590D\u7528\uFF09` : `\u2192 sshEntry ${binding?.sshEntry ?? "?"}\uFF08CLI \u6A21\u5F0F\uFF09`),
+        j("span", { style: { flex: 1 } }),
+        binding?.mode === "engine" && j(
+          "button",
+          { onClick: doUnbind, disabled: !!busy, title: "\u56DE\u5230\u4F20\u7EDF ssh CLI \u6A21\u5F0F", style: ghostBtn },
+          busy === "unbind" ? "\u89E3\u7ED1\u4E2D\u2026" : "\u89E3\u7ED1"
+        )
+      ]),
       jsxs2("div", { style: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" } }, [
         j(
           "button",
@@ -6708,12 +6749,14 @@ function apply(cctx, config) {
         msg && j("span", { style: { color: msg.includes("\u5931\u8D25") ? T.err : T.ok, fontSize: 13 } }, msg)
       ]),
       hosts === null && j("div", { style: { color: T.label2 } }, "loading\u2026"),
-      hosts !== null && jsxs2("div", { style: { display: "grid", gridTemplateColumns: "minmax(140px,1.2fr) minmax(160px,1.4fr) 90px 90px minmax(120px,1fr) auto auto", gap: "0 10px", alignItems: "center", fontSize: 13 } }, [
+      hosts !== null && jsxs2("div", { style: { display: "grid", gridTemplateColumns: "minmax(140px,1fr) minmax(150px,1.3fr) 70px 80px minmax(110px,1fr) auto auto auto auto", gap: "0 10px", alignItems: "center", fontSize: 13 } }, [
         j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "\u522B\u540D"),
         j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "\u4E3B\u673A"),
         j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "\u7AEF\u53E3"),
         j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "\u8BA4\u8BC1"),
         j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "\u5907\u6CE8/\u8DF3\u677F"),
+        j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "SCHED"),
+        j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, ""),
         j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, ""),
         j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, ""),
         ...hosts.flatMap((h) => [
@@ -6730,6 +6773,11 @@ function apply(cctx, config) {
             "button",
             { key: h.alias + "-t", onClick: () => doTest(h.alias), disabled: !!busy, style: ghostBtn },
             busy === "test:" + h.alias ? "\u6D4B\u8BD5\u4E2D\u2026" : "\u6D4B\u8BD5"
+          ),
+          binding?.alias === h.alias ? j("span", { key: h.alias + "-sb", style: { color: T.ok, fontWeight: 700, fontSize: 12, whiteSpace: "nowrap" } }, "\u2714 SCHED") : j(
+            "button",
+            { key: h.alias + "-bnd", onClick: () => doBind(h.alias), disabled: !!busy, title: "\u8BBE\u4E3A sched \u6570\u636E\u6E90\u4E3B\u673A\uFF08\u5F15\u64CE\u6A21\u5F0F\uFF0C\u770B\u677F\u6570\u636E\u76F4\u8FDE\u8BE5\u673A\uFF09", style: btn(T.brand, !!busy) },
+            busy === "bind:" + h.alias ? "\u7ED1\u5B9A\u4E2D\u2026" : "\u8BBE\u4E3ASCHED"
           ),
           confirmAlias === h.alias ? j("button", { key: h.alias + "-x", onClick: () => setConfirmAlias(null), style: ghostBtn }, "\u53D6\u6D88") : j("button", { key: h.alias + "-o", onClick: () => setTermAlias(h.alias), style: btn(T.ok) }, "\u7EC8\u7AEF")
         ])

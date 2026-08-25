@@ -250,6 +250,11 @@ export class SshEngine {
 		return execCommand(this, alias, command, timeoutMs);
 	}
 
+	/** 带 stdin 载荷的执行（远端临时文件写入等）。 */
+	async execStdin(alias, command, stdinData, timeoutMs) {
+		return execCommand(this, alias, command, timeoutMs, stdinData);
+	}
+
 	async openShell(alias, size) {
 		return openShell(this, alias, size);
 	}
@@ -464,7 +469,7 @@ function appendOutput(target, chunk, maxBytes) {
 	target.text += chunk.toString("utf8");
 }
 
-export async function execCommand(engine, alias, command, timeoutMs) {
+export async function execCommand(engine, alias, command, timeoutMs, stdinData) {
 	const started = Date.now();
 	const budget = timeoutMs !== undefined && timeoutMs > 0 ? timeoutMs : engine.opts.defaultExecTimeoutMs;
 	return withClient(engine, alias, async (client) => {
@@ -493,6 +498,10 @@ export async function execCommand(engine, alias, command, timeoutMs) {
 				}, budget);
 				stream.on("data", (chunk) => appendOutput(stdout, chunk, engine.opts.maxOutputBytes));
 				stream.stderr.on("data", (chunk) => appendOutput(stderr, chunk, engine.opts.maxOutputBytes));
+				// stdin 载荷（如远端临时文件内容）：写完即关 stdin，远端 cat/管道 收尾
+				if (stdinData !== undefined) {
+					try { stream.end(stdinData); } catch { /* channel gone */ }
+				}
 				stream.on("close", (code) => {
 					if (settled) return;
 					settled = true;
@@ -518,7 +527,43 @@ export async function execCommand(engine, alias, command, timeoutMs) {
 	});
 }
 
-// ─────────────────────────────────────────────────── PTY shell (terminal) ──
+/**
+ * Open a long-running exec stream (log tail 等)：独立连接 + 持久通道，
+ * 行数据经 onData 交付；close() 断开。与 openShell 同样的隔离原则。
+ */
+export async function openExecStream(engine, alias, command) {
+	const entry = engine.store.find(alias);
+	if (!entry) throw new Error(`alias '${alias}' not found — add it first`);
+	const { client, hops } = await connectChain(engine, entry);
+	return await new Promise((resolve, reject) => {
+		client.exec(command, (error, stream) => {
+			if (error) {
+				try { client.end(); } catch { /* closed */ }
+				for (const hop of hops) { try { hop.end(); } catch { /* closed */ } }
+				reject(error);
+				return;
+			}
+			let tornDown = false;
+			const teardown = () => {
+				if (tornDown) return;
+				tornDown = true;
+				try { client.end(); } catch { /* closed */ }
+				for (const hop of hops) { try { hop.end(); } catch { /* closed */ } }
+			};
+			const session = {
+				onData: undefined,
+				onClose: undefined,
+				close: () => { try { stream.close(); } catch { /* gone */ } teardown(); },
+			};
+			stream.on("data", (chunk) => session.onData?.(chunk));
+			stream.on("close", () => { teardown(); session.onClose?.(); });
+			stream.on("error", () => { teardown(); session.onClose?.(); });
+			resolve(session);
+		});
+	});
+}
+
+// ─────────────────────────────────────────────── PTY shell (terminal) ──
 
 /**
  * Open a PTY shell session (standalone connection: closing the shell can
