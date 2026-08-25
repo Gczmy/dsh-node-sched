@@ -411,12 +411,17 @@ function apply(cctx, config) {
       };
       const view = useCallback(async (id, silent) => {
         const gen = ++INC_VIEW_GEN;
+        console.log("[inc] view() \u8C03\u7528 id=" + id + " silent=" + !!silent + " gen=" + gen, new Error().stack.split("\n").slice(2, 4).join(" <- "));
         if (!silent) setDetail({ id, loading: true });
         INC_OPEN_ID = id;
         try {
           const r = await fetch(`/sched/api/incidents?id=${id}`);
           const d = await r.json();
-          if (gen !== INC_VIEW_GEN || INC_OPEN_ID !== id) return;
+          console.log("[inc] \u54CD\u5E94\u8FD4\u56DE id=" + id + " gen=" + gen + " \u5F53\u524Dgen=" + INC_VIEW_GEN + " OPEN=" + INC_OPEN_ID);
+          if (gen !== INC_VIEW_GEN || INC_OPEN_ID !== id) {
+            console.log("[inc] \u4E22\u5F03\u8FC7\u671F\u54CD\u5E94 id=" + id);
+            return;
+          }
           if (!d.ok) {
             setDetail({ id, error: d.text });
             return;
@@ -441,6 +446,7 @@ function apply(cctx, config) {
         }
       }, []);
       useEffect(() => {
+        console.log("[inc] \u6302\u8F7Deffect \u89E6\u53D1, INC_OPEN_ID=", INC_OPEN_ID, "\u7F13\u5B58\u8BE6\u60C5=", !!INC_DETAIL);
         load();
         if (INC_OPEN_ID) view(INC_OPEN_ID, true);
       }, [load, view]);
@@ -510,6 +516,7 @@ function apply(cctx, config) {
             ),
             j("button", {
               onClick: () => {
+                console.log("[inc] \u7528\u6237\u70B9\u51FB\u6536\u8D77");
                 INC_VIEW_GEN++;
                 setDetail(null);
                 INC_OPEN_ID = null;
