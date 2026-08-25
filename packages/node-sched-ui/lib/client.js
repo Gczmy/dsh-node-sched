@@ -1066,26 +1066,21 @@ function apply(cctx, config) {
   }
   cctx.logger?.info?.("[node-sched-ui] mounting footer entry + settings card");
   const disposeSettings = cctx.slots.inject(SLOT_SETTINGS, () => cctx.slots.register({ name: SLOT_SETTINGS, id: NS, order: 90 }, StatusCard));
-  var schedEntry = document.createElement("button");
-  schedEntry.type = "button";
-  schedEntry.dataset.dshSchedEntry = "";
-  schedEntry.className = "_7D6uKa_entry";
-  schedEntry.innerHTML = '<span class="_7D6uKa_entryIcon"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1.5" y="1.5" width="13" height="13" rx="2"/><path d="M4.5 10.5 L7 7 L9.5 9.5 L12 6"/></svg></span><span class="_7D6uKa_entryLabel">sched \u770B\u677F</span>';
   var schedIsActive = false;
   var schedContainer = null;
   var schedReactRoot = null;
-  function activateSched() {
+  function activateSchedPage() {
     schedIsActive = true;
     document.documentElement.setAttribute("data-dsh-sched-active", "");
     document.dispatchEvent(new CustomEvent("dsh-panel-activate", { detail: "sched" }));
-    mountSchedPage();
+    mountSchedPageView();
   }
-  function deactivateSched() {
+  function deactivateSchedPage() {
     schedIsActive = false;
     document.documentElement.removeAttribute("data-dsh-sched-active");
     if (schedContainer) schedContainer.style.display = "none";
   }
-  function mountSchedPage() {
+  function mountSchedPageView() {
     var conv = document.querySelector('[data-pane="conversation"], [class*="centerCol"]');
     if (!conv) return;
     if (!schedContainer || !conv.contains(schedContainer)) {
@@ -1097,59 +1092,47 @@ function apply(cctx, config) {
     var rdMod = require("react-dom/client");
     schedReactRoot = rdMod.createRoot(schedContainer);
     schedReactRoot.render(j(Dashboard, { onClose: function() {
-      deactivateSched();
+      deactivateSchedPage();
     } }));
   }
-  schedEntry.addEventListener("click", function() {
-    if (!schedIsActive) {
-      activateSched();
-    } else {
-      deactivateSched();
-    }
-  });
-  var placed = false;
-  var rootEl = void 0;
-  function tryPlace() {
-    if (rootEl !== void 0 && !rootEl.isConnected) {
-      rootObs.disconnect();
-      rootEl = void 0;
-      placed = false;
-    }
-    if (placed && document.body.contains(schedEntry)) {
-      rootObs.disconnect();
-      rootEl = void 0;
-      placed = false;
-    }
+  var schedEntryBtn = document.createElement("button");
+  schedEntryBtn.type = "button";
+  schedEntryBtn.dataset.dshSchedEntry = "";
+  schedEntryBtn.className = "_7D6uKa_entry";
+  schedEntryBtn.innerHTML = '<span class="_7D6uKa_entryIcon"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1.5" y="1.5" width="13" height="13" rx="2"/><path d="M4.5 10.5 L7 7 L9.5 9.5 L12 6"/></svg></span><span class="_7D6uKa_entryLabel">sched \u770B\u677F</span>';
+  var entryPlaced = false;
+  function tryPlaceEntry() {
+    if (entryPlaced) return;
     var col = document.querySelector('[data-pane="sidebar"], [class*="sidebarCol"]');
-    if (!col) return;
-    rootEl = col.querySelector('[class*="logoRow"]')?.parentElement ?? col.firstElementChild;
-    if (rootEl === void 0 || rootEl === null) return;
-    var nsBtns = rootEl.querySelectorAll("[class*='newSession']");
-    var nsBtn = nsBtns.length > 0 ? nsBtns[nsBtns.length - 1] : void 0;
-    var anchor = nsBtn ? nsBtn.nextElementSibling : null;
+    if (!col) {
+      setTimeout(tryPlaceEntry, 2e3);
+      return;
+    }
+    var nsBtns = col.querySelectorAll("[class*='newSession']");
+    if (nsBtns.length === 0) {
+      if (++retries < 30) setTimeout(tryPlaceEntry, 2e3);
+      return;
+    }
+    var lastNs = nsBtns[nsBtns.length - 1];
+    var anchor = lastNs.nextElementSibling;
     try {
-      rootEl.insertBefore(schedEntry, anchor);
-      placed = true;
+      col.insertBefore(schedEntryBtn, anchor);
+      entryPlaced = true;
     } catch (_) {
     }
-    if (placed) rootObs.observe(rootEl, { childList: true, subtree: true });
+    if (!entryPlaced) col.appendChild(schedEntryBtn);
+    schedEntryBtn.addEventListener("click", function() {
+      if (!schedIsActive) {
+        activateSchedPage();
+      } else {
+        deactivateSchedPage();
+      }
+    });
   }
-  var waitObs = new MutationObserver(function() {
-    tryPlace();
-  });
-  waitObs.observe(document.body, { childList: true, subtree: true });
-  var rootObs = new MutationObserver(function() {
-    if (!rootEl || !rootEl.isConnected) {
-      placed = false;
-      tryPlace();
-    } else if (!rootEl.contains(schedEntry)) {
-      placed = false;
-      tryPlace();
-    }
-  });
-  tryPlace();
+  var retries = 0;
+  setTimeout(tryPlaceEntry, 500);
   document.addEventListener("dsh-panel-activate", function(e) {
-    if (e.detail !== "sched" && schedIsActive) deactivateSched();
+    if (e.detail !== "sched" && schedIsActive) deactivateSchedPage();
   });
   return () => {
     disposeSettings?.();
