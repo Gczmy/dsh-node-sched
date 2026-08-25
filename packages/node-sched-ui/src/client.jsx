@@ -276,6 +276,39 @@ function apply(cctx, config) {
 			]);
 		}
 
+		function EntrySwitch() {
+			const [entry, setEntry] = useState(null);
+			const [note, setNote] = useState("");
+			useEffect(() => {
+				fetch("/sched/api/entry").then((r) => r.json())
+					.then((d) => setEntry(d.entry || "?")).catch(() => setEntry("?"));
+			}, []);
+			const pick = async (target) => {
+				if (target === entry) return;
+				setNote("切换中…");
+				try {
+					const r = await fetch("/sched/api/entry", {
+						method: "POST", headers: { "Content-Type": "application/json" },
+						body: JSON.stringify({ entry: target }),
+					});
+					const d = await r.json();
+					setEntry(d.entry || target);
+					setNote(d.probeText ? `探测: ${d.probeText}` : "已切换");
+				} catch (e) { setNote("❌ " + String(e)); }
+			};
+			const seg = (label) => j("button", {
+				onClick: () => pick(label),
+				style: entry === label ? btn(T.brand) : ghostBtn,
+			}, label);
+			return jsxs2("span", { style: { display: "inline-flex", alignItems: "center", gap: 4,
+				marginRight: 10, fontSize: 11 } }, [
+				j("span", { style: { color: T.label2 } }, "入口"),
+				seg("HPDC"),
+				seg("HPDC_outside"),
+				note && j("span", { style: { color: T.label2, marginLeft: 4 } }, note),
+			]);
+		}
+
 		function DaemonBar() {
 			const [status, setStatus] = useState(null);      // 上次成功查询的状态文本（保留不清空）
 			const [querying, setQuerying] = useState(true);  // 是否正在查询
@@ -388,6 +421,7 @@ function apply(cctx, config) {
 				jsxs2("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 6,
 					padding: "5px 8px", borderRadius: 6, background: T.bgLayer,
 					border: `1px solid ${T.border}` } }, [
+					j(EntrySwitch, null),
 					j("span", { style: { color: T.warn } }, "⏸ 冻结"),
 					j("span", { style: { color: T.label2 } },
 						`快照时间 ${frozenAt || "…"} —— 阅读期间内容不变。点「刷新」或切走再回来获取最新。`),

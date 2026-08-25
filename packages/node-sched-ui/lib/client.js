@@ -345,6 +345,45 @@ function apply(cctx, config) {
         g.quarantined && j("button", { onClick: () => runOp("gpu-ok", String(g.idx)), style: btn(T.ok) }, "gpu-ok \u89E3\u9664\u9694\u79BB")
       ]);
     }
+    function EntrySwitch() {
+      const [entry, setEntry] = useState(null);
+      const [note, setNote] = useState("");
+      useEffect(() => {
+        fetch("/sched/api/entry").then((r) => r.json()).then((d) => setEntry(d.entry || "?")).catch(() => setEntry("?"));
+      }, []);
+      const pick = async (target) => {
+        if (target === entry) return;
+        setNote("\u5207\u6362\u4E2D\u2026");
+        try {
+          const r = await fetch("/sched/api/entry", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ entry: target })
+          });
+          const d = await r.json();
+          setEntry(d.entry || target);
+          setNote(d.probeText ? `\u63A2\u6D4B: ${d.probeText}` : "\u5DF2\u5207\u6362");
+        } catch (e) {
+          setNote("\u274C " + String(e));
+        }
+      };
+      const seg = (label) => j("button", {
+        onClick: () => pick(label),
+        style: entry === label ? btn(T.brand) : ghostBtn
+      }, label);
+      return jsxs2("span", { style: {
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
+        marginRight: 10,
+        fontSize: 11
+      } }, [
+        j("span", { style: { color: T.label2 } }, "\u5165\u53E3"),
+        seg("HPDC"),
+        seg("HPDC_outside"),
+        note && j("span", { style: { color: T.label2, marginLeft: 4 } }, note)
+      ]);
+    }
     function DaemonBar() {
       const [status, setStatus] = useState(null);
       const [querying, setQuerying] = useState(true);
@@ -477,6 +516,7 @@ function apply(cctx, config) {
           background: T.bgLayer,
           border: `1px solid ${T.border}`
         } }, [
+          j(EntrySwitch, null),
           j("span", { style: { color: T.warn } }, "\u23F8 \u51BB\u7ED3"),
           j(
             "span",

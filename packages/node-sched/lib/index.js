@@ -19,6 +19,9 @@
  */
 
 import cp from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import z from "@deepseek-ai/schemastery";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { WebSocketServer } from "ws";
@@ -386,6 +389,20 @@ function apply(ctx, config) {
 			return JSON.parse(body);
 		};
 
+		// B20: 双网络入口 —— 支持运行时切换 (校园网内 HPDC / 外 HPDC_outside)。
+		// 覆盖文件优先于 profile 配置; 看板可切换并持久化到该文件。
+		const entryFile = path.join(os.homedir(), ".dsh", "nodesched_entry.json");
+		try {
+			if (fs.existsSync(entryFile)) {
+				const ov = JSON.parse(fs.readFileSync(entryFile, "utf-8"));
+				if (ov && typeof ov.sshEntry === "string" && ov.sshEntry.trim()) {
+					config.sshEntry = ov.sshEntry.trim();
+					ctx.logger.info("[node-sched] ssh 入口覆盖(持久化): %s", cfg.sshEntry);
+				}
+			}
+		} catch (e) {
+			ctx.logger.warn("[node-sched] 入口覆盖文件读取失败(忽略): %s", e);
+		}
 		startRefresher();
 
 		routeDisposers.push(
@@ -407,6 +424,42 @@ function apply(ctx, config) {
 				handler: async (_req, res) => {
 					const r = await query(`${S} list-gpus`, { json: false });
 					await json(res, { ok: r.text.startsWith("[error") ? false : true, text: r.text });
+				},
+			}),
+
+			ctx.webServer.register({
+				kind: "prefix",
+				path: "/sched/api/entry",
+				handler: async (req, res) => {
+					try {
+						if (req.method === "GET") {
+							return void json(res, { ok: true, entry: config.sshEntry });
+						}
+						const body = await readBodyJson(req);
+						const entry = String(body.entry || "").trim();
+						if (!/^[A-Za-z0-9_.-]+$/.test(entry)) {
+							return void json(res, { ok: false, text: "非法入口名" }, 400);
+						}
+						const prev = config.sshEntry;
+						config.sshEntry = entry;   // runRemote 每次调用时读取, 即刻生效
+						fs.mkdirSync(path.dirname(entryFile), { recursive: true });
+						fs.writeFileSync(entryFile,
+							JSON.stringify({ sshEntry: entry }, null, 2));
+						ctx.logger.warn("[node-sched] audit #%d ssh-entry %s -> %s",
+							++auditSeq, prev, entry);
+						// 用新入口立即探测 daemon 可达性 (诚实反馈, 不假装成功)
+						let probeText = "";
+						try {
+							const pr = await runRemote(`${S} daemon status`, { timeoutMs: 25_000 });
+							const body = (pr.text || pr.stdout || "").trim();
+							probeText = (pr.ok ? "" : "[不可达] ") + body.split("\n")[0].slice(0, 80);
+						} catch (e) {
+							probeText = "探测失败: " + String(e.message ?? e).slice(0, 60);
+						}
+						await json(res, { ok: true, entry, prev, probeText });
+					} catch (e) {
+						await json(res, { ok: false, text: String(e.message ?? e) }, 400);
+					}
 				},
 			}),
 
