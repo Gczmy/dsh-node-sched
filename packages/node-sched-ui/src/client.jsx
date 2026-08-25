@@ -897,8 +897,28 @@ function apply(cctx, config) {
 	var schedEntryBtn = document.createElement("button");
 	schedEntryBtn.type = "button";
 	schedEntryBtn.dataset.dshSchedEntry = "";
-	schedEntryBtn.className = "_7D6uKa_entry";
-	schedEntryBtn.innerHTML = '<span class="_7D6uKa_entryIcon"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1.5" y="1.5" width="13" height="13" rx="2"/><path d="M4.5 10.5 L7 7 L9.5 9.5 L12 6"/></svg></span><span class="_7D6uKa_entryLabel">sched 看板</span>';
+	schedEntryBtn.style.cssText = [
+		"width:100%", "height:32px",
+		"color:var(--dsw-alias-label-secondary,var(--dsw-alias-label-primary,#999))",
+		"cursor:pointer", "white-space:nowrap",
+		"background:0 0", "border:none", "border-radius:8px",
+		"align-items:center", "gap:8px", "padding:0 12px",
+		"font-size:13px", "display:flex",
+	].join(";");
+	schedEntryBtn.addEventListener("mouseenter", function() {
+		schedEntryBtn.style.background = "var(--dsw-specific-sidebar-nav-item-hover,rgba(127,127,127,.15))";
+		schedEntryBtn.style.color = "var(--dsw-alias-label-primary,#333)";
+	});
+	schedEntryBtn.addEventListener("mouseleave", function() {
+		schedEntryBtn.style.background = "none";
+		schedEntryBtn.style.color = "var(--dsw-alias-label-secondary,var(--dsw-alias-label-primary,#999))";
+	});
+	schedEntryBtn.innerHTML =
+		'<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" style="flex-shrink:0;margin-right:8px">'
+		+ '<rect x="1.5" y="1.5" width="13" height="13" rx="3"/>'
+		+ '<path d="M4.5 10.5 L7 7 L9.5 9.5 L12 6"/>'
+		+ '</svg>'
+		+ '<span style="overflow:hidden;text-overflow:ellipsis">sched 看板</span>';
 	var entryPlaced = false;
 	function tryPlaceEntry() {
 		if (entryPlaced) return;
