@@ -902,23 +902,25 @@ function apply(cctx, config) {
 	var entryPlaced = false;
 	function tryPlaceEntry() {
 		if (entryPlaced) return;
-		var col = document.querySelector('[data-pane="sidebar"], [class*="sidebarCol"]');
-		if (!col) { setTimeout(tryPlaceEntry, 2000); return; }
-		var nsBtns = col.querySelectorAll("[class*='newSession']");
-		if (nsBtns.length === 0) {
-			if (++retries < 30) setTimeout(tryPlaceEntry, 2000);
+		// 多种选择器逐一尝试
+		var col = document.querySelector('[data-pane="sidebar"]')
+		       || document.querySelector('[class*="sidebarCol"]')
+		       || document.querySelector('[class*="sidebar"]:not([class*="item"]):not([class*="label"])');
+		if (!col) {
+			console.log("[sched-entry] 侧栏容器未找到, 重试", retries);
+			if (++retries < 60) setTimeout(tryPlaceEntry, 1000);
 			return;
 		}
-		var lastNs = nsBtns[nsBtns.length - 1];
-		var anchor = lastNs.nextElementSibling;
-		try { col.insertBefore(schedEntryBtn, anchor); entryPlaced = true; } catch(_) {}
-		if (!entryPlaced) col.appendChild(schedEntryBtn);
+		console.log("[sched-entry] 找到侧栏容器:", col.className || col.tagName);
+		col.appendChild(schedEntryBtn);
+		entryPlaced = true;
 		schedEntryBtn.addEventListener("click", function() {
 			if (!schedIsActive) { activateSchedPage(); } else { deactivateSchedPage(); }
 		});
+		console.log("[sched-entry] 按钮已放入侧栏");
 	}
 	var retries = 0;
-	setTimeout(tryPlaceEntry, 500);
+	setTimeout(tryPlaceEntry, 800);
 
 	// 监听其他面板激活 -> 关闭本面板
 	document.addEventListener("dsh-panel-activate", function(e) {

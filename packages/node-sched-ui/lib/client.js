@@ -1103,24 +1103,15 @@ function apply(cctx, config) {
   var entryPlaced = false;
   function tryPlaceEntry() {
     if (entryPlaced) return;
-    var col = document.querySelector('[data-pane="sidebar"], [class*="sidebarCol"]');
+    var col = document.querySelector('[data-pane="sidebar"]') || document.querySelector('[class*="sidebarCol"]') || document.querySelector('[class*="sidebar"]:not([class*="item"]):not([class*="label"])');
     if (!col) {
-      setTimeout(tryPlaceEntry, 2e3);
+      console.log("[sched-entry] \u4FA7\u680F\u5BB9\u5668\u672A\u627E\u5230, \u91CD\u8BD5", retries);
+      if (++retries < 60) setTimeout(tryPlaceEntry, 1e3);
       return;
     }
-    var nsBtns = col.querySelectorAll("[class*='newSession']");
-    if (nsBtns.length === 0) {
-      if (++retries < 30) setTimeout(tryPlaceEntry, 2e3);
-      return;
-    }
-    var lastNs = nsBtns[nsBtns.length - 1];
-    var anchor = lastNs.nextElementSibling;
-    try {
-      col.insertBefore(schedEntryBtn, anchor);
-      entryPlaced = true;
-    } catch (_) {
-    }
-    if (!entryPlaced) col.appendChild(schedEntryBtn);
+    console.log("[sched-entry] \u627E\u5230\u4FA7\u680F\u5BB9\u5668:", col.className || col.tagName);
+    col.appendChild(schedEntryBtn);
+    entryPlaced = true;
     schedEntryBtn.addEventListener("click", function() {
       if (!schedIsActive) {
         activateSchedPage();
@@ -1128,9 +1119,10 @@ function apply(cctx, config) {
         deactivateSchedPage();
       }
     });
+    console.log("[sched-entry] \u6309\u94AE\u5DF2\u653E\u5165\u4FA7\u680F");
   }
   var retries = 0;
-  setTimeout(tryPlaceEntry, 500);
+  setTimeout(tryPlaceEntry, 800);
   document.addEventListener("dsh-panel-activate", function(e) {
     if (e.detail !== "sched" && schedIsActive) deactivateSchedPage();
   });
