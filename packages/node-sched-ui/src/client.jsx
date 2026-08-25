@@ -1,14 +1,22 @@
 /**
- * node-sched dashboard — client plugin (M4).
+ * node-sched dashboard — client plugin.
  *
- * Two surfaces:
- *  - `sidebar.footer.action`: entry button toggling a fullscreen dashboard
- *    overlay (fixed positioning escapes the sidebar layout).
+ * Surfaces:
+ *  - Sidebar nav entry row (plain DOM injection between New Session and the
+ *    workspace browser; dual MutationObserver self-healing, task-board
+ *    sidebar-entry-core pattern) toggling a full-page view that takes over
+ *    the center column via its own React root (React never manages the
+ *    injected container, so shell reconciliation cannot evict it).
  *  - `web-ui.plugin.item`: compact status card in Settings → Web UI 插件.
  *
  * Data: WS /sched/ws/events frames + fetch /sched/api/*.
  * Writes are all two-step confirmed in the UI; host side gates and audits.
  */
+const ENTRY_ATTR = "data-dsh-sched-entry";
+const VIEW_ATTR = "data-dsh-sched-view";
+const ACTIVE_ATTR = "data-dsh-sched-active";
+const PANEL_ACTIVATE_EVENT = "dsh-panel-activate";
+const PANEL_NAME = "sched";
 const SLOT_SETTINGS = "web-ui.plugin.item";
 const NS = "nodesched";
 
@@ -38,6 +46,36 @@ const COLORS = {
 	cancelled: T.label2, interrupted: T.err,
 	pending: T.label2, waiting_dep: T.warn, queued: T.label2,
 };
+
+// ── 样式注入（模块级一次）：侧栏入口行 + 中央列接管规则 ─────────────────
+function injectStyles() {
+	if (typeof document === "undefined" || document.getElementById("ns-ui-style")) return;
+	const el = document.createElement("style");
+	el.id = "ns-ui-style";
+	el.textContent = [
+		"/* --- center-column takeover (attribute-scoped) --- */",
+		"[data-pane='conversation'], [class*='centerCol'] { position: relative; }",
+		"[" + VIEW_ATTR + "] { position: absolute; inset: 0; display: none; z-index: 60; overflow-y: auto; background: var(--dsw-alias-bg-base); }",
+		"html[" + ACTIVE_ATTR + "] [" + VIEW_ATTR + "] { display: block; }",
+		// 中央列单占位：面板打开时隐藏对话内容（!important 压过外壳 inline display:contents）
+		"html[" + ACTIVE_ATTR + "] [data-pane='conversation'] > :not([" + VIEW_ATTR + "]),",
+		"html[" + ACTIVE_ATTR + "] [class*='centerCol'] > :not([" + VIEW_ATTR + "]) { display: none !important; }",
+		"",
+		"/* --- sidebar entry row --- */",
+		".nsEntry { box-sizing: border-box; display: flex; align-items: center; gap: 8px; width: 100%; height: 36px; padding: 0 10px; background: transparent; border: none; border-radius: 8px; color: var(--dsw-alias-label-secondary); cursor: pointer; font-size: 13px; white-space: nowrap; transition: background-color 120ms ease, color 120ms ease; }",
+		".nsEntry:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }",
+		".nsEntry[data-active] { background: var(--dsw-alias-interactive-bg-active); color: var(--dsw-alias-label-primary); font-weight: 600; }",
+		".nsEntry[data-active]:hover { background: var(--dsw-specific-sidebar-nav-item-active); }",
+		".nsEntryIcon { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; flex: none; }",
+		".nsEntryIcon svg { display: block; width: 18px; height: 18px; }",
+		".nsEntryLabel { overflow: hidden; text-overflow: ellipsis; }",
+		"",
+		"/* --- collapsed rail: icon-only --- */",
+		"[data-sidebar-collapsed] .nsEntry { justify-content: center; padding: 0; width: 36px; height: 36px; margin: 0 auto 12px; border-radius: 50%; }",
+		"[data-sidebar-collapsed] .nsEntryLabel { display: none; }",
+	].join("\n");
+	document.head.appendChild(el);
+}
 
 function apply(cctx, config) {
 	const { useEffect, useState, useCallback, useRef, memo } = require("react");
@@ -90,20 +128,14 @@ function apply(cctx, config) {
 			color: c, borderRadius: 999, padding: "0 7px", fontSize: 10, marginRight: 6,
 		};
 	};
-	// B20: 页面视图样式 (非 overlay) —— 占满 conversation 区域
-	const pageView = {
-		boxSizing: "border-box", width: "100%", height: "100%",
-		minHeight: 0, display: "flex", flexDirection: "column",
-		padding: "14px 16px 16px", gap: 12,
-		background: "var(--dsw-alias-bg-base)",
-		color: "var(--dsw-alias-label-primary)",
-		fontFamily: T.font, overflow: "auto",
+	// 页面视图：填满接管容器（不再是 fixed 弹窗；显隐由 html data 属性驱动）
+	const overlayStyle = {
+		position: "absolute", inset: 0, zIndex: 60,
+		background: "var(--dsw-alias-bg-base)", overflowY: "auto",
 	};
 	const panelStyle = {
-		background: "var(--dsw-alias-bg-layer-1, var(--dsw-alias-bg-base, #fff))",
-		color: T.label, border: `1px solid var(--dsw-alias-border-l2, ${T.border})`, borderRadius: 12, padding: 16,
-		width: "100%", flex: 1, minHeight: 0, overflow: "auto",
-		boxShadow: "0 18px 60px rgba(0,0,0,.45)", fontFamily: T.font, fontSize: 12, lineHeight: 1.55,
+		color: T.label, padding: 16, maxWidth: 1180, margin: "0 auto",
+		fontFamily: T.font, fontSize: 12, lineHeight: 1.55,
 	};
 	const bar = (pct) => ({ height: 6, background: "rgba(127,127,127,.2)", borderRadius: 3, overflow: "hidden", flex: 1, margin: "0 8px", display: "flex" });
 	const barFill = (pct) => ({ height: "100%", width: `${Math.max(0, Math.min(100, pct))}%`, background: T.brand });
@@ -195,7 +227,6 @@ function apply(cctx, config) {
 			]),
 		]);
 	}
-
 
 	function Dashboard({ onClose }) {
 		const [stream] = useSchedStream();
@@ -697,8 +728,8 @@ function apply(cctx, config) {
 			]);
 		}
 
-		return j("div", { style: pageView, onClick: onClose }, [
-			jsxs2("div", { style: panelStyle, onClick: (e) => e.stopPropagation() }, [
+		return jsxs2("div", { style: overlayStyle }, [
+			jsxs2("div", { style: panelStyle }, [
 				jsxs2("div", { style: { display: "flex", gap: 8, alignItems: "center", marginBottom: 8 } }, [
 					j("b", null, "node-sched"),
 					j("span", { style: { color: stream.connected ? T.ok : T.err, fontSize: 11 } }, stream.connected ? "● live" : "○ offline"),
@@ -859,102 +890,147 @@ function apply(cctx, config) {
 	// ── sidebar footer entry: button toggling the fullscreen dashboard ──────
 
 
-	cctx.logger?.info?.("[node-sched-ui] mounting footer entry + settings card");
+	// ── B21: 侧栏入口 + 页面视图 (task-board 同构) ──────────────────────
+	injectStyles();
+	const disposersUI = [];
+
+	// 面板开关控制器：纯 JS 非 React；视图显隐由 <html> data 属性驱动，
+	// 对话子树保持挂载有状态，切换零成本。
+	const panel = {
+		open: false,
+		listeners: new Set(),
+		isOpen() { return this.open; },
+		subscribe(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn); },
+		emit() { for (const fn of [...this.listeners]) { try { fn(); } catch (_) {} } },
+		show() {
+			this.open = true;
+			document.documentElement.setAttribute(ACTIVE_ATTR, "");
+			document.dispatchEvent(new CustomEvent(PANEL_ACTIVATE_EVENT, { detail: PANEL_NAME }));
+			this.emit();
+		},
+		hide() { this.open = false; document.documentElement.removeAttribute(ACTIVE_ATTR); this.emit(); },
+		toggle() { if (this.open) this.hide(); else this.show(); },
+	};
+
+	// 页面视图：centerCol 内追加 React 永不管理的容器 + 自建 root。
+	// 外壳 reconciliation 不认识这个节点所以不会驱逐它；显隐纯 CSS。
+	{
+		let root = null, container = null;
+		const ensure = () => {
+			if (container !== null) return;
+			try {
+				const col = document.querySelector('[data-pane="conversation"], [class*="centerCol"]');
+				if (!col) return;
+				container = document.createElement("div");
+				container.setAttribute(VIEW_ATTR, "");
+				col.appendChild(container);
+				root = require("react-dom/client").createRoot(container);
+				root.render(j(Dashboard, { onClose: () => panel.hide() }));
+			} catch (e) {
+				cctx.logger?.warn?.("[node-sched-ui] view mount failed:", e?.message);
+			}
+		};
+		// 外壳启动晚于插件 apply；监听 body 直到中央列出现。
+		const viewWaitObs = new MutationObserver(() => ensure());
+		viewWaitObs.observe(document.body, { childList: true, subtree: true });
+		ensure();
+
+		// 兄弟面板激活 → 关闭自己；侧栏行点击 → 交还对话区 (capture 先于外壳处理)
+		const onOtherActivate = (e) => { if (e.detail !== PANEL_NAME && panel.isOpen()) panel.hide(); };
+		document.addEventListener(PANEL_ACTIVATE_EVENT, onOtherActivate);
+		const SIDEBAR_ROW = '[class*="sessionRow"], [class*="projectRow"], [class*="searchResultRow"], [class*="searchResultWorkspace"], [class*="newSession"]';
+		const onSidebarClick = (ev) => {
+			if (!panel.isOpen()) return;
+			const t = ev.target;
+			if (t && t.closest && t.closest(SIDEBAR_ROW)) panel.hide();
+		};
+		document.addEventListener("click", onSidebarClick, true);
+
+		disposersUI.push(() => {
+			viewWaitObs.disconnect();
+			document.removeEventListener(PANEL_ACTIVATE_EVENT, onOtherActivate);
+			document.removeEventListener("click", onSidebarClick);
+			document.documentElement.removeAttribute(ACTIVE_ATTR);
+			try { root?.unmount(); } catch (_) {}
+			container?.remove();
+		});
+	}
+
+	// 侧栏入口行：纯 DOM 注入 + 双 Observer 自愈 (sidebar-entry-core 模式)。
+	// 行是普通 DOM 而非 React 节点，永不干扰外壳 reconciliation；
+	// 重渲染驱逐后在同一微任务内重插 (绘制前，无闪烁)。
+	{
+		if (document.querySelector("[" + ENTRY_ATTR + "]") === null) {
+			const entry = document.createElement("button");
+			entry.type = "button";
+			entry.setAttribute(ENTRY_ATTR, "");
+			entry.className = "nsEntry";
+			entry.setAttribute("aria-label", "sched 看板");
+			entry.title = "node-sched GPU/CPU 调度看板";
+			entry.innerHTML = '<span class="nsEntryIcon"><svg viewBox="0 0 16 16" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="2.5" width="12" height="11" rx="1.5"/><path d="M2 6.5h12M6.5 6.5v7"/></svg></span><span class="nsEntryLabel">sched 看板</span>';
+			entry.addEventListener("click", () => panel.toggle());
+
+			let rootEl, placed = false;
+
+			const sidebarRoot = () => {
+				const col = document.querySelector('[data-pane="sidebar"], [class*="sidebarCol"]');
+				if (!col) return undefined;
+				// 当前外壳包了一层 wrapper; logoRow 的属主才是真正的 UI root
+				return col.querySelector('[class*="logoRow"]')?.parentElement ?? col.firstElementChild;
+			};
+			const newSessionButton = (root) => {
+				const nested = root.querySelector('button[class*="newSession"]');
+				if (nested) return nested;
+				for (const child of root.children) if (child.tagName === "BUTTON") return child;
+				return undefined;
+			};
+			const placeEntry = (root) => {
+				const btn = newSessionButton(root);
+				if (!btn) return false;
+				if (entry.parentElement !== root) {
+					// 锚定 New Session 所在 logoRow 之后 (workspace 浏览区之前),
+					// 不依赖瞬态几何位置，重渲染后顺序稳定
+					const row = btn.closest('[class*="logoRow"]');
+					const base = row && row.parentElement === root ? row : btn;
+					root.insertBefore(entry, base.nextElementSibling);
+				}
+				return true;
+			};
+			const tryPlace = () => {
+				if (rootEl !== undefined && !rootEl.isConnected) {
+					// 外壳重建了整个侧栏 pane: root observer 随旧树消亡，重新查询
+					rootObs.disconnect(); rootEl = undefined; placed = false;
+				}
+				if (placed) {
+					// 廉价短路：已挂载且仍在 DOM 中 → 只花一次 contains 检查
+					if (document.body.contains(entry)) return;
+					rootObs.disconnect(); rootEl = undefined; placed = false;
+				}
+				rootEl ??= sidebarRoot();
+				if (!rootEl) return;
+				placed = placeEntry(rootEl);
+				if (placed) rootObs.observe(rootEl, { childList: true, subtree: true });
+			};
+			const waitObs = new MutationObserver(() => tryPlace());
+			waitObs.observe(document.body, { childList: true, subtree: true });
+			const rootObs = new MutationObserver(() => {
+				if (!rootEl || !rootEl.isConnected) { placed = false; tryPlace(); return; }
+				if (!rootEl.contains(entry)) placeEntry(rootEl);
+			});
+			// active 高亮同步 (delete 属性而非赋 undefined，避免永久高亮 bug)
+			const unsubActive = panel.subscribe(() => {
+				if (panel.isOpen()) entry.dataset.active = "true"; else delete entry.dataset.active;
+			});
+			tryPlace();
+
+			disposersUI.push(() => { waitObs.disconnect(); rootObs.disconnect(); unsubActive(); entry.remove(); });
+		}
+	}
+
 	const disposeSettings = cctx.slots.inject(SLOT_SETTINGS, () =>
 		cctx.slots.register({ name: SLOT_SETTINGS, id: NS, order: 90 }, StatusCard));
-
-	// ── B20: 侧栏入口 + 页面视图 (task-board/ssh 同构, MutationObserver 自愈) ──
-	var schedIsActive = false;
-	var schedContainer = null;
-	var schedReactRoot = null;
-
-	function activateSchedPage() {
-		schedIsActive = true;
-		document.documentElement.setAttribute("data-dsh-sched-active", "");
-		document.dispatchEvent(new CustomEvent("dsh-panel-activate", { detail: "sched" }));
-		mountSchedPageView();
-	}
-	function deactivateSchedPage() {
-		schedIsActive = false;
-		document.documentElement.removeAttribute("data-dsh-sched-active");
-		if (schedContainer) schedContainer.style.display = "none";
-	}
-	function mountSchedPageView() {
-		var conv = document.querySelector('[data-pane="conversation"], [class*="centerCol"]');
-		if (!conv) return;
-		if (!schedContainer || !conv.contains(schedContainer)) {
-			schedContainer = document.createElement("div");
-			schedContainer.dataset.dshSchedView = "";
-			schedContainer.style.cssText = "z-index:60;background:var(--dsw-alias-bg-base);display:block;position:absolute;inset:0;";
-			conv.appendChild(schedContainer);
-		}
-		var rdMod = require("react-dom/client");
-		schedReactRoot = rdMod.createRoot(schedContainer);
-		schedReactRoot.render(j(Dashboard, { onClose: function() { deactivateSchedPage(); } }));
-	}
-
-	// ── 侧栏入口放置: 简单定时重试 (无 MutationObserver, 防 CPU 爆炸) ──
-	var schedEntryBtn = document.createElement("button");
-	schedEntryBtn.type = "button";
-	schedEntryBtn.dataset.dshSchedEntry = "";
-	schedEntryBtn.style.cssText = [
-		"width:100%", "height:32px",
-		"color:var(--dsw-alias-label-secondary,var(--dsw-alias-label-primary,#999))",
-		"cursor:pointer", "white-space:nowrap",
-		"background:0 0", "border:none", "border-radius:8px",
-		"align-items:center", "gap:8px", "padding:0 12px",
-		"font-size:13px", "display:flex",
-	].join(";");
-	schedEntryBtn.addEventListener("mouseenter", function() {
-		schedEntryBtn.style.background = "var(--dsw-specific-sidebar-nav-item-hover,rgba(127,127,127,.15))";
-		schedEntryBtn.style.color = "var(--dsw-alias-label-primary,#333)";
-	});
-	schedEntryBtn.addEventListener("mouseleave", function() {
-		schedEntryBtn.style.background = "none";
-		schedEntryBtn.style.color = "var(--dsw-alias-label-secondary,var(--dsw-alias-label-primary,#999))";
-	});
-	schedEntryBtn.innerHTML =
-		'<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" style="flex-shrink:0;margin-right:8px">'
-		+ '<rect x="1.5" y="1.5" width="13" height="13" rx="3"/>'
-		+ '<path d="M4.5 10.5 L7 7 L9.5 9.5 L12 6"/>'
-		+ '</svg>'
-		+ '<span style="overflow:hidden;text-overflow:ellipsis">sched 看板</span>';
-	var entryPlaced = false;
-	function tryPlaceEntry() {
-		if (entryPlaced) return;
-		// 多种选择器逐一尝试
-		var col = document.querySelector('[data-pane="sidebar"]')
-		       || document.querySelector('[class*="sidebarCol"]')
-		       || document.querySelector('[class*="sidebar"]:not([class*="item"]):not([class*="label"])');
-		if (!col) {
-			console.log("[sched-entry] 侧栏容器未找到, 重试", retries);
-			if (++retries < 60) setTimeout(tryPlaceEntry, 1000);
-			return;
-		}
-		console.log("[sched-entry] 找到侧栏容器:", col.className || col.tagName);
-		col.appendChild(schedEntryBtn);
-		entryPlaced = true;
-		schedEntryBtn.addEventListener("click", function() {
-			if (!schedIsActive) { activateSchedPage(); } else { deactivateSchedPage(); }
-		});
-		console.log("[sched-entry] 按钮已放入侧栏");
-	}
-	var retries = 0;
-	setTimeout(tryPlaceEntry, 800);
-	// 定期检查按钮是否仍在侧栏中 (外壳重渲染会移除手动插入的 DOM)
-	setInterval(function() {
-		if (entryPlaced && !document.body.contains(schedEntryBtn)) {
-			tryPlaceEntry();
-		}
-	}, 3000);
-
-	// 监听其他面板激活 -> 关闭本面板
-	document.addEventListener("dsh-panel-activate", function(e) {
-		if (e.detail !== "sched" && schedIsActive) deactivateSchedPage();
-	});
-
-
-	return () => { disposeSettings?.(); };
+	disposersUI.push(disposeSettings);
+	return () => { for (const d of disposersUI) { try { d?.(); } catch (_) {} } };
 }
 
 export { name, inject, apply };

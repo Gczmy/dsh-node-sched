@@ -29,6 +29,11 @@ __export(client_exports, {
   name: () => name
 });
 module.exports = __toCommonJS(client_exports);
+var ENTRY_ATTR = "data-dsh-sched-entry";
+var VIEW_ATTR = "data-dsh-sched-view";
+var ACTIVE_ATTR = "data-dsh-sched-active";
+var PANEL_ACTIVATE_EVENT = "dsh-panel-activate";
+var PANEL_NAME = "sched";
 var SLOT_SETTINGS = "web-ui.plugin.item";
 var NS = "nodesched";
 var name = "@zzc/dsh-node-sched-ui";
@@ -65,6 +70,34 @@ var COLORS = {
   waiting_dep: T.warn,
   queued: T.label2
 };
+function injectStyles() {
+  if (typeof document === "undefined" || document.getElementById("ns-ui-style")) return;
+  const el = document.createElement("style");
+  el.id = "ns-ui-style";
+  el.textContent = [
+    "/* --- center-column takeover (attribute-scoped) --- */",
+    "[data-pane='conversation'], [class*='centerCol'] { position: relative; }",
+    "[" + VIEW_ATTR + "] { position: absolute; inset: 0; display: none; z-index: 60; overflow-y: auto; background: var(--dsw-alias-bg-base); }",
+    "html[" + ACTIVE_ATTR + "] [" + VIEW_ATTR + "] { display: block; }",
+    // 中央列单占位：面板打开时隐藏对话内容（!important 压过外壳 inline display:contents）
+    "html[" + ACTIVE_ATTR + "] [data-pane='conversation'] > :not([" + VIEW_ATTR + "]),",
+    "html[" + ACTIVE_ATTR + "] [class*='centerCol'] > :not([" + VIEW_ATTR + "]) { display: none !important; }",
+    "",
+    "/* --- sidebar entry row --- */",
+    ".nsEntry { box-sizing: border-box; display: flex; align-items: center; gap: 8px; width: 100%; height: 36px; padding: 0 10px; background: transparent; border: none; border-radius: 8px; color: var(--dsw-alias-label-secondary); cursor: pointer; font-size: 13px; white-space: nowrap; transition: background-color 120ms ease, color 120ms ease; }",
+    ".nsEntry:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }",
+    ".nsEntry[data-active] { background: var(--dsw-alias-interactive-bg-active); color: var(--dsw-alias-label-primary); font-weight: 600; }",
+    ".nsEntry[data-active]:hover { background: var(--dsw-specific-sidebar-nav-item-active); }",
+    ".nsEntryIcon { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; flex: none; }",
+    ".nsEntryIcon svg { display: block; width: 18px; height: 18px; }",
+    ".nsEntryLabel { overflow: hidden; text-overflow: ellipsis; }",
+    "",
+    "/* --- collapsed rail: icon-only --- */",
+    "[data-sidebar-collapsed] .nsEntry { justify-content: center; padding: 0; width: 36px; height: 36px; margin: 0 auto 12px; border-radius: 50%; }",
+    "[data-sidebar-collapsed] .nsEntryLabel { display: none; }"
+  ].join("\n");
+  document.head.appendChild(el);
+}
 function apply(cctx, config) {
   const { useEffect, useState, useCallback, useRef, memo } = require("react");
   if (typeof document !== "undefined" && !document.getElementById("ns-card-style")) {
@@ -118,31 +151,18 @@ function apply(cctx, config) {
       marginRight: 6
     };
   };
-  const pageView = {
-    boxSizing: "border-box",
-    width: "100%",
-    height: "100%",
-    minHeight: 0,
-    display: "flex",
-    flexDirection: "column",
-    padding: "14px 16px 16px",
-    gap: 12,
+  const overlayStyle = {
+    position: "absolute",
+    inset: 0,
+    zIndex: 60,
     background: "var(--dsw-alias-bg-base)",
-    color: "var(--dsw-alias-label-primary)",
-    fontFamily: T.font,
-    overflow: "auto"
+    overflowY: "auto"
   };
   const panelStyle = {
-    background: "var(--dsw-alias-bg-layer-1, var(--dsw-alias-bg-base, #fff))",
     color: T.label,
-    border: `1px solid var(--dsw-alias-border-l2, ${T.border})`,
-    borderRadius: 12,
     padding: 16,
-    width: "100%",
-    flex: 1,
-    minHeight: 0,
-    overflow: "auto",
-    boxShadow: "0 18px 60px rgba(0,0,0,.45)",
+    maxWidth: 1180,
+    margin: "0 auto",
     fontFamily: T.font,
     fontSize: 12,
     lineHeight: 1.55
@@ -875,8 +895,8 @@ function apply(cctx, config) {
         preview && j("pre", { style: { ...pre, maxHeight: 240, overflow: "auto" } }, preview.text)
       ]);
     }
-    return j("div", { style: pageView, onClick: onClose }, [
-      jsxs2("div", { style: panelStyle, onClick: (e) => e.stopPropagation() }, [
+    return jsxs2("div", { style: overlayStyle }, [
+      jsxs2("div", { style: panelStyle }, [
         jsxs2("div", { style: { display: "flex", gap: 8, alignItems: "center", marginBottom: 8 } }, [
           j("b", null, "node-sched"),
           j("span", { style: { color: stream.connected ? T.ok : T.err, fontSize: 11 } }, stream.connected ? "\u25CF live" : "\u25CB offline"),
@@ -1064,97 +1084,165 @@ function apply(cctx, config) {
       ])
     ]);
   }
-  cctx.logger?.info?.("[node-sched-ui] mounting footer entry + settings card");
-  const disposeSettings = cctx.slots.inject(SLOT_SETTINGS, () => cctx.slots.register({ name: SLOT_SETTINGS, id: NS, order: 90 }, StatusCard));
-  var schedIsActive = false;
-  var schedContainer = null;
-  var schedReactRoot = null;
-  function activateSchedPage() {
-    schedIsActive = true;
-    document.documentElement.setAttribute("data-dsh-sched-active", "");
-    document.dispatchEvent(new CustomEvent("dsh-panel-activate", { detail: "sched" }));
-    mountSchedPageView();
-  }
-  function deactivateSchedPage() {
-    schedIsActive = false;
-    document.documentElement.removeAttribute("data-dsh-sched-active");
-    if (schedContainer) schedContainer.style.display = "none";
-  }
-  function mountSchedPageView() {
-    var conv = document.querySelector('[data-pane="conversation"], [class*="centerCol"]');
-    if (!conv) return;
-    if (!schedContainer || !conv.contains(schedContainer)) {
-      schedContainer = document.createElement("div");
-      schedContainer.dataset.dshSchedView = "";
-      schedContainer.style.cssText = "z-index:60;background:var(--dsw-alias-bg-base);display:block;position:absolute;inset:0;";
-      conv.appendChild(schedContainer);
-    }
-    var rdMod = require("react-dom/client");
-    schedReactRoot = rdMod.createRoot(schedContainer);
-    schedReactRoot.render(j(Dashboard, { onClose: function() {
-      deactivateSchedPage();
-    } }));
-  }
-  var schedEntryBtn = document.createElement("button");
-  schedEntryBtn.type = "button";
-  schedEntryBtn.dataset.dshSchedEntry = "";
-  schedEntryBtn.style.cssText = [
-    "width:100%",
-    "height:32px",
-    "color:var(--dsw-alias-label-secondary,var(--dsw-alias-label-primary,#999))",
-    "cursor:pointer",
-    "white-space:nowrap",
-    "background:0 0",
-    "border:none",
-    "border-radius:8px",
-    "align-items:center",
-    "gap:8px",
-    "padding:0 12px",
-    "font-size:13px",
-    "display:flex"
-  ].join(";");
-  schedEntryBtn.addEventListener("mouseenter", function() {
-    schedEntryBtn.style.background = "var(--dsw-specific-sidebar-nav-item-hover,rgba(127,127,127,.15))";
-    schedEntryBtn.style.color = "var(--dsw-alias-label-primary,#333)";
-  });
-  schedEntryBtn.addEventListener("mouseleave", function() {
-    schedEntryBtn.style.background = "none";
-    schedEntryBtn.style.color = "var(--dsw-alias-label-secondary,var(--dsw-alias-label-primary,#999))";
-  });
-  schedEntryBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" style="flex-shrink:0;margin-right:8px"><rect x="1.5" y="1.5" width="13" height="13" rx="3"/><path d="M4.5 10.5 L7 7 L9.5 9.5 L12 6"/></svg><span style="overflow:hidden;text-overflow:ellipsis">sched \u770B\u677F</span>';
-  var entryPlaced = false;
-  function tryPlaceEntry() {
-    if (entryPlaced) return;
-    var col = document.querySelector('[data-pane="sidebar"]') || document.querySelector('[class*="sidebarCol"]') || document.querySelector('[class*="sidebar"]:not([class*="item"]):not([class*="label"])');
-    if (!col) {
-      console.log("[sched-entry] \u4FA7\u680F\u5BB9\u5668\u672A\u627E\u5230, \u91CD\u8BD5", retries);
-      if (++retries < 60) setTimeout(tryPlaceEntry, 1e3);
-      return;
-    }
-    console.log("[sched-entry] \u627E\u5230\u4FA7\u680F\u5BB9\u5668:", col.className || col.tagName);
-    col.appendChild(schedEntryBtn);
-    entryPlaced = true;
-    schedEntryBtn.addEventListener("click", function() {
-      if (!schedIsActive) {
-        activateSchedPage();
-      } else {
-        deactivateSchedPage();
+  injectStyles();
+  const disposersUI = [];
+  const panel = {
+    open: false,
+    listeners: /* @__PURE__ */ new Set(),
+    isOpen() {
+      return this.open;
+    },
+    subscribe(fn) {
+      this.listeners.add(fn);
+      return () => this.listeners.delete(fn);
+    },
+    emit() {
+      for (const fn of [...this.listeners]) {
+        try {
+          fn();
+        } catch (_) {
+        }
       }
-    });
-    console.log("[sched-entry] \u6309\u94AE\u5DF2\u653E\u5165\u4FA7\u680F");
-  }
-  var retries = 0;
-  setTimeout(tryPlaceEntry, 800);
-  setInterval(function() {
-    if (entryPlaced && !document.body.contains(schedEntryBtn)) {
-      tryPlaceEntry();
+    },
+    show() {
+      this.open = true;
+      document.documentElement.setAttribute(ACTIVE_ATTR, "");
+      document.dispatchEvent(new CustomEvent(PANEL_ACTIVATE_EVENT, { detail: PANEL_NAME }));
+      this.emit();
+    },
+    hide() {
+      this.open = false;
+      document.documentElement.removeAttribute(ACTIVE_ATTR);
+      this.emit();
+    },
+    toggle() {
+      if (this.open) this.hide();
+      else this.show();
     }
-  }, 3e3);
-  document.addEventListener("dsh-panel-activate", function(e) {
-    if (e.detail !== "sched" && schedIsActive) deactivateSchedPage();
-  });
+  };
+  {
+    let root = null, container = null;
+    const ensure = () => {
+      if (container !== null) return;
+      try {
+        const col = document.querySelector('[data-pane="conversation"], [class*="centerCol"]');
+        if (!col) return;
+        container = document.createElement("div");
+        container.setAttribute(VIEW_ATTR, "");
+        col.appendChild(container);
+        root = require("react-dom/client").createRoot(container);
+        root.render(j(Dashboard, { onClose: () => panel.hide() }));
+      } catch (e) {
+        cctx.logger?.warn?.("[node-sched-ui] view mount failed:", e?.message);
+      }
+    };
+    const viewWaitObs = new MutationObserver(() => ensure());
+    viewWaitObs.observe(document.body, { childList: true, subtree: true });
+    ensure();
+    const onOtherActivate = (e) => {
+      if (e.detail !== PANEL_NAME && panel.isOpen()) panel.hide();
+    };
+    document.addEventListener(PANEL_ACTIVATE_EVENT, onOtherActivate);
+    const SIDEBAR_ROW = '[class*="sessionRow"], [class*="projectRow"], [class*="searchResultRow"], [class*="searchResultWorkspace"], [class*="newSession"]';
+    const onSidebarClick = (ev) => {
+      if (!panel.isOpen()) return;
+      const t = ev.target;
+      if (t && t.closest && t.closest(SIDEBAR_ROW)) panel.hide();
+    };
+    document.addEventListener("click", onSidebarClick, true);
+    disposersUI.push(() => {
+      viewWaitObs.disconnect();
+      document.removeEventListener(PANEL_ACTIVATE_EVENT, onOtherActivate);
+      document.removeEventListener("click", onSidebarClick);
+      document.documentElement.removeAttribute(ACTIVE_ATTR);
+      try {
+        root?.unmount();
+      } catch (_) {
+      }
+      container?.remove();
+    });
+  }
+  {
+    if (document.querySelector("[" + ENTRY_ATTR + "]") === null) {
+      const entry = document.createElement("button");
+      entry.type = "button";
+      entry.setAttribute(ENTRY_ATTR, "");
+      entry.className = "nsEntry";
+      entry.setAttribute("aria-label", "sched \u770B\u677F");
+      entry.title = "node-sched GPU/CPU \u8C03\u5EA6\u770B\u677F";
+      entry.innerHTML = '<span class="nsEntryIcon"><svg viewBox="0 0 16 16" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="2.5" width="12" height="11" rx="1.5"/><path d="M2 6.5h12M6.5 6.5v7"/></svg></span><span class="nsEntryLabel">sched \u770B\u677F</span>';
+      entry.addEventListener("click", () => panel.toggle());
+      let rootEl, placed = false;
+      const sidebarRoot = () => {
+        const col = document.querySelector('[data-pane="sidebar"], [class*="sidebarCol"]');
+        if (!col) return void 0;
+        return col.querySelector('[class*="logoRow"]')?.parentElement ?? col.firstElementChild;
+      };
+      const newSessionButton = (root) => {
+        const nested = root.querySelector('button[class*="newSession"]');
+        if (nested) return nested;
+        for (const child of root.children) if (child.tagName === "BUTTON") return child;
+        return void 0;
+      };
+      const placeEntry = (root) => {
+        const btn2 = newSessionButton(root);
+        if (!btn2) return false;
+        if (entry.parentElement !== root) {
+          const row = btn2.closest('[class*="logoRow"]');
+          const base = row && row.parentElement === root ? row : btn2;
+          root.insertBefore(entry, base.nextElementSibling);
+        }
+        return true;
+      };
+      const tryPlace = () => {
+        if (rootEl !== void 0 && !rootEl.isConnected) {
+          rootObs.disconnect();
+          rootEl = void 0;
+          placed = false;
+        }
+        if (placed) {
+          if (document.body.contains(entry)) return;
+          rootObs.disconnect();
+          rootEl = void 0;
+          placed = false;
+        }
+        rootEl ??= sidebarRoot();
+        if (!rootEl) return;
+        placed = placeEntry(rootEl);
+        if (placed) rootObs.observe(rootEl, { childList: true, subtree: true });
+      };
+      const waitObs = new MutationObserver(() => tryPlace());
+      waitObs.observe(document.body, { childList: true, subtree: true });
+      const rootObs = new MutationObserver(() => {
+        if (!rootEl || !rootEl.isConnected) {
+          placed = false;
+          tryPlace();
+          return;
+        }
+        if (!rootEl.contains(entry)) placeEntry(rootEl);
+      });
+      const unsubActive = panel.subscribe(() => {
+        if (panel.isOpen()) entry.dataset.active = "true";
+        else delete entry.dataset.active;
+      });
+      tryPlace();
+      disposersUI.push(() => {
+        waitObs.disconnect();
+        rootObs.disconnect();
+        unsubActive();
+        entry.remove();
+      });
+    }
+  }
+  const disposeSettings = cctx.slots.inject(SLOT_SETTINGS, () => cctx.slots.register({ name: SLOT_SETTINGS, id: NS, order: 90 }, StatusCard));
+  disposersUI.push(disposeSettings);
   return () => {
-    disposeSettings?.();
+    for (const d of disposersUI) {
+      try {
+        d?.();
+      } catch (_) {
+      }
+    }
   };
 }
 		return module.exports;
