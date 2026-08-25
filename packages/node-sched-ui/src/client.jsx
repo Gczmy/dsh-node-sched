@@ -110,7 +110,8 @@ function apply(cctx, config) {
 	// 柔和按钮：状态色 12% 底纹 + 同色文字，双主题自动柔和（不再用高饱和实底）
 	const btn = (color = T.brand, disabled) => {
 		if (disabled) {
-			return { background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label2, borderRadius: 6, padding: "3px 10px", fontSize: 11, cursor: "default", marginRight: 4 };
+			// 几何尺寸与 enabled 分支一致（radius/padding/fontSize），仅配色降级
+			return { background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label2, borderRadius: 8, padding: "6px 14px", fontSize: 13, cursor: "default", marginRight: 4 };
 		}
 		return {
 			background: `color-mix(in srgb, ${color} 12%, transparent)`,

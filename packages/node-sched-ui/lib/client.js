@@ -124,7 +124,7 @@ function apply(cctx, config) {
   const pre = { margin: "4px 0", whiteSpace: "pre-wrap", background: T.bgLayer, border: `1px solid ${T.border}`, borderRadius: 8, padding: 10, fontSize: 11.5, color: T.label };
   const btn = (color = T.brand, disabled) => {
     if (disabled) {
-      return { background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label2, borderRadius: 6, padding: "3px 10px", fontSize: 11, cursor: "default", marginRight: 4 };
+      return { background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label2, borderRadius: 8, padding: "6px 14px", fontSize: 13, cursor: "default", marginRight: 4 };
     }
     return {
       background: `color-mix(in srgb, ${color} 12%, transparent)`,
