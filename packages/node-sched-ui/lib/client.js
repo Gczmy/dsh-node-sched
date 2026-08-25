@@ -6574,6 +6574,7 @@ function apply(cctx, config) {
         ws.onmessage = (e) => {
           const m = JSON.parse(e.data);
           if (m.type === "log") setState((s) => ({ ...s, lines: [...s.lines.slice(-400), m.line] }));
+          else if (m.type === "kbdint") setState((s) => ({ ...s, kbdint: m }));
         };
         ws.onclose = () => {
           if (!closed) timer = setTimeout(connect, 3e3);
@@ -6638,6 +6639,88 @@ function apply(cctx, config) {
           j("button", { onClick: onClose, style: ghostBtn }, "\xD7")
         ]),
         j("pre", { style: { ...pre, maxHeight: "60vh", overflow: "auto" } }, text)
+      ])
+    ]);
+  }
+  function KbdintModal({ req }) {
+    const [code, setCode] = useState("");
+    const [sending, setSending] = useState(false);
+    useEffect(() => {
+      setCode("");
+      setSending(false);
+    }, [req?.id]);
+    if (!req) return null;
+    const submit = async () => {
+      if (!code.trim() || sending) return;
+      setSending(true);
+      try {
+        await fetch("/sched/ssh/2fa-answer", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ id: req.id, code: code.trim() })
+        });
+      } catch {
+      }
+    };
+    return j("div", { style: {
+      position: "fixed",
+      inset: 0,
+      zIndex: 11e3,
+      background: "rgba(0,0,0,.5)",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center"
+    } }, [
+      jsxs2("div", { style: {
+        background: "var(--dsw-alias-bg-layer-1, var(--dsw-alias-bg-base, #fff))",
+        border: `1px solid ${T.border2}`,
+        borderRadius: 12,
+        padding: 18,
+        width: "min(400px, 92vw)",
+        display: "flex",
+        flexDirection: "column",
+        gap: 10,
+        boxShadow: "0 18px 60px rgba(0,0,0,.45)",
+        color: T.label,
+        fontFamily: T.font
+      } }, [
+        jsxs2("div", { style: { display: "flex", gap: 8, alignItems: "center" } }, [
+          j("b", { style: { fontSize: 14 } }, "SSH \u53CC\u56E0\u5B50\u9A8C\u8BC1"),
+          j("span", { style: { color: T.brand, fontWeight: 700, fontSize: 13 } }, req.alias)
+        ]),
+        j(
+          "div",
+          { style: { fontSize: 13, color: T.label2 } },
+          `${req.prompt || "Verification code:"} \u2014\u2014 \u8BF7\u8F93\u5165\u9A8C\u8BC1\u5668 App \u5F53\u524D\u52A8\u6001\u7801`
+        ),
+        jsxs2("div", { style: { display: "flex", gap: 8 } }, [
+          j("input", {
+            autoFocus: true,
+            value: code,
+            onChange: (e) => setCode(e.target.value),
+            onKeyDown: (e) => {
+              if (e.key === "Enter") submit();
+            },
+            placeholder: "\u52A8\u6001\u7801 / \u9A8C\u8BC1\u7801",
+            style: {
+              flex: 1,
+              padding: "7px 10px",
+              fontSize: 14,
+              fontFamily: T.font,
+              border: `1px solid ${T.border2}`,
+              borderRadius: 8,
+              outline: "none",
+              color: T.label,
+              background: "var(--dsw-alias-bg-base)"
+            }
+          }),
+          j(
+            "button",
+            { onClick: submit, disabled: !code.trim() || sending, style: btn(T.ok, !code.trim() || sending) },
+            sending ? "\u63D0\u4EA4\u4E2D\u2026" : "\u786E\u8BA4"
+          )
+        ]),
+        j("div", { style: { fontSize: 11, color: T.label2 } }, "180 \u79D2\u5185\u672A\u63D0\u4EA4\u5C06\u81EA\u52A8\u653E\u5F03\u672C\u6B21\u8FDE\u63A5")
       ])
     ]);
   }
@@ -7529,6 +7612,8 @@ function apply(cctx, config) {
           ]),
           ...["batches", "gpus", "events", "submit", "config", "incidents", "ssh"].map((t) => j("button", { key: t, onClick: () => setTab(t), style: tab === t ? btn(T.brand) : ghostBtn }, t))
         ]),
+        // B24c: SSH 2FA 动态码弹窗（引擎质询桥接到看板）
+        j(KbdintModal, { req: stream.kbdint }),
         opMsg && j("div", { style: { fontSize: 13, color: T.warn, marginBottom: 4 } }, opMsg),
         tab === "batches" && jsxs2("div", null, [
           j(DaemonBar, null),

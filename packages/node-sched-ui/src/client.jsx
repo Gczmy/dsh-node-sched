@@ -201,6 +201,9 @@ function apply(cctx, config) {
 				ws.onmessage = (e) => {
 					const m = JSON.parse(e.data);
 					if (m.type === "log") setState((s) => ({ ...s, lines: [...s.lines.slice(-400), m.line] }));
+			
+					// B24c: SSH 2FA 质询 → 弹窗交给用户应答
+					else if (m.type === "kbdint") setState((s) => ({ ...s, kbdint: m }));
 				};
 				ws.onclose = () => { if (!closed) timer = setTimeout(connect, 3000); setState((s) => ({ ...s, connected: false })); };
 			};
@@ -253,6 +256,57 @@ function apply(cctx, config) {
 	}
 
 	// ── B23 组件：依赖 apply 作用域的 j/hooks/T/btn ──
+	// B24c: SSH 2FA 质询弹窗 —— 用户输入动态码回传引擎，连接继续握手
+	function KbdintModal({ req }) {
+		const [code, setCode] = useState("");
+		const [sending, setSending] = useState(false);
+		useEffect(() => { setCode(""); setSending(false); }, [req?.id]);
+		if (!req) return null;
+		const submit = async () => {
+			if (!code.trim() || sending) return;
+			setSending(true);
+			try {
+				await fetch("/sched/ssh/2fa-answer", {
+					method: "POST", headers: { "content-type": "application/json" },
+					body: JSON.stringify({ id: req.id, code: code.trim() }),
+				});
+			} catch { /* 引擎侧超时/过期会以连接失败形式呈现 */ }
+		};
+		return j("div", { style: {
+			position: "fixed", inset: 0, zIndex: 11000,
+			background: "rgba(0,0,0,.5)", display: "flex", alignItems: "center", justifyContent: "center",
+		} }, [
+			jsxs2("div", { style: {
+				background: "var(--dsw-alias-bg-layer-1, var(--dsw-alias-bg-base, #fff))",
+				border: `1px solid ${T.border2}`, borderRadius: 12, padding: 18,
+				width: "min(400px, 92vw)", display: "flex", flexDirection: "column", gap: 10,
+				boxShadow: "0 18px 60px rgba(0,0,0,.45)", color: T.label, fontFamily: T.font,
+			} }, [
+				jsxs2("div", { style: { display: "flex", gap: 8, alignItems: "center" } }, [
+					j("b", { style: { fontSize: 14 } }, "SSH 双因子验证"),
+					j("span", { style: { color: T.brand, fontWeight: 700, fontSize: 13 } }, req.alias),
+				]),
+				j("div", { style: { fontSize: 13, color: T.label2 } },
+					`${req.prompt || "Verification code:"} —— 请输入验证器 App 当前动态码`),
+				jsxs2("div", { style: { display: "flex", gap: 8 } }, [
+					j("input", {
+						autoFocus: true,
+						value: code,
+						onChange: (e) => setCode(e.target.value),
+						onKeyDown: (e) => { if (e.key === "Enter") submit(); },
+						placeholder: "动态码 / 验证码",
+						style: { flex: 1, padding: "7px 10px", fontSize: 14, fontFamily: T.font,
+							border: `1px solid ${T.border2}`, borderRadius: 8, outline: "none",
+							color: T.label, background: "var(--dsw-alias-bg-base)" },
+					}),
+					j("button", { onClick: submit, disabled: !code.trim() || sending, style: btn(T.ok, !code.trim() || sending) },
+						sending ? "\u63d0\u4ea4\u4e2d\u2026" : "\u786e\u8ba4"),
+				]),
+				j("div", { style: { fontSize: 11, color: T.label2 } }, "180 秒内未提交将自动放弃本次连接"),
+			]),
+		]);
+	}
+
 	function SshTab() {
 		const [hosts, setHosts] = useState(null);
 		const [busy, setBusy] = useState("");
@@ -974,6 +1028,8 @@ function apply(cctx, config) {
 					...["batches", "gpus", "events", "submit", "config", "incidents", "ssh"].map((t) =>
 						j("button", { key: t, onClick: () => setTab(t), style: tab === t ? btn(T.brand) : ghostBtn }, t)),
 				]),
+				// B24c: SSH 2FA 动态码弹窗（引擎质询桥接到看板）
+				j(KbdintModal, { req: stream.kbdint }),
 				opMsg && j("div", { style: { fontSize: 13, color: T.warn, marginBottom: 4 } }, opMsg),
 				tab === "batches" && jsxs2("div", null, [
 					j(DaemonBar, null),

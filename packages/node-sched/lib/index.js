@@ -163,6 +163,31 @@ function apply(ctx, config) {
 	/** 绑定的 sched 主机别名；null = 传统 ssh CLI 模式 (config.sshEntry)。 */
 	let boundAlias = null;
 
+	// ── B24c: 交互式 2FA 桥接 ──
+	// 质询 → WS 广播给看板 → 用户输入动态码 → POST /sched/ssh/2fa-answer 回来。
+	// broadcastFn 由 webServer 块后置绑定；无看板在线时快速失败并给出明确提示。
+	const pending2fa = new Map(); // id -> resolver
+	let broadcastFn = null;
+	sshEngine.setInteractivePrompter(({ alias, instr, prompts }) => new Promise((resolve) => {
+		if (typeof broadcastFn !== "function") {
+			throw new Error("2FA \u8d28\u8be2\u9700\u8981\u770b\u677f\u5728\u7ebf\u4ea4\u4e92\uff08\u5f53\u524d\u65e0\u6d4f\u89c8\u5668\u8fde\u63a5\uff09");
+		}
+		const id = `k${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+		pending2fa.set(id, resolve);
+		setTimeout(() => {
+			if (pending2fa.delete(id)) {
+				ctx.logger.warn("[node-sched] audit 2fa-timeout id=%s alias=%s", id, alias);
+				resolve("");
+			}
+		}, 180_000);
+		ctx.logger.warn("[node-sched] audit 2fa-request id=%s alias=%s", id, alias);
+		broadcastFn({
+			type: "kbdint",
+			id, alias,
+			prompt: (prompts && prompts[0] && prompts[0].text) || instr || "Verification code:",
+		});
+	}));
+
 	const runRemoteCli = makeRunner(cp, config);
 	/**
 	 * B24: 双通道调度。绑定 sched 主机（ssh 面板设置）后，所有 sched 命令
@@ -669,6 +694,8 @@ function apply(ctx, config) {
 				try { ws.send(msg); } catch { /* socket closing */ }
 			}
 		}
+		// B24c: 引擎 prompter 复用同一条事件通道
+		broadcastFn = broadcast;
 
 		/** Tail the dispatcher decision log; restart with backoff while clients exist.
 		 * State dir partitions by the configured COMPUTE node (~/.sched/<node>/),
@@ -912,6 +939,38 @@ function apply(ctx, config) {
 					} catch { /* \u6301\u4e45\u5316\u5931\u8d25\u4e0d\u963b\u585e\u89e3\u7ed1 */ }
 					ctx.logger.warn("[node-sched] audit #%d sched-unbind <- %s", ++auditSeq, prev);
 					json(res, { ok: true, prev, mode: "cli", sshEntry: config.sshEntry });
+				},
+			}),
+
+			ctx.webServer.register({
+				kind: "prefix",
+				path: "/sched/ssh/2fa-pending",
+				handler: async (req, res) => {
+					if (!loopbackOnly(req, res)) return;
+					json(res, { pending: [...pending2fa.keys()] });
+				},
+			}),
+
+			ctx.webServer.register({
+				kind: "prefix",
+				path: "/sched/ssh/2fa-answer",
+				handler: async (req, res) => {
+					if (!loopbackOnly(req, res)) return;
+					try {
+						const body = await readBodyJson(req);
+						const id = String(body.id ?? "");
+						const code = String(body.code ?? "");
+						const resolver = pending2fa.get(id);
+						if (!resolver) {
+							return void json(res, { ok: false, error: "\u8bf7\u6c42\u4e0d\u5b58\u5728\u6216\u5df2\u8fc7\u671f" }, 404);
+						}
+						pending2fa.delete(id);
+						resolver(code); // 答案交给引擎；对错由下一次握手结果说话
+						ctx.logger.warn("[node-sched] audit 2fa-answer id=%s", id);
+						json(res, { ok: true });
+					} catch (e) {
+						json(res, { ok: false, error: String(e.message ?? e) }, 400);
+					}
 				},
 			}),
 		);

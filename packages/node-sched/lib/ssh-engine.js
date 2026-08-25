@@ -237,6 +237,15 @@ export class SshEngine {
 		this.sweepTimer.unref?.();
 	}
 
+	/**
+	 * B24c: 交互式 2FA 桥接。注册后，连接遇到 keyboard-interactive 质询且
+	 * 条目无静态应答时，调用 prompter({alias, name, instr, prompts}) 并 await
+	 * 其返回值作为答案（如看板弹窗让用户输入 TOTP 动态码）。返回 Promise<string>。
+	 */
+	setInteractivePrompter(fn) {
+		this.interactivePrompter = fn;
+	}
+
 	list(query) {
 		const needle = query?.trim().toLowerCase();
 		return this.store.list()
@@ -305,8 +314,8 @@ export function buildConnectConfig(entry, sock, opts) {
 		keepaliveCountMax: 3,
 	};
 	if (sock !== undefined) config.sock = sock;
-	// B24b: 双因子 —— 服务端在 publickey 部分成功后要求 keyboard-interactive 时，
-	// 用条目内可选的 kbdintPassword 自动应答（HPC 登录节点常见策略）
+	// B24b/B24c: 静态应答（条目内 kbdintPassword）在此挂载；交互式质询由
+	// connectChain 的 attachKbdint 按 engine.interactivePrompter 补挂
 	const kbdintAnswer = entry.auth.kbdintPassword ?? (entry.auth.kind === "password" ? entry.auth.password : undefined);
 	if (kbdintAnswer) {
 		config.tryKeyboard = true;
@@ -349,10 +358,37 @@ function connectClient(config) {
 			reject(error instanceof Error ? error : new Error(String(error)));
 		};
 		client.once("ready", () => { if (!settled) { settled = true; resolve(client); } });
-		// keyboard-interactive 质询：有预存应答则自动回应（无则保持默认失败路径）
-		config._kbdintAnswer !== undefined && client.on("keyboard-interactive", (_name, _instr, _lang, prompts, finish) => {
-			finish(new Array(prompts.length).fill(config._kbdintAnswer));
-		});
+		// keyboard-interactive 质询：
+		// a) 有预存静态应答 → 立即回应；
+		// b) 无静态应答但有交互 prompter（B24c）→ 转发给用户，await 应答（超时 180s 视为放弃）
+		if (config._kbdintAnswer !== undefined) {
+			client.on("keyboard-interactive", (_name, _instr, _lang, prompts, finish) => {
+				finish(new Array(prompts.length).fill(config._kbdintAnswer));
+			});
+		} else if (typeof config._interactive2fa === "object") {
+			const { alias } = config._interactive2fa;
+			client.on("keyboard-interactive", (name, instr, lang, prompts, finish) => {
+				let answered = false;
+				const timer = setTimeout(() => {
+					if (answered) return;
+					answered = true;
+					finish(new Array(prompts.length).fill(""));
+				}, 180_000);
+				Promise.resolve(config._interactive2fa.prompter({ alias, name, instr, prompts }))
+					.then((answer) => {
+						if (answered) return;
+						answered = true;
+						clearTimeout(timer);
+						finish(new Array(prompts.length).fill(String(answer ?? "")));
+					})
+					.catch(() => {
+						if (answered) return;
+						answered = true;
+						clearTimeout(timer);
+						finish(new Array(prompts.length).fill(""));
+					});
+			});
+		}
 		// Persistent error listener: ssh2 can emit a second 'error' after the
 		// once-listener is consumed (TCP ok, handshake drop); without it that
 		// surfaces as an unhandled 'error' event crashing the host process.
@@ -370,12 +406,21 @@ async function connectChain(engine, entry) {
 	const hops = [];
 	let sock;
 	const chain = entry.proxyJump ?? [];
+	/** 交互式质询桥接：无静态应答但看板在线时，把质询转发给用户 */
+	const attachKbdint = (config, alias) => {
+		if (config._kbdintAnswer !== undefined) return;
+		if (typeof engine.interactivePrompter !== "function") return;
+		config.tryKeyboard = true;
+		config._interactive2fa = { alias, prompter: engine.interactivePrompter };
+	};
 	try {
 		for (let index = 0; index < chain.length; index += 1) {
 			const hopAlias = chain[index];
 			const hop = engine.store.find(hopAlias);
 			if (!hop) throw new Error(`proxyJump alias '${hopAlias}' not found — create it first`);
-			const hopClient = await connectClient(buildConnectConfig(hop, sock, engine.opts));
+			const hopCfg = buildConnectConfig(hop, sock, engine.opts);
+			attachKbdint(hopCfg, hopAlias);
+			const hopClient = await connectClient(hopCfg);
 			hops.push(hopClient);
 			const next = index + 1 < chain.length ? engine.store.find(chain[index + 1]) : undefined;
 			const nextHost = next ? next.host : entry.host;
@@ -391,7 +436,9 @@ async function connectChain(engine, entry) {
 		throw error;
 	}
 	try {
-		const target = await connectClient(buildConnectConfig(entry, sock, engine.opts));
+		const targetCfg = buildConnectConfig(entry, sock, engine.opts);
+		attachKbdint(targetCfg, entry.alias);
+		const target = await connectClient(targetCfg);
 		return { client: target, hops };
 	} catch (error) {
 		for (const client of hops) { try { client.end(); } catch { /* closed */ } }
