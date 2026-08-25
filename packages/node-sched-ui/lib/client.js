@@ -6650,17 +6650,24 @@ function apply(cctx, config) {
       setSending(false);
     }, [req?.id]);
     if (!req) return null;
-    const submit = async () => {
-      if (!code.trim() || sending) return;
+    const sendAnswer = async (answer) => {
       setSending(true);
       try {
         await fetch("/sched/ssh/2fa-answer", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ id: req.id, code: code.trim() })
+          body: JSON.stringify({ id: req.id, answer })
         });
       } catch {
       }
+    };
+    const submit = async () => {
+      if (!code.trim() || sending) return;
+      await sendAnswer({ kind: "code", code: code.trim() });
+    };
+    const cancel = async () => {
+      if (sending) return;
+      await sendAnswer({ kind: "cancel" });
     };
     return j("div", { style: {
       position: "fixed",
@@ -6718,7 +6725,8 @@ function apply(cctx, config) {
             "button",
             { onClick: submit, disabled: !code.trim() || sending, style: btn(T.ok, !code.trim() || sending) },
             sending ? "\u63D0\u4EA4\u4E2D\u2026" : "\u786E\u8BA4"
-          )
+          ),
+          j("button", { onClick: cancel, disabled: sending, title: "\u653E\u5F03\u672C\u6B21\u8FDE\u63A5", style: { ...ghostBtn, flexShrink: 0 } }, "\u53D6\u6D88")
         ]),
         j("div", { style: { fontSize: 11, color: T.label2 } }, "180 \u79D2\u5185\u672A\u63D0\u4EA4\u5C06\u81EA\u52A8\u653E\u5F03\u672C\u6B21\u8FDE\u63A5")
       ])

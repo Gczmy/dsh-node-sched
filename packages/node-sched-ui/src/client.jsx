@@ -262,15 +262,23 @@ function apply(cctx, config) {
 		const [sending, setSending] = useState(false);
 		useEffect(() => { setCode(""); setSending(false); }, [req?.id]);
 		if (!req) return null;
-		const submit = async () => {
-			if (!code.trim() || sending) return;
+		const sendAnswer = async (answer) => {
 			setSending(true);
 			try {
 				await fetch("/sched/ssh/2fa-answer", {
 					method: "POST", headers: { "content-type": "application/json" },
-					body: JSON.stringify({ id: req.id, code: code.trim() }),
+					body: JSON.stringify({ id: req.id, answer }),
 				});
 			} catch { /* 引擎侧超时/过期会以连接失败形式呈现 */ }
+		};
+		const submit = async () => {
+			if (!code.trim() || sending) return;
+			await sendAnswer({ kind: "code", code: code.trim() });
+		};
+		// 取消：通知引擎立即放弃本次握手，本地关窗
+		const cancel = async () => {
+			if (sending) return;
+			await sendAnswer({ kind: "cancel" });
 		};
 		return j("div", { style: {
 			position: "fixed", inset: 0, zIndex: 11000,
@@ -301,6 +309,7 @@ function apply(cctx, config) {
 					}),
 					j("button", { onClick: submit, disabled: !code.trim() || sending, style: btn(T.ok, !code.trim() || sending) },
 						sending ? "\u63d0\u4ea4\u4e2d\u2026" : "\u786e\u8ba4"),
+					j("button", { onClick: cancel, disabled: sending, title: "放弃本次连接", style: { ...ghostBtn, flexShrink: 0 } }, "\u53d6\u6d88"),
 				]),
 				j("div", { style: { fontSize: 11, color: T.label2 } }, "180 秒内未提交将自动放弃本次连接"),
 			]),
