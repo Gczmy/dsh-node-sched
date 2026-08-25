@@ -965,8 +965,14 @@ function apply(ctx, config) {
 							return void json(res, { ok: false, error: "\u8bf7\u6c42\u4e0d\u5b58\u5728\u6216\u5df2\u8fc7\u671f" }, 404);
 						}
 						pending2fa.delete(id);
-						resolver(code); // 答案交给引擎；对错由下一次握手结果说话
-						ctx.logger.warn("[node-sched] audit 2fa-answer id=%s", id);
+						if (answer.kind === "cancel") {
+							ctx.logger.warn("[node-sched] audit 2fa-cancel id=%s (user)", id);
+							resolver(""); // 答案交给引擎；对错由下一次握手结果说话
+						} else {
+							const code = String(answer.code ?? "");
+							ctx.logger.warn("[node-sched] audit 2fa-answer id=%s", id);
+							resolver(code);
+						}
 						json(res, { ok: true });
 					} catch (e) {
 						json(res, { ok: false, error: String(e.message ?? e) }, 400);
