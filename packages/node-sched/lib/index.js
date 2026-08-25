@@ -25,6 +25,7 @@ import path from "node:path";
 import z from "@deepseek-ai/schemastery";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { WebSocketServer } from "ws";
+import { HostStore, SshEngine } from "./ssh-engine.js";
 
 const name = "node-sched";
 
@@ -346,6 +347,7 @@ function apply(ctx, config) {
 			if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = undefined; }
 		}
 	const routeDisposers = [];
+	let postApplyCleanup = null;
 	let heartbeat;
 	if (ctx.webServer) {
 		const json = async (res, body, code = 200) => {
@@ -694,6 +696,168 @@ function apply(ctx, config) {
 				},
 			}),
 		);
+
+		// ── B22: 内嵌 SSH 引擎（复刻自 Apache-2.0 dsh-ssh，见 ssh-engine.js）──
+		// 主机 CRUD + ~/.ssh/config 导入 + 连接池 exec + xterm WS PTY 终端。
+		// 安全模型：所有路由仅限 loopback（这些接口能在远程服务器执行命令），
+		// 秘密只存 ~/.dsh/dsh-ssh.json (0600)，浏览器只见无秘密摘要。
+		const sshStore = new HostStore();
+		const sshEngine = new SshEngine(sshStore);
+		postApplyCleanup = () => sshEngine.dispose();
+		/** Loopback-only fence: these endpoints execute remote commands. */
+		const loopbackOnly = (req, res) => {
+			const remote = req.socket?.remoteAddress ?? "";
+			const isLo = remote === "127.0.0.1" || remote === "::1" || remote === "::ffff:127.0.0.1";
+			if (!isLo) json(res, { error: "forbidden: loopback-only" }, 403);
+			return isLo;
+		};
+		const aliasOf = (req) => {
+			const u = new URL(req.url, "http://x");
+			return u.searchParams.get("alias") ?? "";
+		};
+
+		routeDisposers.push(
+			ctx.webServer.register({
+				kind: "prefix",
+				path: "/sched/ssh/hosts",
+				handler: async (req, res) => {
+					if (!loopbackOnly(req, res)) return;
+					try {
+						const method = req.method ?? "GET";
+						if (method === "GET") {
+							const u = new URL(req.url, "http://x");
+							return void json(res, { hosts: sshEngine.list(u.searchParams.get("query") ?? undefined) });
+						}
+						if (method === "POST") {
+							const entry = sshStore.create(await readBodyJson(req));
+							return void json(res, { host: sshStore.summarize(entry) }, 201);
+						}
+						const alias = aliasOf(req);
+						if (!alias) return void json(res, { error: "alias query param required" }, 400);
+						if (method === "PATCH") {
+							const entry = sshStore.update(alias, await readBodyJson(req));
+							sshEngine.dropAlias(alias); // 凭据/地址变更绝不复用旧连接
+							return void json(res, { host: sshStore.summarize(entry) });
+						}
+						if (method === "DELETE") {
+							const removed = sshStore.remove(alias);
+							sshEngine.dropAlias(alias);
+							return void json(res, { removed });
+						}
+						json(res, { error: `method not allowed: ${method}` }, 405);
+					} catch (e) {
+						json(res, { error: String(e.message ?? e) }, 400);
+					}
+				},
+			}),
+
+			ctx.webServer.register({
+				kind: "prefix",
+				path: "/sched/ssh/import",
+				handler: async (req, res) => {
+					if (!loopbackOnly(req, res)) return;
+					try {
+						json(res, { result: sshStore.importSshConfig() });
+					} catch (e) {
+						json(res, { error: String(e.message ?? e) }, 400);
+					}
+				},
+			}),
+
+			ctx.webServer.register({
+				kind: "prefix",
+				path: "/sched/ssh/test",
+				handler: async (req, res) => {
+					if (!loopbackOnly(req, res)) return;
+					try {
+						const body = await readBodyJson(req);
+						json(res, await sshEngine.test(String(body.alias ?? "")));
+					} catch (e) {
+						json(res, { ok: false, error: String(e.message ?? e) });
+					}
+				},
+			}),
+
+			ctx.webServer.register({
+				kind: "prefix",
+				path: "/sched/ssh/exec",
+				handler: async (req, res) => {
+					if (!loopbackOnly(req, res)) return;
+					try {
+						const body = await readBodyJson(req);
+						const command = String(body.command ?? "").trim();
+						if (!command) return void json(res, { error: "command required" }, 400);
+						ctx.logger.warn("[node-sched] audit ssh-exec %s: %s", body.alias, command.slice(0, 120));
+						json(res, await sshEngine.exec(String(body.alias ?? ""), command, body.timeoutMs));
+					} catch (e) {
+						json(res, { success: false, exitCode: null, timedOut: false, stdout: "", stderr: "", durationMs: 0, error: String(e.message ?? e) });
+					}
+				},
+			}),
+		);
+
+		// Web 终端：WS 升级 -> 独立 PTY shell 连接。帧协议与 dsh-ssh 相同：
+		// server->client {ready|output|exit}, client->server {input|resize}。
+		{
+			const termWss = new WebSocketServer({ noServer: true });
+			const HIGH_WATER = 1024 * 1024, LOW_WATER = 512 * 1024;
+			routeDisposers.push(
+				ctx.webServer.registerUpgrade({
+					path: "/sched/ws/ssh-terminal",
+					handler: (req, socket, head) => {
+						const remote = req.socket?.remoteAddress ?? "";
+						if (!(remote === "127.0.0.1" || remote === "::1" || remote === "::ffff:127.0.0.1")) {
+							socket.destroy();
+							return;
+						}
+						termWss.handleUpgrade(req, socket, head, async (ws) => {
+							const u = new URL(req.url, "http://x");
+							const alias = u.searchParams.get("alias") ?? "";
+							const cols = parseInt(u.searchParams.get("cols") || "80", 10) || 80;
+							const rows = parseInt(u.searchParams.get("rows") || "24", 10) || 24;
+							let session;
+							try {
+								session = await sshEngine.openShell(alias, { cols, rows });
+							} catch (e) {
+								ws.send(JSON.stringify({ type: "exit", code: null, error: String(e.message ?? e) }));
+								ws.close();
+								return;
+							}
+							let paused = false;
+							const maybePause = () => {
+								// 传输背压：发送缓冲超限则暂停远端输出，排空后恢复
+								const over = ws.bufferedAmount > HIGH_WATER;
+								if (over && !paused) { paused = true; session.pause?.(); }
+								else if (!over && paused) { paused = false; session.resume?.(); }
+							};
+							session.onData = (data) => {
+								if (ws.readyState === ws.OPEN) {
+									ws.send(JSON.stringify({ type: "output", data: data.toString("utf8") }));
+									maybePause();
+								}
+							};
+							session.onExit = (code, error) => {
+								try { ws.send(JSON.stringify({ type: "exit", code, error })); } catch { /* gone */ }
+								try { ws.close(); } catch { /* gone */ }
+							};
+							ws.send(JSON.stringify({ type: "ready", alias }));
+							ws.on("message", (raw) => {
+								try {
+									const frame = JSON.parse(raw.toString());
+									if (frame.type === "input") session.send(String(frame.data ?? ""));
+									else if (frame.type === "resize") {
+										session.resize(parseInt(frame.cols, 10) || 80, parseInt(frame.rows, 10) || 24);
+									}
+								} catch { /* malformed frame */ }
+							});
+							const bye = () => { try { session.close(); } catch { /* gone */ } };
+							ws.on("close", bye);
+							ws.on("error", bye);
+						});
+					},
+				}),
+			);
+		}
 	}
 
 	return () => {
@@ -701,6 +865,7 @@ function apply(ctx, config) {
 		for (const d of routeDisposers) { try { d?.(); } catch { /* already gone */ } }
 		clearInterval(heartbeat);
 		stopRefresher();
+		postApplyCleanup?.();
 	};
 }
 

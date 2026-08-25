@@ -15,6 +15,8 @@ await esbuild.build({
 	minify: false,
 	sourcemap: "external",
 	jsx: "automatic",
+	// xterm.css 以文本载入，运行时由客户端注入 <style>（dsh 只加载 client.js，无独立 css 通道）
+	loader: { ".css": "text" },
 	external: [
 		"react",
 		"react/jsx-runtime",
