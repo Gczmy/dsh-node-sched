@@ -1024,59 +1024,6 @@ function apply(cctx, config) {
       } })
     ]);
   }
-  function StatusCard() {
-    const [snap] = useSnapshot("/sched/api/status", 3e4);
-    const raw = snap?.raw;
-    const gpus = raw?.gpus ?? [];
-    const batches = raw?.batches ?? [];
-    const stColor = {
-      free: "#22c55e",
-      assigned: "#3b82f6",
-      releasing: "#eab308",
-      unmanaged: "#f97316",
-      quarantined: "#ef4444"
-    };
-    const act = batches.filter((b) => b.status === "active").length;
-    const blk = batches.filter((b) => b.status === "blocked").length;
-    const done = batches.filter((b) => ["done", "skip"].includes(b.status)).length;
-    const openPanel = () => window.dispatchEvent(new CustomEvent("nodesched-open"));
-    return jsxs2("div", { style: {
-      border: `1px solid ${T.border}`,
-      borderRadius: 8,
-      padding: "10px 12px",
-      background: T.bgLayer,
-      fontSize: 11,
-      fontFamily: "ui-monospace,monospace"
-    } }, [
-      jsxs2("div", { style: { display: "flex", alignItems: "center", marginBottom: 8 } }, [
-        j(
-          "span",
-          { style: { fontWeight: 700, color: T.brand, fontSize: 12 } },
-          "\u26A1 node-sched \u8C03\u5EA6\u5668"
-        ),
-        j("span", { style: { flex: 1 } }),
-        j("button", { onClick: openPanel, style: btn(T.brand) }, "\u6253\u5F00\u9762\u677F")
-      ]),
-      jsxs2(
-        "div",
-        { style: { display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 } },
-        gpus.map((g) => jsxs2("span", { key: g.idx, style: {
-          border: `1px solid ${T.border}`,
-          borderRadius: 4,
-          padding: "2px 6px",
-          color: stColor[g.status] || T.label2
-        } }, [
-          j("span", { style: { marginRight: 4, color: T.label } }, "GPU" + g.idx),
-          g.status
-        ]))
-      ),
-      jsxs2(
-        "div",
-        { style: { color: T.label2 } },
-        `\u6D3B\u8DC3 ${act} \xB7 \u963B\u585E ${blk} \xB7 \u5B8C\u6210 ${done}`
-      )
-    ]);
-  }
   cctx.logger?.info?.("[node-sched-ui] mounting footer entry + settings card");
   const disposeFooter = cctx.slots.inject(SLOT_FOOTER, () => cctx.slots.register({ name: SLOT_FOOTER, id: NS }, FooterEntry));
   const disposeSettings = cctx.slots.inject(SLOT_SETTINGS, () => cctx.slots.register({ name: SLOT_SETTINGS, id: NS, order: 90 }, StatusCard));
