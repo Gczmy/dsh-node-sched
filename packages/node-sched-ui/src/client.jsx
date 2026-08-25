@@ -115,27 +115,38 @@ function apply(cctx, config) {
 		return {
 			background: `color-mix(in srgb, ${color} 12%, transparent)`,
 			border: `1px solid color-mix(in srgb, ${color} 32%, transparent)`,
-			color, borderRadius: 6, padding: "3px 10px", fontSize: 11,
+			color, borderRadius: 8, padding: "6px 14px", fontSize: 13,
 			cursor: "pointer", marginRight: 4, transition: "background .15s",
 		};
 	};
-	const ghostBtn = { background: "transparent", border: `1px solid ${T.border}`, color: T.label, borderRadius: 6, padding: "3px 10px", fontSize: 11, cursor: "pointer", marginRight: 4 };
+	// web-ui ghostButton 对齐：13px 字号 + 8px 圆角 + hover 反馈
+	const ghostBtn = {
+		background: "var(--dsw-alias-interactive-bg-hover, transparent)", border: `1px solid ${T.border2}`,
+		color: T.label, borderRadius: 8, padding: "6px 14px", fontSize: 13,
+		cursor: "pointer", marginRight: 4, transition: "background-color 120ms ease",
+	};
+	const backBtn = { ...ghostBtn, display: "inline-flex", alignItems: "center", gap: 4, fontWeight: 500 };
+	const boardTitleStyle = { margin: 0, fontSize: 16, fontWeight: 700, color: T.label, whiteSpace: "nowrap" };
 		const badge = (s) => {
 		const c = COLORS[s] ?? T.label2;
 		return {
 			background: `color-mix(in srgb, ${c} 13%, transparent)`,
 			border: `1px solid color-mix(in srgb, ${c} 30%, transparent)`,
-			color: c, borderRadius: 999, padding: "0 7px", fontSize: 10, marginRight: 6,
+			color: c, borderRadius: 999, padding: "2px 9px", fontSize: 12, marginRight: 6,
 		};
 	};
 	// 页面视图：填满接管容器（不再是 fixed 弹窗；显隐由 html data 属性驱动）
 	const overlayStyle = {
 		position: "absolute", inset: 0, zIndex: 60,
+		display: "flex", flexDirection: "column", boxSizing: "border-box",
+		padding: "14px 16px 16px", gap: 8,
 		background: "var(--dsw-alias-bg-base)", overflowY: "auto",
+		color: T.label, fontFamily: T.font, fontSize: 13, lineHeight: 1.55,
 	};
 	const panelStyle = {
-		color: T.label, padding: 16, maxWidth: 1180, margin: "0 auto",
-		fontFamily: T.font, fontSize: 12, lineHeight: 1.55,
+		flex: 1, minHeight: 0, display: "flex", flexDirection: "column", gap: 8,
+		maxWidth: 1280, width: "100%", margin: "0 auto",
+		color: T.label, fontFamily: T.font, fontSize: 13, lineHeight: 1.55,
 	};
 	const bar = (pct) => ({ height: 6, background: "rgba(127,127,127,.2)", borderRadius: 3, overflow: "hidden", flex: 1, margin: "0 8px", display: "flex" });
 	const barFill = (pct) => ({ height: "100%", width: `${Math.max(0, Math.min(100, pct))}%`, background: T.brand });
@@ -717,7 +728,7 @@ function apply(cctx, config) {
 				j("textarea", {
 					value: text, onChange: (e) => setText(e.target.value),
 					placeholder: '粘贴 batch.json，例如 {"schema_version":1,"name":"my_batch","tasks":[{"id":"t1","cmd":["{VENV:k}","..."],"duration_min":5}]}（venv 别名见远端 config.venvs，当前为 k）',
-					style: { width: "100%", height: 150, fontFamily: "monospace", fontSize: 11 },
+					style: { width: "100%", height: 150, fontFamily: "monospace", fontSize: 12 },
 				}),
 				jsxs2("div", { style: { margin: "6px 0" } }, [
 					j("button", { onClick: doDryRun, disabled: !text.trim(), style: btn(T.brand, !text.trim()) }, "① dry-run 预览"),
@@ -730,30 +741,35 @@ function apply(cctx, config) {
 
 		return jsxs2("div", { style: overlayStyle }, [
 			jsxs2("div", { style: panelStyle }, [
-				jsxs2("div", { style: { display: "flex", gap: 8, alignItems: "center", marginBottom: 8 } }, [
-					j("b", null, "node-sched"),
-					j("span", { style: { color: stream.connected ? T.ok : T.err, fontSize: 11 } }, stream.connected ? "● live" : "○ offline"),
+				jsxs2("div", { style: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" } }, [
+					j("button", {
+						type: "button", onClick: onClose, style: backBtn,
+						title: "返回对话", "aria-label": "返回",
+					}, [
+						j("span", { "aria-hidden": true, style: { fontSize: 15 } }, "\u2039"),
+						j("span", null, "返回"),
+					]),
+					j("h2", { style: boardTitleStyle }, "sched 看板"),
+					j("span", { style: { color: stream.connected ? T.ok : T.err, fontSize: 12 } }, stream.connected ? "\u25cf live" : "\u25cb offline"),
 					j("button", { onClick: refreshSnap, style: ghostBtn }, "refresh"),
 					j("select", {
 						value: projFilter,
 						onChange: (e) => setProjFilter(e.target.value),
-						style: { background: "transparent", border: `1px solid ${T.border}`, color: T.label, borderRadius: 6, padding: "3px 6px", fontSize: 11, marginRight: 4 },
+						style: { background: "transparent", border: `1px solid ${T.border}`, color: T.label, borderRadius: 8, padding: "5px 8px", fontSize: 13, marginRight: 4 },
 					}, [
 						j("option", { value: "" }, "all projects"),
 						...projects.map((pr) => j("option", { key: pr, value: pr }, pr)),
 					]),
 					...["batches", "gpus", "events", "submit", "config", "incidents"].map((t) =>
 						j("button", { key: t, onClick: () => setTab(t), style: tab === t ? btn(T.brand) : ghostBtn }, t)),
-					j("span", { style: { flex: 1 } }),
-					j("button", { onClick: onClose, style: ghostBtn }, "×"),
 				]),
-				opMsg && j("div", { style: { fontSize: 11, color: T.warn, marginBottom: 4 } }, opMsg),
+				opMsg && j("div", { style: { fontSize: 13, color: T.warn, marginBottom: 4 } }, opMsg),
 				tab === "batches" && jsxs2("div", null, [
 					j(DaemonBar, null),
 					!summary && j("div", null, "loading…"),
 					summary && j("pre", { style: { ...pre, maxHeight: 110, overflow: "auto" } }, summary.split("\njobs:")[0]),
 					raw && jsxs2("div", {}, [
-					jsxs2("div", { style: { fontSize: 10, color: T.label2, marginBottom: 6 } }, [
+					jsxs2("div", { style: { fontSize: 12, color: T.label2, marginBottom: 6 } }, [
 						j("span", { style: { marginRight: 10, color: "#ef4444" } }, "■ 红=出错"),
 						j("span", { style: { marginRight: 10, color: "#22c55e" } }, "■ 绿=成功"),
 						j("span", { style: { marginRight: 10, color: "#3b82f6" } }, "■ 蓝=运行中"),
