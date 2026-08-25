@@ -68,6 +68,15 @@ var COLORS = {
 };
 function apply(cctx, config) {
   const { useEffect, useState, useCallback, useRef, memo } = require("react");
+  if (typeof document !== "undefined" && !document.getElementById("ns-card-style")) {
+    const st = document.createElement("style");
+    st.id = "ns-card-style";
+    st.textContent = [
+      ".ns-settings-card { transition: border-color .16s, background .16s; }",
+      ".ns-settings-card:hover { border-color: var(--dsw-alias-label-dimmed); }"
+    ].join("\n");
+    document.head.appendChild(st);
+  }
   let INC_CACHE = null;
   let INC_OPEN_ID = null;
   let INC_DETAIL = null;
@@ -988,7 +997,7 @@ function apply(cctx, config) {
       unmanaged: "#f97316",
       quarantined: "#ef4444"
     };
-    return jsxs2("div", { style: stCard }, [
+    return jsxs2("div", { className: "ns-settings-card", style: stCard }, [
       j("button", {
         type: "button",
         style: stHeader,

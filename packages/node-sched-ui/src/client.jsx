@@ -43,6 +43,16 @@ const COLORS = {
 function apply(cctx, config) {
 	const { useEffect, useState, useCallback, useRef, memo } = require("react");
 
+	if (typeof document !== "undefined" && !document.getElementById("ns-card-style")) {
+		const st = document.createElement("style");
+		st.id = "ns-card-style";
+		st.textContent = [
+			".ns-settings-card { transition: border-color .16s, background .16s; }",
+			".ns-settings-card:hover { border-color: var(--dsw-alias-label-dimmed); }"
+		].join("\n");
+		document.head.appendChild(st);
+	}
+
 	// B19: 跨重挂载缓存 —— 上游(看板外壳/轮询)可能随时重建本 tab 的组件树,
 	// 把数据与展开状态放模块级, 重挂载瞬间水合, 视觉零感知。
 	let INC_CACHE = null;        // {list, frozenAt}
@@ -796,7 +806,7 @@ function apply(cctx, config) {
 		const gpuColor = { free: "#22c55e", assigned: "#3b82f6",
 			releasing: "#eab308", unmanaged: "#f97316", quarantined: "#ef4444" };
 
-		return jsxs2("div", { style: stCard }, [
+		return jsxs2("div", { className: "ns-settings-card", style: stCard }, [
 			j("button", {
 				type: "button",
 				style: stHeader,
