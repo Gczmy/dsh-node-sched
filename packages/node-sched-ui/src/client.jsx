@@ -787,7 +787,7 @@ function apply(cctx, config) {
 		};
 		const stBody = {
 			borderTop: "1px solid var(--dsw-alias-border-l2)",
-			margin: "0 16px", paddingBottom: 8,
+			margin: "0 16px", paddingTop: 12, paddingBottom: 8,
 		};
 
 		const act = batches.filter((b) => b.status === "active").length;
