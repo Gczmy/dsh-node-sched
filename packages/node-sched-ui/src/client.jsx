@@ -9,7 +9,6 @@
  * Data: WS /sched/ws/events frames + fetch /sched/api/*.
  * Writes are all two-step confirmed in the UI; host side gates and audits.
  */
-const SLOT_FOOTER = "sidebar.footer.action";
 const SLOT_SETTINGS = "web-ui.plugin.item";
 const NS = "nodesched";
 
@@ -91,15 +90,19 @@ function apply(cctx, config) {
 			color: c, borderRadius: 999, padding: "0 7px", fontSize: 10, marginRight: 6,
 		};
 	};
-	const overlayStyle = {
-		position: "fixed", inset: 0, zIndex: 9999, background: "rgba(0,0,0,.45)",
-		backdropFilter: "blur(2px)",
-		display: "flex", alignItems: "center", justifyContent: "center",
+	// B20: 页面视图样式 (非 overlay) —— 占满 conversation 区域
+	const pageView = {
+		boxSizing: "border-box", width: "100%", height: "100%",
+		minHeight: 0, display: "flex", flexDirection: "column",
+		padding: "14px 16px 16px", gap: 12,
+		background: "var(--dsw-alias-bg-base)",
+		color: "var(--dsw-alias-label-primary)",
+		fontFamily: T.font, overflow: "auto",
 	};
 	const panelStyle = {
 		background: "var(--dsw-alias-bg-layer-1, var(--dsw-alias-bg-base, #fff))",
 		color: T.label, border: `1px solid var(--dsw-alias-border-l2, ${T.border})`, borderRadius: 12, padding: 16,
-		width: "min(960px, 94vw)", maxHeight: "88vh", overflow: "auto",
+		width: "100%", flex: 1, minHeight: 0, overflow: "auto",
 		boxShadow: "0 18px 60px rgba(0,0,0,.45)", fontFamily: T.font, fontSize: 12, lineHeight: 1.55,
 	};
 	const bar = (pct) => ({ height: 6, background: "rgba(127,127,127,.2)", borderRadius: 3, overflow: "hidden", flex: 1, margin: "0 8px", display: "flex" });
@@ -693,7 +696,7 @@ function apply(cctx, config) {
 			]);
 		}
 
-		return j("div", { style: overlayStyle, onClick: onClose }, [
+		return j("div", { style: pageView, onClick: onClose }, [
 			jsxs2("div", { style: panelStyle, onClick: (e) => e.stopPropagation() }, [
 				jsxs2("div", { style: { display: "flex", gap: 8, alignItems: "center", marginBottom: 8 } }, [
 					j("b", null, "node-sched"),
@@ -744,22 +747,6 @@ function apply(cctx, config) {
 	}
 
 	// ── sidebar footer entry: button toggling the fullscreen dashboard ──────
-	function FooterEntry(props) {
-		const [open, setOpen] = useState(false);
-		useEffect(() => {
-			const h = () => setOpen(true);
-			window.addEventListener("nodesched-open", h);
-			return () => window.removeEventListener("nodesched-open", h);
-		}, []);
-		return jsxs2("span", {}, [
-			j("button", {
-				onClick: () => setOpen(true),
-				title: "node-sched GPU/CPU 调度看板",
-				style: { ...ghostBtn, width: "100%", textAlign: "left", padding: "6px 10px", fontSize: 12 },
-			}, "⚡ sched 看板"),
-			open && j(Dashboard, { onClose: () => { setOpen(false); } }),
-		]);
-	}
 
 	// ── settings card: 手风琴卡片 (收起=摘要行 / 展开=完整面板入口) ────────
 	// ── settings card: 与 PluginSettingsCard 完全同构 (1:1 样式) ──────────
@@ -869,30 +856,45 @@ function apply(cctx, config) {
 
 
 	// ── sidebar footer entry: button toggling the fullscreen dashboard ──────
-	function FooterEntry(props) {
-		const [open, setOpen] = useState(false);
-		useEffect(() => {
-			const h = () => setOpen(true);
-			window.addEventListener("nodesched-open", h);
-			return () => window.removeEventListener("nodesched-open", h);
-		}, []);
-		return jsxs2("span", {}, [
-			j("button", {
-				onClick: () => setOpen(true),
-				title: "node-sched GPU/CPU 调度看板",
-				style: { ...ghostBtn, width: "100%", textAlign: "left", padding: "6px 10px", fontSize: 12 },
-			}, "⚡ sched 看板"),
-			open && j(Dashboard, { onClose: () => { setOpen(false); } }),
-		]);
-	}
 
 
 	cctx.logger?.info?.("[node-sched-ui] mounting footer entry + settings card");
-	const disposeFooter = cctx.slots.inject(SLOT_FOOTER, () =>
-		cctx.slots.register({ name: SLOT_FOOTER, id: NS }, FooterEntry));
 	const disposeSettings = cctx.slots.inject(SLOT_SETTINGS, () =>
 		cctx.slots.register({ name: SLOT_SETTINGS, id: NS, order: 90 }, StatusCard));
-	return () => { disposeFooter?.(); disposeSettings?.(); };
+
+	// ── B20: 侧栏入口 + 页面视图挂载 ──────────────────────────────────────
+	const sidebarRoot = findSidebarRoot();
+	if (sidebarRoot) {
+		const entry = createSidebarEntry();
+		entry.addEventListener("click", () => {
+			const isActive = document.documentElement.hasAttribute(SCHED_ACTIVE_ATTR);
+			if (isActive) {
+				deactivatePanel();
+			} else {
+				document.documentElement.removeAttribute("data-dsh-taskboard-active");
+				document.documentElement.removeAttribute("data-dsh-ssh-active");
+				activatePanel();
+				mountPageView(
+					j(Dashboard, { onClose: () => deactivatePanel() })
+				);
+			}
+		});
+		// 插到 New Session 下方
+		const nsBtn = newSessionButton(sidebarRoot);
+		if (nsBtn) {
+			const anchor = nsBtn.nextElementSibling;
+			sidebarRoot.insertBefore(entry, anchor ?? null);
+		} else {
+			sidebarRoot.appendChild(entry);
+		}
+		// 监听其他面板激活 -> 自动关闭本面板
+		document.addEventListener(PANEL_ACTIVATE_EVENT, (e) => {
+			if (e.detail !== NS_ENTRY && document.documentElement.hasAttribute(SCHED_ACTIVE_ATTR)) {
+				deactivatePanel();
+			}
+		});
+	}
+	return () => { disposeSettings?.(); };
 }
 
 export { name, inject, apply };
