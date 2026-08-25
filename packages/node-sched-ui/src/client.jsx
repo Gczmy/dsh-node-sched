@@ -320,12 +320,21 @@ function apply(cctx, config) {
 				INC_OPEN_ID && INC_DETAIL && INC_DETAIL[INC_OPEN_ID]
 					? { ...INC_DETAIL[INC_OPEN_ID], id: INC_OPEN_ID } : null);
 			const [msg, setMsg] = useState("");
+			// B19 调试: 追踪所有 detail 写入的调用栈 (临时)
+			const setDetailT = (v, tag) => {
+				console.log("[inc-detail写] tag=" + (tag || "?") + " val=" +
+					JSON.stringify(v && v.id ? { id: v.id, loading: !!v.loading } : v),
+					new Error().stack.split("\n").slice(2, 6).join("\n    "));
+				setDetail(v);
+			};
 
 			const applyList = (incidents) => {
 				setList(incidents);
 				INC_CACHE = { list: incidents };
 			};
 			const applyDetail = (inc) => {
+				console.log("[inc-detail写] tag=applyDetail id=" + inc.id,
+					new Error().stack.split("\n").slice(2, 5).join("\n    "));
 				setDetail(inc);
 				INC_OPEN_ID = inc.id;
 				INC_DETAIL = INC_DETAIL || {};
@@ -334,15 +343,15 @@ function apply(cctx, config) {
 
 			const view = useCallback(async (id) => {
 				const gen = ++INC_VIEW_GEN;
-				setDetail({ id, loading: true });
+				setDetailT({ id, loading: true }, "view-loading");
 				INC_OPEN_ID = id;
 				try {
 					const r = await fetch(`/sched/api/incidents?id=${id}`);
 					const d = await r.json();
 					// 响应返回时若已收起/切换, 丢弃过期结果 (防竞态重展开)
 					if (gen !== INC_VIEW_GEN || INC_OPEN_ID !== id) return;
-					if (!d.ok) { setDetail({ id, error: d.text }); return; }
-					applyDetail(JSON.parse(d.text).incident);
+					if (!d.ok) { setDetailT({ id, error: d.text }, "view-err"); return; }
+					applyDetailT(JSON.parse(d.text).incident);
 				} catch (e) {
 					if (gen === INC_VIEW_GEN && INC_OPEN_ID === id) setDetail({ id, error: String(e) });
 				}
@@ -400,7 +409,7 @@ function apply(cctx, config) {
 					jsxs2("div", { style: { marginBottom: 4 } }, [
 						j("span", { style: { fontWeight: 600, color: T.brand } },
 							`#${detail.id} ${detail.kind} @ gpu${detail.gpu_idx ?? "-"}`),
-						j("button", { onClick: () => { INC_VIEW_GEN++; setDetail(null); INC_OPEN_ID = null; },
+						j("button", { onClick: () => { INC_VIEW_GEN++; setDetailT(null, "collapse"); INC_OPEN_ID = null; },
 							style: { ...ghostBtn, marginLeft: 8 } }, "收起"),
 					]),
 					j("div", { style: { color: T.label2, fontSize: 10, marginBottom: 4 } },
