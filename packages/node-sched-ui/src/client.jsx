@@ -332,17 +332,15 @@ function apply(cctx, config) {
 				INC_DETAIL[inc.id] = inc;
 			};
 
-			const view = useCallback(async (id, silent) => {
+			const view = useCallback(async (id) => {
 				const gen = ++INC_VIEW_GEN;
-				console.log("[inc] view() 调用 id=" + id + " silent=" + !!silent + " gen=" + gen, new Error().stack.split("\n").slice(2,4).join(" <- "));
-				if (!silent) setDetail({ id, loading: true });
+				setDetail({ id, loading: true });
 				INC_OPEN_ID = id;
 				try {
 					const r = await fetch(`/sched/api/incidents?id=${id}`);
 					const d = await r.json();
 					// 响应返回时若已收起/切换, 丢弃过期结果 (防竞态重展开)
-					console.log("[inc] 响应返回 id=" + id + " gen=" + gen + " 当前gen=" + INC_VIEW_GEN + " OPEN=" + INC_OPEN_ID);
-					if (gen !== INC_VIEW_GEN || INC_OPEN_ID !== id) { console.log("[inc] 丢弃过期响应 id=" + id); return; }
+					if (gen !== INC_VIEW_GEN || INC_OPEN_ID !== id) return;
 					if (!d.ok) { setDetail({ id, error: d.text }); return; }
 					applyDetail(JSON.parse(d.text).incident);
 				} catch (e) {
@@ -360,11 +358,10 @@ function apply(cctx, config) {
 				} catch (e) { setMsg("❌ " + String(e)); }
 			}, []);
 
-			useEffect(() => {
-				console.log("[inc] 挂载effect 触发, INC_OPEN_ID=", INC_OPEN_ID, "缓存详情=", !!INC_DETAIL);
-				load();
-				if (INC_OPEN_ID) view(INC_OPEN_ID, true);   // 静默恢复展开详情
-			}, [load, view]);
+			useEffect(() => { load(); }, [load]);
+			// B19: 不在挂载时自动恢复展开详情 —— 外壳周期性重挂载会把已收起的
+			// 详情反复"复活"(用户实测自动展开)。重进本页只看最新列表冻结态,
+			// 详情需要时点行展开。
 
 			if (!list) return j("div", { style: { color: T.label2, fontSize: 11 } },
 				msg || (INC_CACHE ? "" : "loading…"));
@@ -403,7 +400,7 @@ function apply(cctx, config) {
 					jsxs2("div", { style: { marginBottom: 4 } }, [
 						j("span", { style: { fontWeight: 600, color: T.brand } },
 							`#${detail.id} ${detail.kind} @ gpu${detail.gpu_idx ?? "-"}`),
-						j("button", { onClick: () => { console.log("[inc] 用户点击收起"); INC_VIEW_GEN++; setDetail(null); INC_OPEN_ID = null; },
+						j("button", { onClick: () => { INC_VIEW_GEN++; setDetail(null); INC_OPEN_ID = null; },
 							style: { ...ghostBtn, marginLeft: 8 } }, "收起"),
 					]),
 					j("div", { style: { color: T.label2, fontSize: 10, marginBottom: 4 } },
