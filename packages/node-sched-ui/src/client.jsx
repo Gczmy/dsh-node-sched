@@ -88,148 +88,6 @@ function injectXtermCss(cssText) {
 	xtermCssInjected = true;
 }
 
-function SshTab() {
-	const [hosts, setHosts] = useState(null);
-	const [busy, setBusy] = useState("");
-	const [msg, setMsg] = useState("");
-	const [confirmAlias, setConfirmAlias] = useState(null);
-	const [termAlias, setTermAlias] = useState(null);
-
-	const load = useCallback(async () => {
-		try {
-			const r = await fetch("/sched/ssh/hosts").then((r) => r.json());
-			setHosts(r.hosts ?? []);
-		} catch { setHosts([]); }
-	}, []);
-	useEffect(() => { load(); }, [load]);
-
-	const doImport = async () => {
-		setBusy("import");
-		try {
-			const r = await fetch("/sched/ssh/import", { method: "POST" }).then((r) => r.json());
-			setMsg(r.result ? `导入完成: 解析 ${r.result.parsed} / 新增 ${r.result.added} / 跳过 ${r.result.skipped}` : `失败: ${r.error}`);
-			await load();
-		} catch (e) { setMsg("失败: " + e.message); }
-		setBusy("");
-	};
-	const doTest = async (alias) => {
-		setBusy("test:" + alias);
-		try {
-			const r = await fetch("/sched/ssh/test", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ alias }) }).then((r) => r.json());
-			setMsg(r.ok ? `${alias}: ok (${r.latencyMs}ms)` : `${alias}: 失败 — ${r.error ?? "unreachable"}`);
-		} catch (e) { setMsg("失败: " + e.message); }
-		setBusy("");
-	};
-	const doDelete = async (alias) => {
-		setBusy("del:" + alias);
-		try {
-			await fetch(`/sched/ssh/hosts?alias=${encodeURIComponent(alias)}`, { method: "DELETE" });
-			setConfirmAlias(null);
-			await load();
-		} catch (e) { setMsg("失败: " + e.message); }
-		setBusy("");
-	};
-
-	if (termAlias) return j(SshTerminal, { alias: termAlias, onClose: () => { setTermAlias(null); } });
-
-	return jsxs2("div", { style: { display: "flex", flexDirection: "column", gap: 10 } }, [
-		jsxs2("div", { style: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" } }, [
-			j("button", { onClick: doImport, disabled: !!busy, style: btn(T.brand, !!busy) },
-				busy === "import" ? "导入中…" : "从 ~/.ssh/config 导入"),
-			j("span", { style: { color: T.label2, fontSize: 12 } },
-				`共 ${hosts ? hosts.length : "…"} 台主机 · 密钥认证走本机 ~/.ssh 文件或 ssh-agent`),
-			msg && j("span", { style: { color: msg.includes("失败") ? T.err : T.ok, fontSize: 13 } }, msg),
-		]),
-		hosts === null && j("div", { style: { color: T.label2 } }, "loading…"),
-		hosts !== null && jsxs2("div", { style: { display: "grid", gridTemplateColumns: "minmax(140px,1.2fr) minmax(160px,1.4fr) 90px 90px minmax(120px,1fr) auto auto", gap: "0 10px", alignItems: "center", fontSize: 13 } }, [
-			j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "别名"),
-			j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "主机"),
-			j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "端口"),
-			j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "认证"),
-			j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "备注/跳板"),
-			j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, ""),
-			j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, ""),
-			...hosts.flatMap((h) => [
-				j("span", { key: h.alias + "-a", style: { fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, h.alias),
-				j("span", { key: h.alias + "-h", style: { color: T.label2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, h.user !== "root" ? `${h.user}@${h.host}` : h.host),
-				j("span", { key: h.alias + "-p", style: { color: T.label2 } }, String(h.port)),
-				j("span", { key: h.alias + "-au", style: {} }, h.auth === "key" ? (h.keyReady ? "🔑 key" : "⚠ key缺失") : h.auth === "agent" ? "agent" : "密码"),
-				j("span", { key: h.alias + "-d", style: { color: T.label2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
-					h.proxyJump && h.proxyJump.length > 0 ? `via ${h.proxyJump.join(">")}` : (h.description ?? "")),
-				confirmAlias === h.alias
-					? j("button", { key: h.alias + "-c", onClick: () => doDelete(h.alias), style: btn(T.err) }, "确认删除")
-					: j("button", { key: h.alias + "-t", onClick: () => doTest(h.alias), disabled: !!busy, style: ghostBtn },
-						busy === "test:" + h.alias ? "测试中…" : "测试"),
-				confirmAlias === h.alias
-					? j("button", { key: h.alias + "-x", onClick: () => setConfirmAlias(null), style: ghostBtn }, "取消")
-					: j("button", { key: h.alias + "-o", onClick: () => setTermAlias(h.alias), style: btn(T.ok) }, "终端"),
-			]),
-		]),
-		confirmAlias && j("div", { style: { fontSize: 12, color: T.warn } }, `再次点击「确认删除」以移除 ${confirmAlias}（连接立即断开）`),
-	]);
-}
-
-// xterm.js WS 终端：帧协议 server->{ready|output|exit}, client->{input|resize}
-function SshTerminal({ alias, onClose }) {
-	const boxRef = useRef(null);
-	useEffect(() => {
-		const el = boxRef.current;
-		if (!el) return;
-		let ws, term, fit, ro;
-		let disposed = false;
-		(async () => {
-			const xtermMod = require("@xterm/xterm");
-			const fitMod = require("@xterm/addon-fit");
-			const TerminalCtor = xtermMod.Terminal ?? xtermMod.default?.Terminal ?? xtermMod.default;
-			const FitAddonCtor = fitMod.FitAddon ?? fitMod.default?.FitAddon ?? fitMod.default;
-			injectXtermCss(require("@xterm/xterm/css/xterm.css"));
-			if (disposed) return;
-			term = new TerminalCtor({
-				fontFamily: "var(--dsw-font-family, ui-monospace, SFMono-Regular, Menlo, monospace)",
-				fontSize: 13, cursorBlink: true, scrollback: 5000,
-				theme: { background: "#111318" },
-			});
-			fit = new FitAddonCtor();
-			term.loadAddon(fit);
-			term.open(el);
-			try { fit.fit(); } catch { /* zero-size */ }
-			term.writeln(`\x1b[90m连接 ${alias} …\x1b[0m`);
-			const proto = location.protocol === "https:" ? "wss://" : "ws://";
-			ws = new WebSocket(`${proto}${location.host}/sched/ws/ssh-terminal?alias=${encodeURIComponent(alias)}&cols=${term.cols}&rows=${term.rows}`);
-			ws.onmessage = (ev) => {
-				let frame;
-				try { frame = JSON.parse(ev.data); } catch { return; }
-				if (frame.type === "ready") { term.clear(); term.focus(); }
-				else if (frame.type === "output") term.write(frame.data);
-				else if (frame.type === "exit") {
-					term.write(`\r\n\x1b[31m■ 会话结束${frame.error ? ": " + frame.error : ""}\x1b[0m\r\n`);
-				}
-			};
-			ws.onerror = () => term.write(`\r\n\x1b[31m■ WebSocket 错误\x1b[0m\r\n`);
-			term.onData((d) => { if (ws.readyState === 1) ws.send(JSON.stringify({ type: "input", data: d })); });
-			term.onResize(({ cols, rows }) => { if (ws.readyState === 1) ws.send(JSON.stringify({ type: "resize", cols, rows })); });
-			ro = new ResizeObserver(() => { try { fit.fit(); } catch { /* hidden */ } });
-			ro.observe(el);
-		})();
-		return () => {
-			disposed = true;
-			try { ro?.disconnect(); } catch { /* gone */ }
-			try { ws?.close(); } catch { /* gone */ }
-			try { term?.dispose(); } catch { /* gone */ }
-		};
-	}, [alias]);
-	return jsxs2("div", { style: { display: "flex", flexDirection: "column", gap: 8, flex: 1, minHeight: 0 } }, [
-		jsxs2("div", { style: { display: "flex", gap: 10, alignItems: "center" } }, [
-			j("button", { onClick: onClose, style: backBtn, title: "返回主机列表" }, [
-				j("span", { "aria-hidden": true, style: { fontSize: 15 } }, "\u2039"),
-				j("span", null, "返回"),
-			]),
-			j("h3", { style: { ...boardTitleStyle, fontSize: 14 } }, `终端 · ${alias}`),
-			j("span", { style: { color: T.label2, fontSize: 12 } }, "关闭页签即断开远端 shell"),
-		]),
-		j("div", { ref: boxRef, style: { flex: 1, minHeight: 320, borderRadius: 10, border: `1px solid ${T.border2}`, overflow: "hidden", padding: 6, background: "#111318" } }),
-	]);
-}
 
 function apply(cctx, config) {
 	const { useEffect, useState, useCallback, useRef, memo } = require("react");
@@ -391,6 +249,150 @@ function apply(cctx, config) {
 				]),
 				j("pre", { style: { ...pre, maxHeight: "60vh", overflow: "auto" } }, text),
 			]),
+		]);
+	}
+
+	// ── B23 组件：依赖 apply 作用域的 j/hooks/T/btn ──
+	function SshTab() {
+		const [hosts, setHosts] = useState(null);
+		const [busy, setBusy] = useState("");
+		const [msg, setMsg] = useState("");
+		const [confirmAlias, setConfirmAlias] = useState(null);
+		const [termAlias, setTermAlias] = useState(null);
+
+		const load = useCallback(async () => {
+			try {
+				const r = await fetch("/sched/ssh/hosts").then((r) => r.json());
+				setHosts(r.hosts ?? []);
+			} catch { setHosts([]); }
+		}, []);
+		useEffect(() => { load(); }, [load]);
+
+		const doImport = async () => {
+			setBusy("import");
+			try {
+				const r = await fetch("/sched/ssh/import", { method: "POST" }).then((r) => r.json());
+				setMsg(r.result ? `导入完成: 解析 ${r.result.parsed} / 新增 ${r.result.added} / 跳过 ${r.result.skipped}` : `失败: ${r.error}`);
+				await load();
+			} catch (e) { setMsg("失败: " + e.message); }
+			setBusy("");
+		};
+		const doTest = async (alias) => {
+			setBusy("test:" + alias);
+			try {
+				const r = await fetch("/sched/ssh/test", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ alias }) }).then((r) => r.json());
+				setMsg(r.ok ? `${alias}: ok (${r.latencyMs}ms)` : `${alias}: 失败 — ${r.error ?? "unreachable"}`);
+			} catch (e) { setMsg("失败: " + e.message); }
+			setBusy("");
+		};
+		const doDelete = async (alias) => {
+			setBusy("del:" + alias);
+			try {
+				await fetch(`/sched/ssh/hosts?alias=${encodeURIComponent(alias)}`, { method: "DELETE" });
+				setConfirmAlias(null);
+				await load();
+			} catch (e) { setMsg("失败: " + e.message); }
+			setBusy("");
+		};
+
+		if (termAlias) return j(SshTerminal, { alias: termAlias, onClose: () => { setTermAlias(null); } });
+
+		return jsxs2("div", { style: { display: "flex", flexDirection: "column", gap: 10 } }, [
+			jsxs2("div", { style: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" } }, [
+				j("button", { onClick: doImport, disabled: !!busy, style: btn(T.brand, !!busy) },
+					busy === "import" ? "导入中…" : "从 ~/.ssh/config 导入"),
+				j("span", { style: { color: T.label2, fontSize: 12 } },
+					`共 ${hosts ? hosts.length : "…"} 台主机 · 密钥认证走本机 ~/.ssh 文件或 ssh-agent`),
+				msg && j("span", { style: { color: msg.includes("失败") ? T.err : T.ok, fontSize: 13 } }, msg),
+			]),
+			hosts === null && j("div", { style: { color: T.label2 } }, "loading…"),
+			hosts !== null && jsxs2("div", { style: { display: "grid", gridTemplateColumns: "minmax(140px,1.2fr) minmax(160px,1.4fr) 90px 90px minmax(120px,1fr) auto auto", gap: "0 10px", alignItems: "center", fontSize: 13 } }, [
+				j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "别名"),
+				j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "主机"),
+				j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "端口"),
+				j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "认证"),
+				j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "备注/跳板"),
+				j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, ""),
+				j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, ""),
+				...hosts.flatMap((h) => [
+					j("span", { key: h.alias + "-a", style: { fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, h.alias),
+					j("span", { key: h.alias + "-h", style: { color: T.label2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, h.user !== "root" ? `${h.user}@${h.host}` : h.host),
+					j("span", { key: h.alias + "-p", style: { color: T.label2 } }, String(h.port)),
+					j("span", { key: h.alias + "-au", style: {} }, h.auth === "key" ? (h.keyReady ? "🔑 key" : "⚠ key缺失") : h.auth === "agent" ? "agent" : "密码"),
+					j("span", { key: h.alias + "-d", style: { color: T.label2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
+						h.proxyJump && h.proxyJump.length > 0 ? `via ${h.proxyJump.join(">")}` : (h.description ?? "")),
+					confirmAlias === h.alias
+						? j("button", { key: h.alias + "-c", onClick: () => doDelete(h.alias), style: btn(T.err) }, "确认删除")
+						: j("button", { key: h.alias + "-t", onClick: () => doTest(h.alias), disabled: !!busy, style: ghostBtn },
+							busy === "test:" + h.alias ? "测试中…" : "测试"),
+					confirmAlias === h.alias
+						? j("button", { key: h.alias + "-x", onClick: () => setConfirmAlias(null), style: ghostBtn }, "取消")
+						: j("button", { key: h.alias + "-o", onClick: () => setTermAlias(h.alias), style: btn(T.ok) }, "终端"),
+				]),
+			]),
+			confirmAlias && j("div", { style: { fontSize: 12, color: T.warn } }, `再次点击「确认删除」以移除 ${confirmAlias}（连接立即断开）`),
+		]);
+	}
+
+	// xterm.js WS 终端：帧协议 server->{ready|output|exit}, client->{input|resize}
+	function SshTerminal({ alias, onClose }) {
+		const boxRef = useRef(null);
+		useEffect(() => {
+			const el = boxRef.current;
+			if (!el) return;
+			let ws, term, fit, ro;
+			let disposed = false;
+			(async () => {
+				const xtermMod = require("@xterm/xterm");
+				const fitMod = require("@xterm/addon-fit");
+				const TerminalCtor = xtermMod.Terminal ?? xtermMod.default?.Terminal ?? xtermMod.default;
+				const FitAddonCtor = fitMod.FitAddon ?? fitMod.default?.FitAddon ?? fitMod.default;
+				injectXtermCss(require("@xterm/xterm/css/xterm.css"));
+				if (disposed) return;
+				term = new TerminalCtor({
+					fontFamily: "var(--dsw-font-family, ui-monospace, SFMono-Regular, Menlo, monospace)",
+					fontSize: 13, cursorBlink: true, scrollback: 5000,
+					theme: { background: "#111318" },
+				});
+				fit = new FitAddonCtor();
+				term.loadAddon(fit);
+				term.open(el);
+				try { fit.fit(); } catch { /* zero-size */ }
+				term.writeln(`\x1b[90m连接 ${alias} …\x1b[0m`);
+				const proto = location.protocol === "https:" ? "wss://" : "ws://";
+				ws = new WebSocket(`${proto}${location.host}/sched/ws/ssh-terminal?alias=${encodeURIComponent(alias)}&cols=${term.cols}&rows=${term.rows}`);
+				ws.onmessage = (ev) => {
+					let frame;
+					try { frame = JSON.parse(ev.data); } catch { return; }
+					if (frame.type === "ready") { term.clear(); term.focus(); }
+					else if (frame.type === "output") term.write(frame.data);
+					else if (frame.type === "exit") {
+						term.write(`\r\n\x1b[31m■ 会话结束${frame.error ? ": " + frame.error : ""}\x1b[0m\r\n`);
+					}
+				};
+				ws.onerror = () => term.write(`\r\n\x1b[31m■ WebSocket 错误\x1b[0m\r\n`);
+				term.onData((d) => { if (ws.readyState === 1) ws.send(JSON.stringify({ type: "input", data: d })); });
+				term.onResize(({ cols, rows }) => { if (ws.readyState === 1) ws.send(JSON.stringify({ type: "resize", cols, rows })); });
+				ro = new ResizeObserver(() => { try { fit.fit(); } catch { /* hidden */ } });
+				ro.observe(el);
+			})();
+			return () => {
+				disposed = true;
+				try { ro?.disconnect(); } catch { /* gone */ }
+				try { ws?.close(); } catch { /* gone */ }
+				try { term?.dispose(); } catch { /* gone */ }
+			};
+		}, [alias]);
+		return jsxs2("div", { style: { display: "flex", flexDirection: "column", gap: 8, flex: 1, minHeight: 0 } }, [
+			jsxs2("div", { style: { display: "flex", gap: 10, alignItems: "center" } }, [
+				j("button", { onClick: onClose, style: backBtn, title: "返回主机列表" }, [
+					j("span", { "aria-hidden": true, style: { fontSize: 15 } }, "\u2039"),
+					j("span", null, "返回"),
+				]),
+				j("h3", { style: { ...boardTitleStyle, fontSize: 14 } }, `终端 · ${alias}`),
+				j("span", { style: { color: T.label2, fontSize: 12 } }, "关闭页签即断开远端 shell"),
+			]),
+			j("div", { ref: boxRef, style: { flex: 1, minHeight: 320, borderRadius: 10, border: `1px solid ${T.border2}`, overflow: "hidden", padding: 6, background: "#111318" } }),
 		]);
 	}
 

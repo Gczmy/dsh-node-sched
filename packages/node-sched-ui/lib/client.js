@@ -1394,18 +1394,18 @@ WARNING: This link could potentially be dangerous`)) {
                 this._optionsService.rawOptions.drawBoldTextInBrightColors && I.isBold() && e4 < 8 && (e4 += 8), C.style.textDecorationColor = S.ansi[e4].css;
               }
               I.isOverline() && (B.push("xterm-overline"), " " === y && (y = "\xA0")), I.isStrikethrough() && B.push("xterm-strikethrough"), W && (C.style.textDecoration = "underline");
-              let $ = I.getFgColor(), j2 = I.getFgColorMode(), z = I.getBgColor(), K = I.getBgColorMode();
+              let $ = I.getFgColor(), j = I.getFgColorMode(), z = I.getBgColor(), K = I.getBgColorMode();
               const q = !!I.isInverse();
               if (q) {
                 const e4 = $;
                 $ = z, z = e4;
-                const t4 = j2;
-                j2 = K, K = t4;
+                const t4 = j;
+                j = K, K = t4;
               }
               let V, G, X, J = false;
               switch (this._decorationService.forEachDecorationAtCell(M, t3, void 0, (e4) => {
-                "top" !== e4.options.layer && J || (e4.backgroundColorRGB && (K = 50331648, z = e4.backgroundColorRGB.rgba >> 8 & 16777215, V = e4.backgroundColorRGB), e4.foregroundColorRGB && (j2 = 50331648, $ = e4.foregroundColorRGB.rgba >> 8 & 16777215, G = e4.foregroundColorRGB), J = "top" === e4.options.layer);
-              }), !J && H && (V = this._coreBrowserService.isFocused ? S.selectionBackgroundOpaque : S.selectionInactiveBackgroundOpaque, z = V.rgba >> 8 & 16777215, K = 50331648, J = true, S.selectionForeground && (j2 = 50331648, $ = S.selectionForeground.rgba >> 8 & 16777215, G = S.selectionForeground)), J && B.push("xterm-decoration-top"), K) {
+                "top" !== e4.options.layer && J || (e4.backgroundColorRGB && (K = 50331648, z = e4.backgroundColorRGB.rgba >> 8 & 16777215, V = e4.backgroundColorRGB), e4.foregroundColorRGB && (j = 50331648, $ = e4.foregroundColorRGB.rgba >> 8 & 16777215, G = e4.foregroundColorRGB), J = "top" === e4.options.layer);
+              }), !J && H && (V = this._coreBrowserService.isFocused ? S.selectionBackgroundOpaque : S.selectionInactiveBackgroundOpaque, z = V.rgba >> 8 & 16777215, K = 50331648, J = true, S.selectionForeground && (j = 50331648, $ = S.selectionForeground.rgba >> 8 & 16777215, G = S.selectionForeground)), J && B.push("xterm-decoration-top"), K) {
                 case 16777216:
                 case 33554432:
                   X = S.ansi[z], B.push(`xterm-bg-${z}`);
@@ -1416,7 +1416,7 @@ WARNING: This link could potentially be dangerous`)) {
                 default:
                   q ? (X = S.foreground, B.push(`xterm-bg-${n.INVERTED_DEFAULT_COLOR}`)) : X = S.background;
               }
-              switch (V || I.isDim() && (V = c.color.multiplyOpacity(X, 0.5)), j2) {
+              switch (V || I.isDim() && (V = c.color.multiplyOpacity(X, 0.5)), j) {
                 case 16777216:
                 case 33554432:
                   I.isBold() && $ < 8 && this._optionsService.rawOptions.drawBoldTextInBrightColors && ($ += 8), this._applyMinimumContrast(C, X, S.ansi[$], I, V, void 0) || B.push(`xterm-fg-${$}`);
@@ -6430,197 +6430,8 @@ function injectXtermCss(cssText) {
   document.head.appendChild(el);
   xtermCssInjected = true;
 }
-function SshTab() {
-  const [hosts, setHosts] = useState(null);
-  const [busy, setBusy] = useState("");
-  const [msg, setMsg] = useState("");
-  const [confirmAlias, setConfirmAlias] = useState(null);
-  const [termAlias, setTermAlias] = useState(null);
-  const load = useCallback(async () => {
-    try {
-      const r = await fetch("/sched/ssh/hosts").then((r2) => r2.json());
-      setHosts(r.hosts ?? []);
-    } catch {
-      setHosts([]);
-    }
-  }, []);
-  useEffect(() => {
-    load();
-  }, [load]);
-  const doImport = async () => {
-    setBusy("import");
-    try {
-      const r = await fetch("/sched/ssh/import", { method: "POST" }).then((r2) => r2.json());
-      setMsg(r.result ? `\u5BFC\u5165\u5B8C\u6210: \u89E3\u6790 ${r.result.parsed} / \u65B0\u589E ${r.result.added} / \u8DF3\u8FC7 ${r.result.skipped}` : `\u5931\u8D25: ${r.error}`);
-      await load();
-    } catch (e) {
-      setMsg("\u5931\u8D25: " + e.message);
-    }
-    setBusy("");
-  };
-  const doTest = async (alias) => {
-    setBusy("test:" + alias);
-    try {
-      const r = await fetch("/sched/ssh/test", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ alias }) }).then((r2) => r2.json());
-      setMsg(r.ok ? `${alias}: ok (${r.latencyMs}ms)` : `${alias}: \u5931\u8D25 \u2014 ${r.error ?? "unreachable"}`);
-    } catch (e) {
-      setMsg("\u5931\u8D25: " + e.message);
-    }
-    setBusy("");
-  };
-  const doDelete = async (alias) => {
-    setBusy("del:" + alias);
-    try {
-      await fetch(`/sched/ssh/hosts?alias=${encodeURIComponent(alias)}`, { method: "DELETE" });
-      setConfirmAlias(null);
-      await load();
-    } catch (e) {
-      setMsg("\u5931\u8D25: " + e.message);
-    }
-    setBusy("");
-  };
-  if (termAlias) return j(SshTerminal, { alias: termAlias, onClose: () => {
-    setTermAlias(null);
-  } });
-  return jsxs2("div", { style: { display: "flex", flexDirection: "column", gap: 10 } }, [
-    jsxs2("div", { style: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" } }, [
-      j(
-        "button",
-        { onClick: doImport, disabled: !!busy, style: btn(T.brand, !!busy) },
-        busy === "import" ? "\u5BFC\u5165\u4E2D\u2026" : "\u4ECE ~/.ssh/config \u5BFC\u5165"
-      ),
-      j(
-        "span",
-        { style: { color: T.label2, fontSize: 12 } },
-        `\u5171 ${hosts ? hosts.length : "\u2026"} \u53F0\u4E3B\u673A \xB7 \u5BC6\u94A5\u8BA4\u8BC1\u8D70\u672C\u673A ~/.ssh \u6587\u4EF6\u6216 ssh-agent`
-      ),
-      msg && j("span", { style: { color: msg.includes("\u5931\u8D25") ? T.err : T.ok, fontSize: 13 } }, msg)
-    ]),
-    hosts === null && j("div", { style: { color: T.label2 } }, "loading\u2026"),
-    hosts !== null && jsxs2("div", { style: { display: "grid", gridTemplateColumns: "minmax(140px,1.2fr) minmax(160px,1.4fr) 90px 90px minmax(120px,1fr) auto auto", gap: "0 10px", alignItems: "center", fontSize: 13 } }, [
-      j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "\u522B\u540D"),
-      j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "\u4E3B\u673A"),
-      j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "\u7AEF\u53E3"),
-      j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "\u8BA4\u8BC1"),
-      j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "\u5907\u6CE8/\u8DF3\u677F"),
-      j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, ""),
-      j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, ""),
-      ...hosts.flatMap((h) => [
-        j("span", { key: h.alias + "-a", style: { fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, h.alias),
-        j("span", { key: h.alias + "-h", style: { color: T.label2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, h.user !== "root" ? `${h.user}@${h.host}` : h.host),
-        j("span", { key: h.alias + "-p", style: { color: T.label2 } }, String(h.port)),
-        j("span", { key: h.alias + "-au", style: {} }, h.auth === "key" ? h.keyReady ? "\u{1F511} key" : "\u26A0 key\u7F3A\u5931" : h.auth === "agent" ? "agent" : "\u5BC6\u7801"),
-        j(
-          "span",
-          { key: h.alias + "-d", style: { color: T.label2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
-          h.proxyJump && h.proxyJump.length > 0 ? `via ${h.proxyJump.join(">")}` : h.description ?? ""
-        ),
-        confirmAlias === h.alias ? j("button", { key: h.alias + "-c", onClick: () => doDelete(h.alias), style: btn(T.err) }, "\u786E\u8BA4\u5220\u9664") : j(
-          "button",
-          { key: h.alias + "-t", onClick: () => doTest(h.alias), disabled: !!busy, style: ghostBtn },
-          busy === "test:" + h.alias ? "\u6D4B\u8BD5\u4E2D\u2026" : "\u6D4B\u8BD5"
-        ),
-        confirmAlias === h.alias ? j("button", { key: h.alias + "-x", onClick: () => setConfirmAlias(null), style: ghostBtn }, "\u53D6\u6D88") : j("button", { key: h.alias + "-o", onClick: () => setTermAlias(h.alias), style: btn(T.ok) }, "\u7EC8\u7AEF")
-      ])
-    ]),
-    confirmAlias && j("div", { style: { fontSize: 12, color: T.warn } }, `\u518D\u6B21\u70B9\u51FB\u300C\u786E\u8BA4\u5220\u9664\u300D\u4EE5\u79FB\u9664 ${confirmAlias}\uFF08\u8FDE\u63A5\u7ACB\u5373\u65AD\u5F00\uFF09`)
-  ]);
-}
-function SshTerminal({ alias, onClose }) {
-  const boxRef = useRef(null);
-  useEffect(() => {
-    const el = boxRef.current;
-    if (!el) return;
-    let ws, term, fit, ro;
-    let disposed = false;
-    (async () => {
-      const xtermMod = require_xterm();
-      const fitMod = require_addon_fit();
-      const TerminalCtor = xtermMod.Terminal ?? xtermMod.default?.Terminal ?? xtermMod.default;
-      const FitAddonCtor = fitMod.FitAddon ?? fitMod.default?.FitAddon ?? fitMod.default;
-      injectXtermCss(require_xterm2());
-      if (disposed) return;
-      term = new TerminalCtor({
-        fontFamily: "var(--dsw-font-family, ui-monospace, SFMono-Regular, Menlo, monospace)",
-        fontSize: 13,
-        cursorBlink: true,
-        scrollback: 5e3,
-        theme: { background: "#111318" }
-      });
-      fit = new FitAddonCtor();
-      term.loadAddon(fit);
-      term.open(el);
-      try {
-        fit.fit();
-      } catch {
-      }
-      term.writeln(`\x1B[90m\u8FDE\u63A5 ${alias} \u2026\x1B[0m`);
-      const proto = location.protocol === "https:" ? "wss://" : "ws://";
-      ws = new WebSocket(`${proto}${location.host}/sched/ws/ssh-terminal?alias=${encodeURIComponent(alias)}&cols=${term.cols}&rows=${term.rows}`);
-      ws.onmessage = (ev) => {
-        let frame;
-        try {
-          frame = JSON.parse(ev.data);
-        } catch {
-          return;
-        }
-        if (frame.type === "ready") {
-          term.clear();
-          term.focus();
-        } else if (frame.type === "output") term.write(frame.data);
-        else if (frame.type === "exit") {
-          term.write(`\r
-\x1B[31m\u25A0 \u4F1A\u8BDD\u7ED3\u675F${frame.error ? ": " + frame.error : ""}\x1B[0m\r
-`);
-        }
-      };
-      ws.onerror = () => term.write(`\r
-\x1B[31m\u25A0 WebSocket \u9519\u8BEF\x1B[0m\r
-`);
-      term.onData((d) => {
-        if (ws.readyState === 1) ws.send(JSON.stringify({ type: "input", data: d }));
-      });
-      term.onResize(({ cols, rows }) => {
-        if (ws.readyState === 1) ws.send(JSON.stringify({ type: "resize", cols, rows }));
-      });
-      ro = new ResizeObserver(() => {
-        try {
-          fit.fit();
-        } catch {
-        }
-      });
-      ro.observe(el);
-    })();
-    return () => {
-      disposed = true;
-      try {
-        ro?.disconnect();
-      } catch {
-      }
-      try {
-        ws?.close();
-      } catch {
-      }
-      try {
-        term?.dispose();
-      } catch {
-      }
-    };
-  }, [alias]);
-  return jsxs2("div", { style: { display: "flex", flexDirection: "column", gap: 8, flex: 1, minHeight: 0 } }, [
-    jsxs2("div", { style: { display: "flex", gap: 10, alignItems: "center" } }, [
-      j("button", { onClick: onClose, style: backBtn, title: "\u8FD4\u56DE\u4E3B\u673A\u5217\u8868" }, [
-        j("span", { "aria-hidden": true, style: { fontSize: 15 } }, "\u2039"),
-        j("span", null, "\u8FD4\u56DE")
-      ]),
-      j("h3", { style: { ...boardTitleStyle, fontSize: 14 } }, `\u7EC8\u7AEF \xB7 ${alias}`),
-      j("span", { style: { color: T.label2, fontSize: 12 } }, "\u5173\u95ED\u9875\u7B7E\u5373\u65AD\u5F00\u8FDC\u7AEF shell")
-    ]),
-    j("div", { ref: boxRef, style: { flex: 1, minHeight: 320, borderRadius: 10, border: `1px solid ${T.border2}`, overflow: "hidden", padding: 6, background: "#111318" } })
-  ]);
-}
 function apply(cctx, config) {
-  const { useEffect: useEffect2, useState: useState2, useCallback: useCallback2, useRef: useRef2, memo } = require("react");
+  const { useEffect, useState, useCallback, useRef, memo } = require("react");
   if (typeof document !== "undefined" && !document.getElementById("ns-card-style")) {
     const st = document.createElement("style");
     st.id = "ns-card-style";
@@ -6635,15 +6446,15 @@ function apply(cctx, config) {
   let INC_DETAIL = null;
   let INC_VIEW_GEN = 0;
   const { jsx: _jsx } = require("react/jsx-runtime");
-  const j2 = (tag, props, ...kids) => {
+  const j = (tag, props, ...kids) => {
     const p = { ...props ?? {} };
     if (kids.length === 1) p.children = kids[0];
     else if (kids.length > 1) p.children = kids;
     return _jsx(tag, p);
   };
-  const jsxs22 = j2;
+  const jsxs2 = j;
   const pre = { margin: "4px 0", whiteSpace: "pre-wrap", background: T.bgLayer, border: `1px solid ${T.border}`, borderRadius: 8, padding: 10, fontSize: 11.5, color: T.label };
-  const btn2 = (color = T.brand, disabled) => {
+  const btn = (color = T.brand, disabled) => {
     if (disabled) {
       return { background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label2, borderRadius: 8, padding: "6px 14px", fontSize: 13, cursor: "default", marginRight: 4 };
     }
@@ -6659,7 +6470,7 @@ function apply(cctx, config) {
       transition: "background .15s"
     };
   };
-  const ghostBtn2 = {
+  const ghostBtn = {
     background: "var(--dsw-alias-interactive-bg-hover, transparent)",
     border: `1px solid ${T.border2}`,
     color: T.label,
@@ -6670,8 +6481,8 @@ function apply(cctx, config) {
     marginRight: 4,
     transition: "background-color 120ms ease"
   };
-  const backBtn2 = { ...ghostBtn2, display: "inline-flex", alignItems: "center", gap: 4, fontWeight: 500 };
-  const boardTitleStyle2 = { margin: 0, fontSize: 16, fontWeight: 700, color: T.label, whiteSpace: "nowrap" };
+  const backBtn = { ...ghostBtn, display: "inline-flex", alignItems: "center", gap: 4, fontWeight: 500 };
+  const boardTitleStyle = { margin: 0, fontSize: 16, fontWeight: 700, color: T.label, whiteSpace: "nowrap" };
   const badge = (s) => {
     const c = COLORS[s] ?? T.label2;
     return {
@@ -6716,7 +6527,7 @@ function apply(cctx, config) {
   };
   const bar = (pct) => ({ height: 6, background: "rgba(127,127,127,.2)", borderRadius: 3, overflow: "hidden", flex: 1, margin: "0 8px", display: "flex" });
   const barFill = (pct) => ({ height: "100%", width: `${Math.max(0, Math.min(100, pct))}%`, background: T.brand });
-  const Badge = ({ s }) => j2("span", { style: badge(s) }, s);
+  const Badge = ({ s }) => j("span", { style: badge(s) }, s);
   async function post(action, body) {
     const r = await fetch(`/sched/api/${action}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     return r.json();
@@ -6726,34 +6537,34 @@ function apply(cctx, config) {
     return r.text();
   }
   function ArmButton({ label, confirmLabel, color, onConfirm, stopProp }) {
-    const [armed, setArmed] = useState2(false);
+    const [armed, setArmed] = useState(false);
     const guard = (e) => {
       if (stopProp) e.stopPropagation();
     };
-    if (!armed) return j2("button", { onClick: (e) => {
+    if (!armed) return j("button", { onClick: (e) => {
       guard(e);
       setArmed(true);
-    }, style: btn2(color) }, label);
-    return j2("button", { onClick: async (e) => {
+    }, style: btn(color) }, label);
+    return j("button", { onClick: async (e) => {
       guard(e);
       setArmed(false);
       await onConfirm();
-    }, style: btn2(color) }, confirmLabel ?? `${label}?`);
+    }, style: btn(color) }, confirmLabel ?? `${label}?`);
   }
   function TypedConfirm({ placeholder, color, onConfirm, children }) {
-    const [typed, setTyped] = useState2("");
-    return j2("span", {}, [
-      j2("input", { placeholder, value: typed, onChange: (e) => setTyped(e.target.value), style: { fontSize: 11, width: 150, marginRight: 4 } }),
-      j2("button", { disabled: typed !== placeholder, onClick: async () => {
+    const [typed, setTyped] = useState("");
+    return j("span", {}, [
+      j("input", { placeholder, value: typed, onChange: (e) => setTyped(e.target.value), style: { fontSize: 11, width: 150, marginRight: 4 } }),
+      j("button", { disabled: typed !== placeholder, onClick: async () => {
         await onConfirm();
         setTyped("");
-      }, style: btn2(color, typed !== placeholder) }, children),
-      j2("button", { onClick: () => setTyped(""), style: ghostBtn2 }, "\xD7")
+      }, style: btn(color, typed !== placeholder) }, children),
+      j("button", { onClick: () => setTyped(""), style: ghostBtn }, "\xD7")
     ]);
   }
   function useSchedStream() {
-    const [state, setState] = useState2({ lines: [], connected: false });
-    useEffect2(() => {
+    const [state, setState] = useState({ lines: [], connected: false });
+    useEffect(() => {
       let ws;
       let closed = false;
       let timer;
@@ -6779,12 +6590,12 @@ function apply(cctx, config) {
     return [state];
   }
   function useSnapshot(path, ms) {
-    const [data, setData] = useState2(null);
-    const refresh = useCallback2(() => {
+    const [data, setData] = useState(null);
+    const refresh = useCallback(() => {
       fetch(path).then((r) => r.json()).then(setData).catch(() => {
       });
     }, [path]);
-    useEffect2(() => {
+    useEffect(() => {
       refresh();
       const t = setInterval(refresh, ms);
       return () => clearInterval(t);
@@ -6798,14 +6609,14 @@ function apply(cctx, config) {
   function ProgressBar({ p }) {
     const pp = parseProgress(p);
     if (!pp || pp.total === 0) return null;
-    return jsxs22("span", { style: { display: "inline-flex", alignItems: "center", flex: 1 } }, [
-      j2("span", { style: bar() }, j2("span", { style: barFill(pp.done / pp.total * 100) })),
-      j2("span", { style: { fontSize: 10, color: T.label2 } }, p)
+    return jsxs2("span", { style: { display: "inline-flex", alignItems: "center", flex: 1 } }, [
+      j("span", { style: bar() }, j("span", { style: barFill(pp.done / pp.total * 100) })),
+      j("span", { style: { fontSize: 10, color: T.label2 } }, p)
     ]);
   }
   function LogViewer({ taskId, onClose }) {
-    const [text, setText] = useState2("loading\u2026");
-    useEffect2(() => {
+    const [text, setText] = useState("loading\u2026");
+    useEffect(() => {
       let alive = true;
       const load = () => getText("log", `?task=${encodeURIComponent(taskId)}&lines=400`).then((t2) => {
         if (alive) setText(t2 || "(empty log)");
@@ -6819,24 +6630,213 @@ function apply(cctx, config) {
         clearInterval(t);
       };
     }, [taskId]);
-    return jsxs22("div", { style: { position: "fixed", inset: 0, zIndex: 1e4, background: "rgba(0,0,0,.5)", display: "flex", alignItems: "center", justifyContent: "center" } }, [
-      jsxs22("div", { style: { ...panelStyle, width: "min(860px, 92vw)" }, onClick: (e) => e.stopPropagation() }, [
-        jsxs22("div", { style: { display: "flex", alignItems: "center", marginBottom: 6 } }, [
-          j2("b", null, `log: ${taskId}`),
-          j2("span", { style: { flex: 1 } }),
-          j2("button", { onClick: onClose, style: ghostBtn2 }, "\xD7")
+    return jsxs2("div", { style: { position: "fixed", inset: 0, zIndex: 1e4, background: "rgba(0,0,0,.5)", display: "flex", alignItems: "center", justifyContent: "center" } }, [
+      jsxs2("div", { style: { ...panelStyle, width: "min(860px, 92vw)" }, onClick: (e) => e.stopPropagation() }, [
+        jsxs2("div", { style: { display: "flex", alignItems: "center", marginBottom: 6 } }, [
+          j("b", null, `log: ${taskId}`),
+          j("span", { style: { flex: 1 } }),
+          j("button", { onClick: onClose, style: ghostBtn }, "\xD7")
         ]),
-        j2("pre", { style: { ...pre, maxHeight: "60vh", overflow: "auto" } }, text)
+        j("pre", { style: { ...pre, maxHeight: "60vh", overflow: "auto" } }, text)
       ])
+    ]);
+  }
+  function SshTab() {
+    const [hosts, setHosts] = useState(null);
+    const [busy, setBusy] = useState("");
+    const [msg, setMsg] = useState("");
+    const [confirmAlias, setConfirmAlias] = useState(null);
+    const [termAlias, setTermAlias] = useState(null);
+    const load = useCallback(async () => {
+      try {
+        const r = await fetch("/sched/ssh/hosts").then((r2) => r2.json());
+        setHosts(r.hosts ?? []);
+      } catch {
+        setHosts([]);
+      }
+    }, []);
+    useEffect(() => {
+      load();
+    }, [load]);
+    const doImport = async () => {
+      setBusy("import");
+      try {
+        const r = await fetch("/sched/ssh/import", { method: "POST" }).then((r2) => r2.json());
+        setMsg(r.result ? `\u5BFC\u5165\u5B8C\u6210: \u89E3\u6790 ${r.result.parsed} / \u65B0\u589E ${r.result.added} / \u8DF3\u8FC7 ${r.result.skipped}` : `\u5931\u8D25: ${r.error}`);
+        await load();
+      } catch (e) {
+        setMsg("\u5931\u8D25: " + e.message);
+      }
+      setBusy("");
+    };
+    const doTest = async (alias) => {
+      setBusy("test:" + alias);
+      try {
+        const r = await fetch("/sched/ssh/test", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ alias }) }).then((r2) => r2.json());
+        setMsg(r.ok ? `${alias}: ok (${r.latencyMs}ms)` : `${alias}: \u5931\u8D25 \u2014 ${r.error ?? "unreachable"}`);
+      } catch (e) {
+        setMsg("\u5931\u8D25: " + e.message);
+      }
+      setBusy("");
+    };
+    const doDelete = async (alias) => {
+      setBusy("del:" + alias);
+      try {
+        await fetch(`/sched/ssh/hosts?alias=${encodeURIComponent(alias)}`, { method: "DELETE" });
+        setConfirmAlias(null);
+        await load();
+      } catch (e) {
+        setMsg("\u5931\u8D25: " + e.message);
+      }
+      setBusy("");
+    };
+    if (termAlias) return j(SshTerminal, { alias: termAlias, onClose: () => {
+      setTermAlias(null);
+    } });
+    return jsxs2("div", { style: { display: "flex", flexDirection: "column", gap: 10 } }, [
+      jsxs2("div", { style: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" } }, [
+        j(
+          "button",
+          { onClick: doImport, disabled: !!busy, style: btn(T.brand, !!busy) },
+          busy === "import" ? "\u5BFC\u5165\u4E2D\u2026" : "\u4ECE ~/.ssh/config \u5BFC\u5165"
+        ),
+        j(
+          "span",
+          { style: { color: T.label2, fontSize: 12 } },
+          `\u5171 ${hosts ? hosts.length : "\u2026"} \u53F0\u4E3B\u673A \xB7 \u5BC6\u94A5\u8BA4\u8BC1\u8D70\u672C\u673A ~/.ssh \u6587\u4EF6\u6216 ssh-agent`
+        ),
+        msg && j("span", { style: { color: msg.includes("\u5931\u8D25") ? T.err : T.ok, fontSize: 13 } }, msg)
+      ]),
+      hosts === null && j("div", { style: { color: T.label2 } }, "loading\u2026"),
+      hosts !== null && jsxs2("div", { style: { display: "grid", gridTemplateColumns: "minmax(140px,1.2fr) minmax(160px,1.4fr) 90px 90px minmax(120px,1fr) auto auto", gap: "0 10px", alignItems: "center", fontSize: 13 } }, [
+        j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "\u522B\u540D"),
+        j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "\u4E3B\u673A"),
+        j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "\u7AEF\u53E3"),
+        j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "\u8BA4\u8BC1"),
+        j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "\u5907\u6CE8/\u8DF3\u677F"),
+        j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, ""),
+        j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, ""),
+        ...hosts.flatMap((h) => [
+          j("span", { key: h.alias + "-a", style: { fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, h.alias),
+          j("span", { key: h.alias + "-h", style: { color: T.label2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, h.user !== "root" ? `${h.user}@${h.host}` : h.host),
+          j("span", { key: h.alias + "-p", style: { color: T.label2 } }, String(h.port)),
+          j("span", { key: h.alias + "-au", style: {} }, h.auth === "key" ? h.keyReady ? "\u{1F511} key" : "\u26A0 key\u7F3A\u5931" : h.auth === "agent" ? "agent" : "\u5BC6\u7801"),
+          j(
+            "span",
+            { key: h.alias + "-d", style: { color: T.label2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
+            h.proxyJump && h.proxyJump.length > 0 ? `via ${h.proxyJump.join(">")}` : h.description ?? ""
+          ),
+          confirmAlias === h.alias ? j("button", { key: h.alias + "-c", onClick: () => doDelete(h.alias), style: btn(T.err) }, "\u786E\u8BA4\u5220\u9664") : j(
+            "button",
+            { key: h.alias + "-t", onClick: () => doTest(h.alias), disabled: !!busy, style: ghostBtn },
+            busy === "test:" + h.alias ? "\u6D4B\u8BD5\u4E2D\u2026" : "\u6D4B\u8BD5"
+          ),
+          confirmAlias === h.alias ? j("button", { key: h.alias + "-x", onClick: () => setConfirmAlias(null), style: ghostBtn }, "\u53D6\u6D88") : j("button", { key: h.alias + "-o", onClick: () => setTermAlias(h.alias), style: btn(T.ok) }, "\u7EC8\u7AEF")
+        ])
+      ]),
+      confirmAlias && j("div", { style: { fontSize: 12, color: T.warn } }, `\u518D\u6B21\u70B9\u51FB\u300C\u786E\u8BA4\u5220\u9664\u300D\u4EE5\u79FB\u9664 ${confirmAlias}\uFF08\u8FDE\u63A5\u7ACB\u5373\u65AD\u5F00\uFF09`)
+    ]);
+  }
+  function SshTerminal({ alias, onClose }) {
+    const boxRef = useRef(null);
+    useEffect(() => {
+      const el = boxRef.current;
+      if (!el) return;
+      let ws, term, fit, ro;
+      let disposed = false;
+      (async () => {
+        const xtermMod = require_xterm();
+        const fitMod = require_addon_fit();
+        const TerminalCtor = xtermMod.Terminal ?? xtermMod.default?.Terminal ?? xtermMod.default;
+        const FitAddonCtor = fitMod.FitAddon ?? fitMod.default?.FitAddon ?? fitMod.default;
+        injectXtermCss(require_xterm2());
+        if (disposed) return;
+        term = new TerminalCtor({
+          fontFamily: "var(--dsw-font-family, ui-monospace, SFMono-Regular, Menlo, monospace)",
+          fontSize: 13,
+          cursorBlink: true,
+          scrollback: 5e3,
+          theme: { background: "#111318" }
+        });
+        fit = new FitAddonCtor();
+        term.loadAddon(fit);
+        term.open(el);
+        try {
+          fit.fit();
+        } catch {
+        }
+        term.writeln(`\x1B[90m\u8FDE\u63A5 ${alias} \u2026\x1B[0m`);
+        const proto = location.protocol === "https:" ? "wss://" : "ws://";
+        ws = new WebSocket(`${proto}${location.host}/sched/ws/ssh-terminal?alias=${encodeURIComponent(alias)}&cols=${term.cols}&rows=${term.rows}`);
+        ws.onmessage = (ev) => {
+          let frame;
+          try {
+            frame = JSON.parse(ev.data);
+          } catch {
+            return;
+          }
+          if (frame.type === "ready") {
+            term.clear();
+            term.focus();
+          } else if (frame.type === "output") term.write(frame.data);
+          else if (frame.type === "exit") {
+            term.write(`\r
+\x1B[31m\u25A0 \u4F1A\u8BDD\u7ED3\u675F${frame.error ? ": " + frame.error : ""}\x1B[0m\r
+`);
+          }
+        };
+        ws.onerror = () => term.write(`\r
+\x1B[31m\u25A0 WebSocket \u9519\u8BEF\x1B[0m\r
+`);
+        term.onData((d) => {
+          if (ws.readyState === 1) ws.send(JSON.stringify({ type: "input", data: d }));
+        });
+        term.onResize(({ cols, rows }) => {
+          if (ws.readyState === 1) ws.send(JSON.stringify({ type: "resize", cols, rows }));
+        });
+        ro = new ResizeObserver(() => {
+          try {
+            fit.fit();
+          } catch {
+          }
+        });
+        ro.observe(el);
+      })();
+      return () => {
+        disposed = true;
+        try {
+          ro?.disconnect();
+        } catch {
+        }
+        try {
+          ws?.close();
+        } catch {
+        }
+        try {
+          term?.dispose();
+        } catch {
+        }
+      };
+    }, [alias]);
+    return jsxs2("div", { style: { display: "flex", flexDirection: "column", gap: 8, flex: 1, minHeight: 0 } }, [
+      jsxs2("div", { style: { display: "flex", gap: 10, alignItems: "center" } }, [
+        j("button", { onClick: onClose, style: backBtn, title: "\u8FD4\u56DE\u4E3B\u673A\u5217\u8868" }, [
+          j("span", { "aria-hidden": true, style: { fontSize: 15 } }, "\u2039"),
+          j("span", null, "\u8FD4\u56DE")
+        ]),
+        j("h3", { style: { ...boardTitleStyle, fontSize: 14 } }, `\u7EC8\u7AEF \xB7 ${alias}`),
+        j("span", { style: { color: T.label2, fontSize: 12 } }, "\u5173\u95ED\u9875\u7B7E\u5373\u65AD\u5F00\u8FDC\u7AEF shell")
+      ]),
+      j("div", { ref: boxRef, style: { flex: 1, minHeight: 320, borderRadius: 10, border: `1px solid ${T.border2}`, overflow: "hidden", padding: 6, background: "#111318" } })
     ]);
   }
   function Dashboard({ onClose }) {
     const [stream] = useSchedStream();
     const [snap, refreshSnap] = useSnapshot("/sched/api/status", 2e4);
-    const [tab, setTab] = useState2("batches");
-    const [opMsg, setOpMsg] = useState2("");
-    const [logTask, setLogTask] = useState2(null);
-    const [projFilter, setProjFilter] = useState2("");
+    const [tab, setTab] = useState("batches");
+    const [opMsg, setOpMsg] = useState("");
+    const [logTask, setLogTask] = useState(null);
+    const [projFilter, setProjFilter] = useState("");
     const raw = snap?.raw;
     const summary = snap?.summary;
     const projects = [...new Set((raw?.batches ?? []).map((b) => b.project).filter(Boolean))];
@@ -6865,30 +6865,30 @@ function apply(cctx, config) {
     function SegmentedBar({ seg }) {
       const total = seg.bad + seg.ok + seg.run + seg.off;
       if (!total) return null;
-      return j2("span", { style: bar() }, ["bad", "ok", "run", "off"].map(
-        (k) => j2("span", { key: k, style: { height: "100%", width: `${seg[k] / total * 100}%`, background: SEG_COLOR[k], display: "inline-block" } })
+      return j("span", { style: bar() }, ["bad", "ok", "run", "off"].map(
+        (k) => j("span", { key: k, style: { height: "100%", width: `${seg[k] / total * 100}%`, background: SEG_COLOR[k], display: "inline-block" } })
       ));
     }
     function BatchRow({ b }) {
-      const [open, setOpen] = useState2(false);
+      const [open, setOpen] = useState(false);
       const tasks = (raw?.jobs ?? []).filter(
         (x) => x.batch === b.id
       );
       const failedTasks = tasks.filter((x) => ["failed", "timed_out", "cancelled"].includes(x.status));
       const seg = taskSegments(tasks);
-      return jsxs22("div", { style: { marginBottom: 10 } }, [
-        jsxs22("div", { style: GRID, onClick: () => setOpen(!open) }, [
-          j2("span", { style: { textAlign: "center", cursor: "pointer" } }, Badge({ s: b.status })),
-          jsxs22("span", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "pointer" }, onClick: (e) => {
+      return jsxs2("div", { style: { marginBottom: 10 } }, [
+        jsxs2("div", { style: GRID, onClick: () => setOpen(!open) }, [
+          j("span", { style: { textAlign: "center", cursor: "pointer" } }, Badge({ s: b.status })),
+          jsxs2("span", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "pointer" }, onClick: (e) => {
             e.stopPropagation();
             setOpen(!open);
           } }, [
-            j2("b", { style: { fontSize: 11.5 }, title: b.name }, b.name),
-            b.project && j2("span", { style: { fontSize: 9, color: T.label2, marginLeft: 6 } }, b.project)
+            j("b", { style: { fontSize: 11.5 }, title: b.name }, b.name),
+            b.project && j("span", { style: { fontSize: 9, color: T.label2, marginLeft: 6 } }, b.project)
           ]),
-          j2(SegmentedBar, { seg: taskSegments(tasks) }),
-          j2("span", { style: { fontSize: 10.5, color: T.label2, textAlign: "right" } }, b.progress ?? ""),
-          j2(ArmButton, {
+          j(SegmentedBar, { seg: taskSegments(tasks) }),
+          j("span", { style: { fontSize: 10.5, color: T.label2, textAlign: "right" } }, b.progress ?? ""),
+          j(ArmButton, {
             label: "cancel",
             confirmLabel: "cancel(\u53D6\u6D88\u4EFB\u52A1!)",
             color: T.err,
@@ -6896,39 +6896,39 @@ function apply(cctx, config) {
             onConfirm: () => runOp("cancel", b.name)
           })
         ]),
-        open && jsxs22("div", { style: { marginTop: 6, marginLeft: 76, paddingLeft: 10, borderLeft: `2px solid ${T.border}` } }, [
-          b.depends_on?.length > 0 && j2("div", { style: { fontSize: 10, color: T.label2 } }, `\u4F9D\u8D56: ${b.depends_on.join(", ")}`),
-          ...tasks.filter((t) => ["failed", "timed_out", "cancelled"].includes(t.status)).map((t) => jsxs22("div", { style: { fontSize: 11, marginLeft: 14, marginTop: 2, display: "flex", alignItems: "center" } }, [
-            j2("span", { style: { fontFamily: "monospace", cursor: "pointer", textDecoration: "underline", marginRight: 6 }, onClick: () => setLogTask(`${t.batch}:${t.task}`), title: "\u67E5\u770B\u65E5\u5FD7" }, t.task),
+        open && jsxs2("div", { style: { marginTop: 6, marginLeft: 76, paddingLeft: 10, borderLeft: `2px solid ${T.border}` } }, [
+          b.depends_on?.length > 0 && j("div", { style: { fontSize: 10, color: T.label2 } }, `\u4F9D\u8D56: ${b.depends_on.join(", ")}`),
+          ...tasks.filter((t) => ["failed", "timed_out", "cancelled"].includes(t.status)).map((t) => jsxs2("div", { style: { fontSize: 11, marginLeft: 14, marginTop: 2, display: "flex", alignItems: "center" } }, [
+            j("span", { style: { fontFamily: "monospace", cursor: "pointer", textDecoration: "underline", marginRight: 6 }, onClick: () => setLogTask(`${t.batch}:${t.task}`), title: "\u67E5\u770B\u65E5\u5FD7" }, t.task),
             Badge({ s: t.status }),
-            t.retries != null && j2("span", { style: { color: T.label2, marginRight: 4 } }, `retries=${t.retries}`),
-            j2("span", { style: { flex: 1 } }),
-            j2("button", { onClick: () => runOp("retry", `${t.batch}:${t.task}`), style: btn2(T.brand) }, "retry"),
-            j2(ArmButton, { label: "resubmit", confirmLabel: "resubmit(\u5220\u4EA7\u7269!)", color: T.warn, onConfirm: () => runOp("resubmit", `${t.batch}:${t.task}`) })
+            t.retries != null && j("span", { style: { color: T.label2, marginRight: 4 } }, `retries=${t.retries}`),
+            j("span", { style: { flex: 1 } }),
+            j("button", { onClick: () => runOp("retry", `${t.batch}:${t.task}`), style: btn(T.brand) }, "retry"),
+            j(ArmButton, { label: "resubmit", confirmLabel: "resubmit(\u5220\u4EA7\u7269!)", color: T.warn, onConfirm: () => runOp("resubmit", `${t.batch}:${t.task}`) })
           ]))
         ])
       ]);
     }
     function GpuRow({ g }) {
-      return jsxs22("div", { style: { marginBottom: 6, display: "flex", alignItems: "center" } }, [
+      return jsxs2("div", { style: { marginBottom: 6, display: "flex", alignItems: "center" } }, [
         Badge({ s: g.status }),
-        j2("span", { style: { fontFamily: "monospace", marginRight: 8 } }, `GPU${g.idx}`),
-        g.job && j2("span", { style: { fontSize: 10, marginRight: 8, color: T.label2, flex: 1 } }, g.job),
-        g.quarantined && j2("span", { style: { color: T.err, marginRight: 8, fontSize: 10 } }, "[quarantined]"),
-        !g.job && g.status === "free" && j2("span", { style: { flex: 1 } }),
-        g.status === "unmanaged" && j2(ArmButton, {
+        j("span", { style: { fontFamily: "monospace", marginRight: 8 } }, `GPU${g.idx}`),
+        g.job && j("span", { style: { fontSize: 10, marginRight: 8, color: T.label2, flex: 1 } }, g.job),
+        g.quarantined && j("span", { style: { color: T.err, marginRight: 8, fontSize: 10 } }, "[quarantined]"),
+        !g.job && g.status === "free" && j("span", { style: { flex: 1 } }),
+        g.status === "unmanaged" && j(ArmButton, {
           label: "gpu-free \u5F3A\u5236\u56DE\u6536",
           confirmLabel: "\u786E\u8BA4\u56DE\u6536?",
           color: T.warn,
           onConfirm: () => runOp("gpu-free", String(g.idx))
         }),
-        g.quarantined && j2("button", { onClick: () => runOp("gpu-ok", String(g.idx)), style: btn2(T.ok) }, "gpu-ok \u89E3\u9664\u9694\u79BB")
+        g.quarantined && j("button", { onClick: () => runOp("gpu-ok", String(g.idx)), style: btn(T.ok) }, "gpu-ok \u89E3\u9664\u9694\u79BB")
       ]);
     }
     function EntrySwitch() {
-      const [entry, setEntry] = useState2(null);
-      const [note, setNote] = useState2("");
-      useEffect2(() => {
+      const [entry, setEntry] = useState(null);
+      const [note, setNote] = useState("");
+      useEffect(() => {
         fetch("/sched/api/entry").then((r) => r.json()).then((d) => setEntry(d.entry || "?")).catch(() => setEntry("?"));
       }, []);
       const pick = async (target) => {
@@ -6947,28 +6947,28 @@ function apply(cctx, config) {
           setNote("\u274C " + String(e));
         }
       };
-      const seg = (label) => j2("button", {
+      const seg = (label) => j("button", {
         onClick: () => pick(label),
-        style: entry === label ? btn2(T.brand) : ghostBtn2
+        style: entry === label ? btn(T.brand) : ghostBtn
       }, label);
-      return jsxs22("span", { style: {
+      return jsxs2("span", { style: {
         display: "inline-flex",
         alignItems: "center",
         gap: 4,
         marginRight: 10,
         fontSize: 11
       } }, [
-        j2("span", { style: { color: T.label2 } }, "\u5165\u53E3"),
+        j("span", { style: { color: T.label2 } }, "\u5165\u53E3"),
         seg("HPDC"),
         seg("HPDC_outside"),
-        note && j2("span", { style: { color: T.label2, marginLeft: 4 } }, note)
+        note && j("span", { style: { color: T.label2, marginLeft: 4 } }, note)
       ]);
     }
     function DaemonBar() {
-      const [status, setStatus] = useState2(null);
-      const [querying, setQuerying] = useState2(true);
-      const [confirmStop, setConfirmStop] = useState2(false);
-      const load = useCallback2(() => {
+      const [status, setStatus] = useState(null);
+      const [querying, setQuerying] = useState(true);
+      const [confirmStop, setConfirmStop] = useState(false);
+      const load = useCallback(() => {
         setQuerying(true);
         fetch("/sched/api/daemon").then((r) => r.json()).then((d) => {
           if (d.ok) setStatus(d.text);
@@ -6978,30 +6978,30 @@ function apply(cctx, config) {
           setQuerying(false);
         });
       }, []);
-      useEffect2(() => {
+      useEffect(() => {
         load();
         const t = setInterval(load, 3e4);
         return () => clearInterval(t);
       }, [load]);
       const running = status != null && status.includes("\u8FD0\u884C\u4E2D");
-      return jsxs22("div", { style: { marginBottom: 8, paddingBottom: 6, borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center" } }, [
-        jsxs22("span", { style: { fontSize: 11, marginRight: 8, flex: 1 } }, [
-          j2(
+      return jsxs2("div", { style: { marginBottom: 8, paddingBottom: 6, borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center" } }, [
+        jsxs2("span", { style: { fontSize: 11, marginRight: 8, flex: 1 } }, [
+          j(
             "span",
             { style: { color: running ? T.ok : status ? T.err : T.label2 } },
             `daemon: ${status ?? ""}`
           ),
-          querying && j2("span", { style: { color: T.label2 } }, " \u2026\u7B49\u5F85\u67E5\u8BE2")
+          querying && j("span", { style: { color: T.label2 } }, " \u2026\u7B49\u5F85\u67E5\u8BE2")
         ]),
         // B14: 状态联动 —— 运行中禁用 start, 未运行禁用 stop
-        ...status === null ? [j2("span", { key: "dw", style: btn2(T.label2, true) }, "\u2026")] : [
-          running ? j2("button", { key: "s", disabled: true, title: "\u5DF2\u5728\u8FD0\u884C", style: btn2(T.ok, true) }, "start") : j2("button", { key: "s", onClick: async () => {
+        ...status === null ? [j("span", { key: "dw", style: btn(T.label2, true) }, "\u2026")] : [
+          running ? j("button", { key: "s", disabled: true, title: "\u5DF2\u5728\u8FD0\u884C", style: btn(T.ok, true) }, "start") : j("button", { key: "s", onClick: async () => {
             await runOp("daemon-start");
             setTimeout(load, 3e3);
-          }, style: btn2(T.ok) }, "start"),
-          running ? !confirmStop && j2("button", { key: "x", onClick: () => setConfirmStop(true), style: btn2(T.err) }, "stop") : j2("button", { key: "x", disabled: true, title: "\u672A\u8FD0\u884C", style: btn2(T.err, true) }, "stop")
+          }, style: btn(T.ok) }, "start"),
+          running ? !confirmStop && j("button", { key: "x", onClick: () => setConfirmStop(true), style: btn(T.err) }, "stop") : j("button", { key: "x", disabled: true, title: "\u672A\u8FD0\u884C", style: btn(T.err, true) }, "stop")
         ],
-        confirmStop && j2(TypedConfirm, {
+        confirmStop && j(TypedConfirm, {
           placeholder: "\u8F93\u5165 stop \u786E\u8BA4\uFF08\u4F1A\u53D6\u6D88\u672A\u5B8C\u6210\u4EFB\u52A1\uFF09",
           color: T.err,
           onConfirm: async () => {
@@ -7012,12 +7012,12 @@ function apply(cctx, config) {
       ]);
     }
     const IncidentsTab = memo(function IncidentsTab2() {
-      const [list, setList] = useState2(INC_CACHE ? INC_CACHE.list : null);
-      const [frozenAt, setFrozenAt] = useState2(INC_CACHE ? INC_CACHE.frozenAt : "");
-      const [detail, setDetail] = useState2(
+      const [list, setList] = useState(INC_CACHE ? INC_CACHE.list : null);
+      const [frozenAt, setFrozenAt] = useState(INC_CACHE ? INC_CACHE.frozenAt : "");
+      const [detail, setDetail] = useState(
         INC_OPEN_ID && INC_DETAIL && INC_DETAIL[INC_OPEN_ID] ? { ...INC_DETAIL[INC_OPEN_ID], id: INC_OPEN_ID } : null
       );
-      const [msg, setMsg] = useState2("");
+      const [msg, setMsg] = useState("");
       const setDetailT = (v, tag) => {
         console.log(
           "[inc-detail\u5199] tag=" + (tag || "?") + " val=" + JSON.stringify(v && v.id ? { id: v.id, loading: !!v.loading } : v),
@@ -7039,7 +7039,7 @@ function apply(cctx, config) {
         INC_DETAIL = INC_DETAIL || {};
         INC_DETAIL[inc.id] = inc;
       };
-      const openDetail = useCallback2(async (id) => {
+      const openDetail = useCallback(async (id) => {
         const gen = ++INC_VIEW_GEN;
         setDetailT({ id, loading: true }, "view-loading");
         INC_OPEN_ID = id;
@@ -7054,7 +7054,7 @@ function apply(cctx, config) {
           setDetailT({ id, error: String(e) }, "view-catch");
         }
       }, []);
-      const load = useCallback2(async () => {
+      const load = useCallback(async () => {
         try {
           const r = await fetch("/sched/api/incidents?limit=30");
           const d = await r.json();
@@ -7068,10 +7068,10 @@ function apply(cctx, config) {
           setMsg("\u274C " + String(e));
         }
       }, []);
-      useEffect2(() => {
+      useEffect(() => {
         load();
       }, [load]);
-      if (!list) return j2(
+      if (!list) return j(
         "div",
         { style: { color: T.label2, fontSize: 11 } },
         msg || (INC_CACHE ? "" : "loading\u2026")
@@ -7085,8 +7085,8 @@ function apply(cctx, config) {
       }
       const failed = p ? p.failed || {} : {};
       const mem = p ? p.memory || {} : {};
-      return jsxs22("div", { style: { fontSize: 11 } }, [
-        jsxs22("div", { style: {
+      return jsxs2("div", { style: { fontSize: 11 } }, [
+        jsxs2("div", { style: {
           display: "flex",
           alignItems: "center",
           gap: 8,
@@ -7096,22 +7096,22 @@ function apply(cctx, config) {
           background: T.bgLayer,
           border: `1px solid ${T.border}`
         } }, [
-          j2(EntrySwitch, null),
-          j2("span", { style: { color: T.warn } }, "\u23F8 \u51BB\u7ED3"),
-          j2(
+          j(EntrySwitch, null),
+          j("span", { style: { color: T.warn } }, "\u23F8 \u51BB\u7ED3"),
+          j(
             "span",
             { style: { color: T.label2 } },
             `\u5FEB\u7167\u65F6\u95F4 ${frozenAt || "\u2026"} \u2014\u2014 \u9605\u8BFB\u671F\u95F4\u5185\u5BB9\u4E0D\u53D8\u3002\u70B9\u300C\u5237\u65B0\u300D\u6216\u5207\u8D70\u518D\u56DE\u6765\u83B7\u53D6\u6700\u65B0\u3002`
           ),
-          j2("span", { style: { flex: 1 } }),
-          j2("button", { onClick: () => load(), style: btn2(T.brand) }, "\u5237\u65B0")
+          j("span", { style: { flex: 1 } }),
+          j("button", { onClick: () => load(), style: btn(T.brand) }, "\u5237\u65B0")
         ]),
-        list.length === 0 && j2(
+        list.length === 0 && j(
           "div",
           { style: { color: T.label2 } },
           "\u6682\u65E0\u4E8B\u6545\u5FEB\u7167 (OOM/gpu_fault \u53D1\u751F\u65F6\u81EA\u52A8\u91C7\u96C6)"
         ),
-        list.map((r) => jsxs22("div", {
+        list.map((r) => jsxs2("div", {
           key: r.id,
           onClick: () => openDetail(r.id),
           style: {
@@ -7123,80 +7123,80 @@ function apply(cctx, config) {
             background: detail && detail.id === r.id ? T.bgLayer : "transparent"
           }
         }, [
-          j2("span", { style: { width: 30, color: T.label2 } }, "#" + r.id),
-          j2("span", { style: { width: 130, color: T.label } }, r.ts),
-          j2("span", { style: { width: 70, color: r.kind === "oom" ? T.err : T.warn } }, r.kind),
-          j2("span", { style: { width: 36 } }, "gpu" + (r.gpu_idx ?? "-")),
-          j2(
+          j("span", { style: { width: 30, color: T.label2 } }, "#" + r.id),
+          j("span", { style: { width: 130, color: T.label } }, r.ts),
+          j("span", { style: { width: 70, color: r.kind === "oom" ? T.err : T.warn } }, r.kind),
+          j("span", { style: { width: 36 } }, "gpu" + (r.gpu_idx ?? "-")),
+          j(
             "span",
             { style: { flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
             r.job_id
           )
         ])),
-        detail && !detail.loading && !detail.error && jsxs22("div", {
+        detail && !detail.loading && !detail.error && jsxs2("div", {
           style: { border: `1px solid ${T.border}`, borderRadius: 6, padding: 8, marginTop: 8 }
         }, [
-          jsxs22("div", { style: { marginBottom: 4 } }, [
-            j2(
+          jsxs2("div", { style: { marginBottom: 4 } }, [
+            j(
               "span",
               { style: { fontWeight: 600, color: T.brand } },
               `#${detail.id} ${detail.kind} @ gpu${detail.gpu_idx ?? "-"}`
             ),
-            j2("button", {
+            j("button", {
               onClick: () => {
                 INC_VIEW_GEN++;
                 setDetailT(null, "collapse");
                 INC_OPEN_ID = null;
               },
-              style: { ...ghostBtn2, marginLeft: 8 }
+              style: { ...ghostBtn, marginLeft: 8 }
             }, "\u6536\u8D77")
           ]),
-          j2(
+          j(
             "div",
             { style: { color: T.label2, fontSize: 10, marginBottom: 4 } },
             `${detail.ts} \xB7 job ${detail.job_id} \xB7 batch ${detail.batch_id}`
           ),
-          failed.dispatch_mode && j2(
+          failed.dispatch_mode && j(
             "div",
             {},
             `\u6D3E\u53D1\u65B9\u5F0F: ${failed.dispatch_mode} \xB7 \u58F0\u660E ${failed.declared_vram_gib ?? "-"} GiB \xB7 \u5386\u53F2\u5CF0\u503C ${failed.profile_peak_gib ?? "-"}`
           ),
-          mem.packed_sum_gib !== void 0 && j2(
+          mem.packed_sum_gib !== void 0 && j(
             "div",
             {},
             `\u663E\u5B58: cap=${mem.cap_gib ?? "?"} packed=${mem.packed_sum_gib} actual=${mem.actual_used_gib ?? "?"}${mem.degraded ? " [\u964D\u7EA7]" : ""}`
           ),
-          (mem.external_pids || []).length > 0 && jsxs22(
+          (mem.external_pids || []).length > 0 && jsxs2(
             "div",
             { style: { color: T.warn } },
-            ["\u5916\u90E8\u8FDB\u7A0B: ", ...(mem.external_pids || []).map((e) => j2("span", { key: e.pid }, `pid${e.pid}(${e.mem_mib ?? "?"}MiB) `))]
+            ["\u5916\u90E8\u8FDB\u7A0B: ", ...(mem.external_pids || []).map((e) => j("span", { key: e.pid }, `pid${e.pid}(${e.mem_mib ?? "?"}MiB) `))]
           ),
-          (p.co_runners || []).length > 0 && jsxs22("div", {}, [
-            j2("div", { style: { color: T.label2, marginTop: 4 } }, "\u540C\u5361\u90BB\u5C45:"),
-            ...p.co_runners.map((c) => j2(
+          (p.co_runners || []).length > 0 && jsxs2("div", {}, [
+            j("div", { style: { color: T.label2, marginTop: 4 } }, "\u540C\u5361\u90BB\u5C45:"),
+            ...p.co_runners.map((c) => j(
               "div",
               { key: c.job_id, style: { paddingLeft: 10 } },
               `${c.task} [${c.status}] declared=${c.declared_vram_gib} peak=${c.profile_peak_gib} runtime=${c.runtime_sec}s`
             ))
           ]),
-          (detail.verdicts || []).length > 0 && jsxs22("div", { style: { marginTop: 6 } }, [
-            j2("div", { style: { color: T.warn, fontWeight: 600 } }, "\u5224\u8BFB\u5047\u8BBE:"),
-            ...detail.verdicts.map((v, i2) => j2("div", { key: i2, style: { color: T.warn, paddingLeft: 10 } }, "? " + v))
+          (detail.verdicts || []).length > 0 && jsxs2("div", { style: { marginTop: 6 } }, [
+            j("div", { style: { color: T.warn, fontWeight: 600 } }, "\u5224\u8BFB\u5047\u8BBE:"),
+            ...detail.verdicts.map((v, i2) => j("div", { key: i2, style: { color: T.warn, paddingLeft: 10 } }, "? " + v))
           ]),
-          p.log_excerpt && jsxs22("div", {}, [
-            j2("div", { style: { color: T.label2, marginTop: 6 } }, "\u65E5\u5FD7\u6458\u5F55:"),
-            j2("pre", { style: { ...pre, maxHeight: 120, margin: "2px 0" } }, p.log_excerpt)
+          p.log_excerpt && jsxs2("div", {}, [
+            j("div", { style: { color: T.label2, marginTop: 6 } }, "\u65E5\u5FD7\u6458\u5F55:"),
+            j("pre", { style: { ...pre, maxHeight: 120, margin: "2px 0" } }, p.log_excerpt)
           ])
         ]),
-        msg && j2("div", { style: { color: T.err, fontSize: 11 } }, msg)
+        msg && j("div", { style: { color: T.err, fontSize: 11 } }, msg)
       ]);
     });
     function ConfigTab() {
-      const [cfgText, setCfgText] = useState2("");
-      const [cfg, setCfg] = useState2(null);
-      const [msg, setMsg] = useState2("");
-      const [advanced, setAdvanced] = useState2(false);
-      const load = useCallback2(() => {
+      const [cfgText, setCfgText] = useState("");
+      const [cfg, setCfg] = useState(null);
+      const [msg, setMsg] = useState("");
+      const [advanced, setAdvanced] = useState(false);
+      const load = useCallback(() => {
         fetch("/sched/api/config").then((r) => r.json()).then((d) => {
           if (!d.ok) {
             setMsg("\u274C \u52A0\u8F7D\u5931\u8D25: " + (d.text || "").slice(0, 120));
@@ -7207,10 +7207,10 @@ function apply(cctx, config) {
           setMsg("");
         }).catch(() => setMsg("\u274C \u52A0\u8F7D\u5F02\u5E38"));
       }, []);
-      useEffect2(() => {
+      useEffect(() => {
         load();
       }, []);
-      if (!cfg) return j2("div", { style: { color: T.label2, fontSize: 11 } }, msg || "loading config\u2026");
+      if (!cfg) return j("div", { style: { color: T.label2, fontSize: 11 } }, msg || "loading config\u2026");
       const upd = (fn) => setCfg((c) => {
         const n = JSON.parse(JSON.stringify(c));
         fn(n);
@@ -7231,31 +7231,31 @@ function apply(cctx, config) {
           setMsg("\u274C " + e);
         }
       }
-      const numInput = (value, onChange, style) => j2("input", {
+      const numInput = (value, onChange, style) => j("input", {
         value: value ?? "",
         onChange: (e) => onChange(e.target.value === "" ? null : Number(e.target.value)),
         style: { ...style, width: 52, background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label, borderRadius: 4, padding: "2px 4px", fontSize: 11 }
       });
-      const secTitle = (t) => j2("div", { style: { fontSize: 11, color: T.brand, margin: "8px 0 4px", fontWeight: 600 } }, t);
+      const secTitle = (t) => j("div", { style: { fontSize: 11, color: T.brand, margin: "8px 0 4px", fontWeight: 600 } }, t);
       const rowStyle = { display: "flex", alignItems: "center", gap: 6, marginBottom: 4, fontSize: 11, flexWrap: "wrap" };
       const projects2 = cfg.projects || {};
-      const projRows = Object.entries(projects2).map(([name2, pj]) => jsxs22("div", { key: name2, style: rowStyle }, [
-        j2("span", { style: { width: 80, color: T.label } }, name2),
-        j2("span", { style: { color: T.label2 } }, "\u914D\u989D"),
+      const projRows = Object.entries(projects2).map(([name2, pj]) => jsxs2("div", { key: name2, style: rowStyle }, [
+        j("span", { style: { width: 80, color: T.label } }, name2),
+        j("span", { style: { color: T.label2 } }, "\u914D\u989D"),
         numInput(pj.gpu_quota, (v) => upd((n) => {
           if (v === null) delete n.projects[name2].gpu_quota;
           else n.projects[name2].gpu_quota = v;
         })),
-        j2("span", { style: { color: T.label2 } }, "\u4F18\u5148\u7EA7"),
+        j("span", { style: { color: T.label2 } }, "\u4F18\u5148\u7EA7"),
         numInput(pj.priority ?? 0, (v) => upd((n) => {
           n.projects[name2].priority = v ?? 0;
         })),
-        j2("span", { style: { color: T.label2 } }, "\u5355\u5361\u4E0A\u9650"),
+        j("span", { style: { color: T.label2 } }, "\u5355\u5361\u4E0A\u9650"),
         numInput(pj.max_jobs, (v) => upd((n) => {
           if (v === null) delete n.projects[name2].max_jobs;
           else n.projects[name2].max_jobs = v;
         })),
-        j2("select", {
+        j("select", {
           value: pj.colocate === void 0 ? "" : String(pj.colocate),
           onChange: (e) => upd((n) => {
             const v = e.target.value;
@@ -7264,11 +7264,11 @@ function apply(cctx, config) {
           }),
           style: { background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label, borderRadius: 4, fontSize: 11 }
         }, [
-          j2("option", { value: "" }, "colocate\u8DDF\u968F\u5168\u5C40"),
-          j2("option", { value: "true" }, "\u5141\u8BB8\u5171\u4EAB"),
-          j2("option", { value: "false" }, "\u7981\u7528(\u72EC\u5360)")
+          j("option", { value: "" }, "colocate\u8DDF\u968F\u5168\u5C40"),
+          j("option", { value: "true" }, "\u5141\u8BB8\u5171\u4EAB"),
+          j("option", { value: "false" }, "\u7981\u7528(\u72EC\u5360)")
         ]),
-        j2("span", { style: { color: T.label2 } }, "\u4EB2\u548C\u5361 " + JSON.stringify(pj.gpu_affinity || []))
+        j("span", { style: { color: T.label2 } }, "\u4EB2\u548C\u5361 " + JSON.stringify(pj.gpu_affinity || []))
       ]));
       const buildProjectsPatch = () => {
         const patch = {};
@@ -7293,44 +7293,44 @@ function apply(cctx, config) {
           file: { ...nf.file || {}, enabled: fileOn }
         }
       });
-      return jsxs22("div", { style: { fontSize: 11 } }, [
+      return jsxs2("div", { style: { fontSize: 11 } }, [
         secTitle("\u9879\u76EE\u53C2\u6570\uFF08\u53CC\u9879\u76EE\u5171\u4EAB\u914D\u7F6E \u2014 \u4FDD\u5B58\u5F71\u54CD\u4E24\u4E2A\u4EE3\u7406\uFF09"),
-        jsxs22("div", { style: rowStyle }, [
-          j2("span", { style: { color: T.err } }, "\u26A0\uFE0F \u4FDD\u5B58\u9700\u4E8C\u6B21\u786E\u8BA4\uFF1B\u51B7\u952E(node/state_dir/gpus \u5361\u96C6)\u4EC5\u53EF\u8BFB\uFF0C\u53D8\u66F4\u987B ssh \u91CD\u542F daemon")
+        jsxs2("div", { style: rowStyle }, [
+          j("span", { style: { color: T.err } }, "\u26A0\uFE0F \u4FDD\u5B58\u9700\u4E8C\u6B21\u786E\u8BA4\uFF1B\u51B7\u952E(node/state_dir/gpus \u5361\u96C6)\u4EC5\u53EF\u8BFB\uFF0C\u53D8\u66F4\u987B ssh \u91CD\u542F daemon")
         ]),
         projRows,
-        j2(ArmButton, {
+        j(ArmButton, {
           label: "\u4FDD\u5B58\u9879\u76EE\u53C2\u6570",
           confirmLabel: "\u786E\u8BA4\u4FDD\u5B58?",
           color: T.brand,
           onConfirm: () => save(buildProjectsPatch())
         }),
         secTitle("co-location \u5168\u5C40"),
-        jsxs22("div", { style: rowStyle }, [
-          j2("label", { style: { color: T.label } }, [
-            j2("input", { type: "checkbox", checked: !!cl, onChange: (e) => upd((n) => {
+        jsxs2("div", { style: rowStyle }, [
+          j("label", { style: { color: T.label } }, [
+            j("input", { type: "checkbox", checked: !!cl, onChange: (e) => upd((n) => {
               n.co_locate = e.target.checked;
             }) }),
             " \u542F\u7528\u5171\u4EAB\u88C5\u7BB1"
           ]),
-          j2("span", { style: { color: T.label2 } }, "safety"),
-          j2("input", {
+          j("span", { style: { color: T.label2 } }, "safety"),
+          j("input", {
             value: cfg.co_locate_safety ?? 0.7,
             onChange: (e) => upd((n) => {
               n.co_locate_safety = Number(e.target.value);
             }),
             style: { width: 50, background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label, borderRadius: 4, fontSize: 11 }
           }),
-          j2("span", { style: { color: T.label2 } }, "\u6BCF\u5361\u4E0A\u9650"),
+          j("span", { style: { color: T.label2 } }, "\u6BCF\u5361\u4E0A\u9650"),
           numInput(cfg.co_locate_max_jobs ?? 3, (v) => upd((n) => {
             if (v !== null) n.co_locate_max_jobs = v;
           })),
-          j2(ArmButton, { label: "\u4FDD\u5B58", confirmLabel: "\u786E\u8BA4\u4FDD\u5B58?", color: T.brand, onConfirm: () => save(clPatch()) })
+          j(ArmButton, { label: "\u4FDD\u5B58", confirmLabel: "\u786E\u8BA4\u4FDD\u5B58?", color: T.brand, onConfirm: () => save(clPatch()) })
         ]),
         secTitle("\u901A\u77E5"),
-        jsxs22("div", { style: rowStyle }, [
-          j2("label", { style: { color: T.label } }, [
-            j2("input", {
+        jsxs2("div", { style: rowStyle }, [
+          j("label", { style: { color: T.label } }, [
+            j("input", {
               type: "checkbox",
               checked: evOn("batch_done"),
               onChange: (e) => upd((n) => {
@@ -7341,8 +7341,8 @@ function apply(cctx, config) {
             }),
             " batch_done"
           ]),
-          j2("label", { style: { color: T.label, marginRight: 10 } }, [
-            j2("input", {
+          j("label", { style: { color: T.label, marginRight: 10 } }, [
+            j("input", {
               type: "checkbox",
               checked: evOn("batch_blocked"),
               onChange: (e) => upd((n) => {
@@ -7353,8 +7353,8 @@ function apply(cctx, config) {
             }),
             " batch_blocked"
           ]),
-          j2("label", { style: { color: T.label, marginRight: 10 } }, [
-            j2("input", {
+          j("label", { style: { color: T.label, marginRight: 10 } }, [
+            j("input", {
               type: "checkbox",
               checked: fileOn,
               onChange: (e) => upd((n) => {
@@ -7364,15 +7364,15 @@ function apply(cctx, config) {
             }),
             " file \u6E20\u9053"
           ]),
-          j2(ArmButton, { label: "\u4FDD\u5B58\u901A\u77E5\u8BBE\u7F6E", confirmLabel: "\u786E\u8BA4\u4FDD\u5B58?", color: T.brand, onConfirm: () => save(notifyPatch()) })
+          j(ArmButton, { label: "\u4FDD\u5B58\u901A\u77E5\u8BBE\u7F6E", confirmLabel: "\u786E\u8BA4\u4FDD\u5B58?", color: T.brand, onConfirm: () => save(notifyPatch()) })
         ]),
         secTitle("\u51B7\u952E\uFF08\u53EA\u8BFB\uFF09"),
-        jsxs22("div", { style: { ...rowStyle, color: T.label2 } }, [
-          j2("span", {}, `node=${cfg.node} \xB7 user=${cfg.user} \xB7 gpus=${JSON.stringify(cfg.gpus)}`)
+        jsxs2("div", { style: { ...rowStyle, color: T.label2 } }, [
+          j("span", {}, `node=${cfg.node} \xB7 user=${cfg.user} \xB7 gpus=${JSON.stringify(cfg.gpus)}`)
         ]),
-        jsxs22("div", { style: rowStyle }, [
-          j2("button", { onClick: () => setAdvanced(!advanced), style: ghostBtn2 }, advanced ? "\u6536\u8D77\u9AD8\u7EA7\u6A21\u5F0F" : "\u9AD8\u7EA7\u6A21\u5F0F (\u539F\u59CB JSON)"),
-          advanced && j2(ArmButton, {
+        jsxs2("div", { style: rowStyle }, [
+          j("button", { onClick: () => setAdvanced(!advanced), style: ghostBtn }, advanced ? "\u6536\u8D77\u9AD8\u7EA7\u6A21\u5F0F" : "\u9AD8\u7EA7\u6A21\u5F0F (\u539F\u59CB JSON)"),
+          advanced && j(ArmButton, {
             label: "\u4FDD\u5B58\u5B8C\u6574 JSON",
             confirmLabel: "\u786E\u8BA4\u4FDD\u5B58\u5168\u90E8?",
             color: T.warn,
@@ -7389,18 +7389,18 @@ function apply(cctx, config) {
             }
           })
         ]),
-        advanced && j2("textarea", {
+        advanced && j("textarea", {
           value: cfgText,
           onChange: (e) => setCfgText(e.target.value),
           style: { width: "100%", minHeight: 200, background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label, borderRadius: 6, fontSize: 11, fontFamily: "monospace", padding: 6 }
         }),
-        msg && j2("div", { style: { fontSize: 11, marginTop: 6, color: msg.startsWith("\u2705") ? T.ok : T.warn } }, msg)
+        msg && j("div", { style: { fontSize: 11, marginTop: 6, color: msg.startsWith("\u2705") ? T.ok : T.warn } }, msg)
       ]);
     }
     function SubmitTab() {
-      const [text, setText] = useState2("");
-      const [preview, setPreview] = useState2(null);
-      const [msg, setMsg] = useState2("");
+      const [text, setText] = useState("");
+      const [preview, setPreview] = useState(null);
+      const [msg, setMsg] = useState("");
       const doDryRun = async () => {
         setPreview(null);
         setMsg("dry-run \u4E2D\u2026");
@@ -7427,77 +7427,77 @@ function apply(cctx, config) {
           setMsg(String(e));
         }
       };
-      return jsxs22("div", {}, [
-        j2("textarea", {
+      return jsxs2("div", {}, [
+        j("textarea", {
           value: text,
           onChange: (e) => setText(e.target.value),
           placeholder: '\u7C98\u8D34 batch.json\uFF0C\u4F8B\u5982 {"schema_version":1,"name":"my_batch","tasks":[{"id":"t1","cmd":["{VENV:k}","..."],"duration_min":5}]}\uFF08venv \u522B\u540D\u89C1\u8FDC\u7AEF config.venvs\uFF0C\u5F53\u524D\u4E3A k\uFF09',
           style: { width: "100%", height: 150, fontFamily: "monospace", fontSize: 12 }
         }),
-        jsxs22("div", { style: { margin: "6px 0" } }, [
-          j2("button", { onClick: doDryRun, disabled: !text.trim(), style: btn2(T.brand, !text.trim()) }, "\u2460 dry-run \u9884\u89C8"),
-          j2("button", { onClick: doSubmit, disabled: !(preview?.ok && text.trim()), style: btn2(T.ok, !(preview?.ok && text.trim())) }, "\u2461 \u786E\u8BA4\u63D0\u4EA4"),
-          j2("span", { style: { fontSize: 11, marginLeft: 8 } }, msg)
+        jsxs2("div", { style: { margin: "6px 0" } }, [
+          j("button", { onClick: doDryRun, disabled: !text.trim(), style: btn(T.brand, !text.trim()) }, "\u2460 dry-run \u9884\u89C8"),
+          j("button", { onClick: doSubmit, disabled: !(preview?.ok && text.trim()), style: btn(T.ok, !(preview?.ok && text.trim())) }, "\u2461 \u786E\u8BA4\u63D0\u4EA4"),
+          j("span", { style: { fontSize: 11, marginLeft: 8 } }, msg)
         ]),
-        preview && j2("pre", { style: { ...pre, maxHeight: 240, overflow: "auto" } }, preview.text)
+        preview && j("pre", { style: { ...pre, maxHeight: 240, overflow: "auto" } }, preview.text)
       ]);
     }
-    return jsxs22("div", { style: overlayStyle }, [
-      jsxs22("div", { style: panelStyle }, [
-        jsxs22("div", { style: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" } }, [
-          j2("button", {
+    return jsxs2("div", { style: overlayStyle }, [
+      jsxs2("div", { style: panelStyle }, [
+        jsxs2("div", { style: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" } }, [
+          j("button", {
             type: "button",
             onClick: onClose,
-            style: backBtn2,
+            style: backBtn,
             title: "\u8FD4\u56DE\u5BF9\u8BDD",
             "aria-label": "\u8FD4\u56DE"
           }, [
-            j2("span", { "aria-hidden": true, style: { fontSize: 15 } }, "\u2039"),
-            j2("span", null, "\u8FD4\u56DE")
+            j("span", { "aria-hidden": true, style: { fontSize: 15 } }, "\u2039"),
+            j("span", null, "\u8FD4\u56DE")
           ]),
-          j2("h2", { style: boardTitleStyle2 }, "sched \u770B\u677F"),
-          j2("span", { style: { color: stream.connected ? T.ok : T.err, fontSize: 12 } }, stream.connected ? "\u25CF live" : "\u25CB offline"),
-          j2("button", { onClick: refreshSnap, style: ghostBtn2 }, "refresh"),
-          j2("select", {
+          j("h2", { style: boardTitleStyle }, "sched \u770B\u677F"),
+          j("span", { style: { color: stream.connected ? T.ok : T.err, fontSize: 12 } }, stream.connected ? "\u25CF live" : "\u25CB offline"),
+          j("button", { onClick: refreshSnap, style: ghostBtn }, "refresh"),
+          j("select", {
             value: projFilter,
             onChange: (e) => setProjFilter(e.target.value),
             style: { background: "transparent", border: `1px solid ${T.border}`, color: T.label, borderRadius: 8, padding: "5px 8px", fontSize: 13, marginRight: 4 }
           }, [
-            j2("option", { value: "" }, "all projects"),
-            ...projects.map((pr) => j2("option", { key: pr, value: pr }, pr))
+            j("option", { value: "" }, "all projects"),
+            ...projects.map((pr) => j("option", { key: pr, value: pr }, pr))
           ]),
-          ...["batches", "gpus", "events", "submit", "config", "incidents", "ssh"].map((t) => j2("button", { key: t, onClick: () => setTab(t), style: tab === t ? btn2(T.brand) : ghostBtn2 }, t))
+          ...["batches", "gpus", "events", "submit", "config", "incidents", "ssh"].map((t) => j("button", { key: t, onClick: () => setTab(t), style: tab === t ? btn(T.brand) : ghostBtn }, t))
         ]),
-        opMsg && j2("div", { style: { fontSize: 13, color: T.warn, marginBottom: 4 } }, opMsg),
-        tab === "batches" && jsxs22("div", null, [
-          j2(DaemonBar, null),
-          !summary && j2("div", null, "loading\u2026"),
-          summary && j2("pre", { style: { ...pre, maxHeight: 110, overflow: "auto" } }, summary.split("\njobs:")[0]),
-          raw && jsxs22("div", {}, [
-            jsxs22("div", { style: { fontSize: 12, color: T.label2, marginBottom: 6 } }, [
-              j2("span", { style: { marginRight: 10, color: "#ef4444" } }, "\u25A0 \u7EA2=\u51FA\u9519"),
-              j2("span", { style: { marginRight: 10, color: "#22c55e" } }, "\u25A0 \u7EFF=\u6210\u529F"),
-              j2("span", { style: { marginRight: 10, color: "#3b82f6" } }, "\u25A0 \u84DD=\u8FD0\u884C\u4E2D"),
-              j2("span", { style: { color: "#9ca3af" } }, "\u25A0 \u7070=\u6392\u961F/\u53D6\u6D88")
+        opMsg && j("div", { style: { fontSize: 13, color: T.warn, marginBottom: 4 } }, opMsg),
+        tab === "batches" && jsxs2("div", null, [
+          j(DaemonBar, null),
+          !summary && j("div", null, "loading\u2026"),
+          summary && j("pre", { style: { ...pre, maxHeight: 110, overflow: "auto" } }, summary.split("\njobs:")[0]),
+          raw && jsxs2("div", {}, [
+            jsxs2("div", { style: { fontSize: 12, color: T.label2, marginBottom: 6 } }, [
+              j("span", { style: { marginRight: 10, color: "#ef4444" } }, "\u25A0 \u7EA2=\u51FA\u9519"),
+              j("span", { style: { marginRight: 10, color: "#22c55e" } }, "\u25A0 \u7EFF=\u6210\u529F"),
+              j("span", { style: { marginRight: 10, color: "#3b82f6" } }, "\u25A0 \u84DD=\u8FD0\u884C\u4E2D"),
+              j("span", { style: { color: "#9ca3af" } }, "\u25A0 \u7070=\u6392\u961F/\u53D6\u6D88")
             ]),
-            (raw.batches ?? []).filter((b) => !["done", "skip"].includes(b.status)).filter((b) => !projFilter || b.project === projFilter).map((b) => j2(BatchRow, { key: b.id ?? b.name, b }))
+            (raw.batches ?? []).filter((b) => !["done", "skip"].includes(b.status)).filter((b) => !projFilter || b.project === projFilter).map((b) => j(BatchRow, { key: b.id ?? b.name, b }))
           ])
         ]),
-        tab === "gpus" && jsxs22("div", { key: "tab-gpus" }, [
-          raw && (raw.gpus ?? []).map((g) => j2(GpuRow, { key: g.idx, g })),
-          !raw && j2("div", null, "loading\u2026")
+        tab === "gpus" && jsxs2("div", { key: "tab-gpus" }, [
+          raw && (raw.gpus ?? []).map((g) => j(GpuRow, { key: g.idx, g })),
+          !raw && j("div", null, "loading\u2026")
         ]),
-        tab === "events" && j2("pre", { key: "tab-events", style: { ...pre, maxHeight: "55vh", overflow: "auto" } }, stream.lines.join("\n") || "(no events yet)"),
-        tab === "submit" && j2(SubmitTab, { key: "tab-submit" }),
-        tab === "config" && j2(ConfigTab, { key: "tab-config" }),
-        tab === "incidents" && j2(IncidentsTab, { key: "tab-incidents" }),
-        tab === "ssh" && j2(SshTab, { key: "tab-ssh" }),
-        logTask && j2(LogViewer, { taskId: logTask, onClose: () => setLogTask(null) })
+        tab === "events" && j("pre", { key: "tab-events", style: { ...pre, maxHeight: "55vh", overflow: "auto" } }, stream.lines.join("\n") || "(no events yet)"),
+        tab === "submit" && j(SubmitTab, { key: "tab-submit" }),
+        tab === "config" && j(ConfigTab, { key: "tab-config" }),
+        tab === "incidents" && j(IncidentsTab, { key: "tab-incidents" }),
+        tab === "ssh" && j(SshTab, { key: "tab-ssh" }),
+        logTask && j(LogViewer, { taskId: logTask, onClose: () => setLogTask(null) })
       ])
     ]);
   }
   function StatusCard() {
-    const [open, setOpen] = useState2(false);
+    const [open, setOpen] = useState(false);
     const [snap] = useSnapshot("/sched/api/status", 3e4);
     const raw = snap?.raw;
     const gpus = raw?.gpus ?? [];
@@ -7559,19 +7559,19 @@ function apply(cctx, config) {
       unmanaged: "#f97316",
       quarantined: "#ef4444"
     };
-    return jsxs22("div", { className: "ns-settings-card", style: stCard }, [
-      j2("button", {
+    return jsxs2("div", { className: "ns-settings-card", style: stCard }, [
+      j("button", {
         type: "button",
         style: stHeader,
         "aria-expanded": open,
         onClick: () => setOpen(!open)
       }, [
-        jsxs22("span", { style: stHeadText }, [
-          j2("span", { style: stName }, "node-sched \u8C03\u5EA6\u5668"),
-          j2("span", { style: stDesc }, "GPU \u5171\u4EAB\u88C5\u7BB1 \xB7 \u6279\u91CF\u91CD\u8DD1 \xB7 OOM \u5FEB\u7167")
+        jsxs2("span", { style: stHeadText }, [
+          j("span", { style: stName }, "node-sched \u8C03\u5EA6\u5668"),
+          j("span", { style: stDesc }, "GPU \u5171\u4EAB\u88C5\u7BB1 \xB7 \u6279\u91CF\u91CD\u8DD1 \xB7 OOM \u5FEB\u7167")
         ]),
         // chevron (与原插件一致的 14x14 svg, 展开旋转 180deg)
-        j2("svg", {
+        j("svg", {
           width: 14,
           height: 14,
           viewBox: "0 0 14 14",
@@ -7582,7 +7582,7 @@ function apply(cctx, config) {
             transform: open ? "rotate(180deg)" : "none"
           }
         }, [
-          j2("path", {
+          j("path", {
             d: "M3.5 5.25 L7 8.75 L10.5 5.25",
             stroke: "currentColor",
             strokeWidth: 1.5,
@@ -7592,22 +7592,22 @@ function apply(cctx, config) {
           })
         ])
       ]),
-      open && jsxs22("div", { style: stBody }, [
-        jsxs22(
+      open && jsxs2("div", { style: stBody }, [
+        jsxs2(
           "div",
           { style: { display: "flex", gap: 6, flexWrap: "wrap" } },
-          gpus.map((g) => jsxs22("span", { key: g.idx, style: {
+          gpus.map((g) => jsxs2("span", { key: g.idx, style: {
             border: `1px solid ${gpuColor[g.status] || "var(--dsw-alias-border-l2)"}`,
             borderRadius: 4,
             padding: "2px 6px",
             fontSize: 11,
             color: gpuColor[g.status] || T.label2
           } }, [
-            j2("b", { style: { marginRight: 4 } }, "GPU" + g.idx),
+            j("b", { style: { marginRight: 4 } }, "GPU" + g.idx),
             g.status
           ]))
         ),
-        jsxs22("div", { style: {
+        jsxs2("div", { style: {
           borderTop: `1px solid var(--dsw-alias-border-l2)`,
           justifyContent: "flex-end",
           alignItems: "center",
@@ -7616,12 +7616,12 @@ function apply(cctx, config) {
           marginTop: 8,
           display: "flex"
         } }, [
-          j2("span", { style: {
+          j("span", { style: {
             color: "var(--dsw-alias-label-secondary)",
             fontSize: 13
           } }, `\u6279\u6B21: \u6D3B\u8DC3 ${act} \xB7 \u963B\u585E ${blk} \xB7 \u5B8C\u6210 ${done}`),
-          j2("span", { style: { flex: 1 } }),
-          j2("button", {
+          j("span", { style: { flex: 1 } }),
+          j("button", {
             onClick: () => window.dispatchEvent(new CustomEvent("nodesched-open")),
             style: {
               appearance: "none",
@@ -7687,7 +7687,7 @@ function apply(cctx, config) {
         container.setAttribute(VIEW_ATTR, "");
         col.appendChild(container);
         root = require("react-dom/client").createRoot(container);
-        root.render(j2(Dashboard, { onClose: () => panel.hide() }));
+        root.render(j(Dashboard, { onClose: () => panel.hide() }));
       } catch (e) {
         cctx.logger?.warn?.("[node-sched-ui] view mount failed:", e?.message);
       }
@@ -7741,11 +7741,11 @@ function apply(cctx, config) {
         return void 0;
       };
       const placeEntry = (root) => {
-        const btn3 = newSessionButton(root);
-        if (!btn3) return false;
+        const btn2 = newSessionButton(root);
+        if (!btn2) return false;
         if (entry.parentElement !== root) {
-          const row = btn3.closest('[class*="logoRow"]');
-          const base = row && row.parentElement === root ? row : btn3;
+          const row = btn2.closest('[class*="logoRow"]');
+          const base = row && row.parentElement === root ? row : btn2;
           root.insertBefore(entry, base.nextElementSibling);
         }
         return true;
