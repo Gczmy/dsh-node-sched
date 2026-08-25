@@ -344,37 +344,47 @@ function apply(cctx, config) {
 				msg && j("span", { style: { color: msg.includes("失败") ? T.err : T.ok, fontSize: 13 } }, msg),
 			]),
 			hosts === null && j("div", { style: { color: T.label2 } }, "loading…"),
-			hosts !== null && jsxs2("div", { style: { display: "grid", gridTemplateColumns: "minmax(140px,1fr) minmax(150px,1.3fr) 70px 80px minmax(110px,1fr) auto auto auto auto", gap: "0 10px", alignItems: "center", fontSize: 13 } }, [
-				j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "别名"),
-				j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "主机"),
-				j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "端口"),
-				j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "认证"),
-				j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "备注/跳板"),
-				j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "SCHED"),
-				j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, ""),
-				j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, ""),
-				j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, ""),
-				...hosts.flatMap((h) => [
-					j("span", { key: h.alias + "-a", style: { fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, h.alias),
-					j("span", { key: h.alias + "-h", style: { color: T.label2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, h.user !== "root" ? `${h.user}@${h.host}` : h.host),
-					j("span", { key: h.alias + "-p", style: { color: T.label2 } }, String(h.port)),
-					j("span", { key: h.alias + "-au", style: {} }, h.auth === "key" ? (h.keyReady ? "🔑 key" : "⚠ key缺失") : h.auth === "agent" ? "agent" : "密码"),
-					j("span", { key: h.alias + "-d", style: { color: T.label2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
-						h.proxyJump && h.proxyJump.length > 0 ? `via ${h.proxyJump.join(">")}` : (h.description ?? "")),
-					confirmAlias === h.alias
-						? j("button", { key: h.alias + "-c", onClick: () => doDelete(h.alias), style: btn(T.err) }, "确认删除")
-						: j("button", { key: h.alias + "-t", onClick: () => doTest(h.alias), disabled: !!busy, style: ghostBtn },
-							busy === "test:" + h.alias ? "测试中…" : "测试"),
-					binding?.alias === h.alias
-						? j("span", { key: h.alias + "-sb", style: { color: T.ok, fontWeight: 700, fontSize: 12, whiteSpace: "nowrap" } }, "✔ SCHED")
-						: j("button", { key: h.alias + "-bnd", onClick: () => doBind(h.alias), disabled: !!busy, title: "设为 sched 数据源主机（引擎模式，看板数据直连该机）", style: btn(T.brand, !!busy) },
-							busy === "bind:" + h.alias ? "绑定中…" : "设为SCHED"),
-					confirmAlias === h.alias
-						? j("button", { key: h.alias + "-x", onClick: () => setConfirmAlias(null), style: ghostBtn }, "取消")
-						: j("button", { key: h.alias + "-o", onClick: () => setTermAlias(h.alias), style: btn(T.ok) }, "终端"),
-				]),
+			hosts !== null && hosts.length === 0 && j("div", { style: { color: T.label2, fontSize: 13 } },
+				"暂无主机 —— 点上方「从 ~/.ssh/config 导入」一键导入"),
+			hosts !== null && jsxs2("div", { style: { display: "flex", flexDirection: "column", gap: 6 } }, [
+				...hosts.map((h) => {
+					const boundHere = binding?.alias === h.alias;
+					return jsxs2("div", {
+						key: h.alias,
+						style: {
+							display: "flex", alignItems: "center", gap: 12,
+							padding: "8px 12px", borderRadius: 10,
+							border: `1px solid ${boundHere ? `color-mix(in srgb, ${T.ok} 35%, transparent)` : T.border}`,
+							background: boundHere ? `color-mix(in srgb, ${T.ok} 7%, transparent)` : "transparent",
+						},
+					}, [
+						// 左：身份区（一行一条 ssh 配置）
+						j("span", { style: { fontWeight: 700, fontSize: 13, flexShrink: 0 } }, h.alias),
+						boundHere && j("span", { style: { color: T.ok, fontWeight: 700, fontSize: 11, border: `1px solid ${T.ok}`, borderRadius: 999, padding: "1px 8px", flexShrink: 0 } }, "SCHED"),
+						j("span", { style: { color: T.label2, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 } }, [
+							h.user !== "root" ? `${h.user}@${h.host}` : h.host,
+							`:${h.port}`,
+							h.auth === "key" ? (h.keyReady ? " · 🔑" : " · ⚠key缺失") : h.auth === "agent" ? " · agent" : " · 密码",
+							(h.proxyJump && h.proxyJump.length > 0) ? ` · via ${h.proxyJump.join(">")}` : "",
+							h.description ? ` · ${h.description}` : "",
+						].join("")),
+						// 右：操作区
+						boundHere
+							? j("span", { key: "sb", style: { color: T.ok, fontWeight: 700, fontSize: 12, flexShrink: 0 } }, "✔ 数据源")
+							: j("button", { key: "bnd", onClick: () => doBind(h.alias), disabled: !!busy, title: "设为 sched 数据源主机（引擎模式，看板数据直连该机）", style: { ...ghostBtn, color: T.brand, borderColor: `color-mix(in srgb, ${T.brand} 45%, transparent)`, flexShrink: 0 } },
+								busy === "bind:" + h.alias ? "绑定中…" : "设为SCHED"),
+						j("button", { key: "o", onClick: () => setTermAlias(h.alias), title: "打开网页终端", style: { ...ghostBtn, flexShrink: 0 } }, "终端"),
+						confirmAlias === h.alias
+							? j("button", { key: "c", onClick: () => doDelete(h.alias), style: { ...btn(T.err), flexShrink: 0 } }, "确认删除")
+							: j("button", { key: "t", onClick: () => doTest(h.alias), disabled: !!busy, title: "连通性测试", style: { ...ghostBtn, flexShrink: 0 } },
+								busy === "test:" + h.alias ? "…" : "测试"),
+						confirmAlias === h.alias
+							? j("button", { key: "x", onClick: () => setConfirmAlias(null), style: { ...ghostBtn, flexShrink: 0 } }, "取消")
+							: j("button", { key: "d", onClick: () => setConfirmAlias(h.alias), disabled: !!busy, title: "删除该主机配置", style: { ...ghostBtn, color: T.err, flexShrink: 0 } }, "删"),
+					]);
+				}),
 			]),
-			confirmAlias && j("div", { style: { fontSize: 12, color: T.warn } }, `再次点击「确认删除」以移除 ${confirmAlias}（连接立即断开）`),
+			confirmAlias && j("div", { style: { fontSize: 12, color: T.warn } }, `再次点「确认删除」以移除 ${confirmAlias}（连接立即断开）`),
 		]);
 	}
 

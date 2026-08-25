@@ -6749,40 +6749,53 @@ function apply(cctx, config) {
         msg && j("span", { style: { color: msg.includes("\u5931\u8D25") ? T.err : T.ok, fontSize: 13 } }, msg)
       ]),
       hosts === null && j("div", { style: { color: T.label2 } }, "loading\u2026"),
-      hosts !== null && jsxs2("div", { style: { display: "grid", gridTemplateColumns: "minmax(140px,1fr) minmax(150px,1.3fr) 70px 80px minmax(110px,1fr) auto auto auto auto", gap: "0 10px", alignItems: "center", fontSize: 13 } }, [
-        j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "\u522B\u540D"),
-        j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "\u4E3B\u673A"),
-        j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "\u7AEF\u53E3"),
-        j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "\u8BA4\u8BC1"),
-        j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "\u5907\u6CE8/\u8DF3\u677F"),
-        j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, "SCHED"),
-        j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, ""),
-        j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, ""),
-        j("div", { style: { fontWeight: 700, borderBottom: `1px solid ${T.border}`, paddingBottom: 4 } }, ""),
-        ...hosts.flatMap((h) => [
-          j("span", { key: h.alias + "-a", style: { fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, h.alias),
-          j("span", { key: h.alias + "-h", style: { color: T.label2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, h.user !== "root" ? `${h.user}@${h.host}` : h.host),
-          j("span", { key: h.alias + "-p", style: { color: T.label2 } }, String(h.port)),
-          j("span", { key: h.alias + "-au", style: {} }, h.auth === "key" ? h.keyReady ? "\u{1F511} key" : "\u26A0 key\u7F3A\u5931" : h.auth === "agent" ? "agent" : "\u5BC6\u7801"),
-          j(
-            "span",
-            { key: h.alias + "-d", style: { color: T.label2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
-            h.proxyJump && h.proxyJump.length > 0 ? `via ${h.proxyJump.join(">")}` : h.description ?? ""
-          ),
-          confirmAlias === h.alias ? j("button", { key: h.alias + "-c", onClick: () => doDelete(h.alias), style: btn(T.err) }, "\u786E\u8BA4\u5220\u9664") : j(
-            "button",
-            { key: h.alias + "-t", onClick: () => doTest(h.alias), disabled: !!busy, style: ghostBtn },
-            busy === "test:" + h.alias ? "\u6D4B\u8BD5\u4E2D\u2026" : "\u6D4B\u8BD5"
-          ),
-          binding?.alias === h.alias ? j("span", { key: h.alias + "-sb", style: { color: T.ok, fontWeight: 700, fontSize: 12, whiteSpace: "nowrap" } }, "\u2714 SCHED") : j(
-            "button",
-            { key: h.alias + "-bnd", onClick: () => doBind(h.alias), disabled: !!busy, title: "\u8BBE\u4E3A sched \u6570\u636E\u6E90\u4E3B\u673A\uFF08\u5F15\u64CE\u6A21\u5F0F\uFF0C\u770B\u677F\u6570\u636E\u76F4\u8FDE\u8BE5\u673A\uFF09", style: btn(T.brand, !!busy) },
-            busy === "bind:" + h.alias ? "\u7ED1\u5B9A\u4E2D\u2026" : "\u8BBE\u4E3ASCHED"
-          ),
-          confirmAlias === h.alias ? j("button", { key: h.alias + "-x", onClick: () => setConfirmAlias(null), style: ghostBtn }, "\u53D6\u6D88") : j("button", { key: h.alias + "-o", onClick: () => setTermAlias(h.alias), style: btn(T.ok) }, "\u7EC8\u7AEF")
-        ])
+      hosts !== null && hosts.length === 0 && j(
+        "div",
+        { style: { color: T.label2, fontSize: 13 } },
+        "\u6682\u65E0\u4E3B\u673A \u2014\u2014 \u70B9\u4E0A\u65B9\u300C\u4ECE ~/.ssh/config \u5BFC\u5165\u300D\u4E00\u952E\u5BFC\u5165"
+      ),
+      hosts !== null && jsxs2("div", { style: { display: "flex", flexDirection: "column", gap: 6 } }, [
+        ...hosts.map((h) => {
+          const boundHere = binding?.alias === h.alias;
+          return jsxs2("div", {
+            key: h.alias,
+            style: {
+              display: "flex",
+              alignItems: "center",
+              gap: 12,
+              padding: "8px 12px",
+              borderRadius: 10,
+              border: `1px solid ${boundHere ? `color-mix(in srgb, ${T.ok} 35%, transparent)` : T.border}`,
+              background: boundHere ? `color-mix(in srgb, ${T.ok} 7%, transparent)` : "transparent"
+            }
+          }, [
+            // 左：身份区（一行一条 ssh 配置）
+            j("span", { style: { fontWeight: 700, fontSize: 13, flexShrink: 0 } }, h.alias),
+            boundHere && j("span", { style: { color: T.ok, fontWeight: 700, fontSize: 11, border: `1px solid ${T.ok}`, borderRadius: 999, padding: "1px 8px", flexShrink: 0 } }, "SCHED"),
+            j("span", { style: { color: T.label2, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 } }, [
+              h.user !== "root" ? `${h.user}@${h.host}` : h.host,
+              `:${h.port}`,
+              h.auth === "key" ? h.keyReady ? " \xB7 \u{1F511}" : " \xB7 \u26A0key\u7F3A\u5931" : h.auth === "agent" ? " \xB7 agent" : " \xB7 \u5BC6\u7801",
+              h.proxyJump && h.proxyJump.length > 0 ? ` \xB7 via ${h.proxyJump.join(">")}` : "",
+              h.description ? ` \xB7 ${h.description}` : ""
+            ].join("")),
+            // 右：操作区
+            boundHere ? j("span", { key: "sb", style: { color: T.ok, fontWeight: 700, fontSize: 12, flexShrink: 0 } }, "\u2714 \u6570\u636E\u6E90") : j(
+              "button",
+              { key: "bnd", onClick: () => doBind(h.alias), disabled: !!busy, title: "\u8BBE\u4E3A sched \u6570\u636E\u6E90\u4E3B\u673A\uFF08\u5F15\u64CE\u6A21\u5F0F\uFF0C\u770B\u677F\u6570\u636E\u76F4\u8FDE\u8BE5\u673A\uFF09", style: { ...ghostBtn, color: T.brand, borderColor: `color-mix(in srgb, ${T.brand} 45%, transparent)`, flexShrink: 0 } },
+              busy === "bind:" + h.alias ? "\u7ED1\u5B9A\u4E2D\u2026" : "\u8BBE\u4E3ASCHED"
+            ),
+            j("button", { key: "o", onClick: () => setTermAlias(h.alias), title: "\u6253\u5F00\u7F51\u9875\u7EC8\u7AEF", style: { ...ghostBtn, flexShrink: 0 } }, "\u7EC8\u7AEF"),
+            confirmAlias === h.alias ? j("button", { key: "c", onClick: () => doDelete(h.alias), style: { ...btn(T.err), flexShrink: 0 } }, "\u786E\u8BA4\u5220\u9664") : j(
+              "button",
+              { key: "t", onClick: () => doTest(h.alias), disabled: !!busy, title: "\u8FDE\u901A\u6027\u6D4B\u8BD5", style: { ...ghostBtn, flexShrink: 0 } },
+              busy === "test:" + h.alias ? "\u2026" : "\u6D4B\u8BD5"
+            ),
+            confirmAlias === h.alias ? j("button", { key: "x", onClick: () => setConfirmAlias(null), style: { ...ghostBtn, flexShrink: 0 } }, "\u53D6\u6D88") : j("button", { key: "d", onClick: () => setConfirmAlias(h.alias), disabled: !!busy, title: "\u5220\u9664\u8BE5\u4E3B\u673A\u914D\u7F6E", style: { ...ghostBtn, color: T.err, flexShrink: 0 } }, "\u5220")
+          ]);
+        })
       ]),
-      confirmAlias && j("div", { style: { fontSize: 12, color: T.warn } }, `\u518D\u6B21\u70B9\u51FB\u300C\u786E\u8BA4\u5220\u9664\u300D\u4EE5\u79FB\u9664 ${confirmAlias}\uFF08\u8FDE\u63A5\u7ACB\u5373\u65AD\u5F00\uFF09`)
+      confirmAlias && j("div", { style: { fontSize: 12, color: T.warn } }, `\u518D\u6B21\u70B9\u300C\u786E\u8BA4\u5220\u9664\u300D\u4EE5\u79FB\u9664 ${confirmAlias}\uFF08\u8FDE\u63A5\u7ACB\u5373\u65AD\u5F00\uFF09`)
     ]);
   }
   function SshTerminal({ alias, onClose }) {
