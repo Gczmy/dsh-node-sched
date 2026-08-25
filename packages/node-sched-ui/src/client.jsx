@@ -196,6 +196,57 @@ function apply(cctx, config) {
 		]);
 	}
 
+
+	// ── B20: 侧栏入口 + 页面视图 (task-board/ssh 同构) ─────────────────────
+	const SCHED_ACTIVE_ATTR = "data-dsh-sched-active";
+	const PANEL_ACTIVATE_EVENT = "dsh-panel-activate";
+	const PANEL_NAME = "sched";
+
+	function createSidebarEntry() {
+		var btn = document.createElement("button");
+		btn.type = "button";
+		btn.dataset.dshSchedEntry = "";
+		btn.className = "_7D6uKa_entry";
+		btn.innerHTML = '<span class="_7D6uKa_entryIcon"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1.5" y="1.5" width="13" height="13" rx="2"/><path d="M4.5 10.5 L7 7 L9.5 9.5 L12 6"/></svg></span><span class="_7D6uKa_entryLabel">sched 看板</span>';
+		return btn;
+	}
+
+	function findSidebarRoot() {
+		var col = document.querySelector('[data-pane="sidebar"], [class*="sidebarCol"]');
+		if (!col) return undefined;
+		return col.querySelector('[class*="logoRow"]')?.parentElement ?? col.firstElementChild;
+	}
+
+	function newSessionButton(root) {
+		if (!root) return undefined;
+		var rows = root.querySelectorAll("[class*='newSession']");
+		return rows.length > 0 ? rows[rows.length - 1] : undefined;
+	}
+
+	var schedViewContainer = null;
+	var schedReactRoot = null;
+
+	function mountPageView(el) {
+		var col = document.querySelector('[data-pane="conversation"], [class*="centerCol"]');
+		if (!col) return;
+		if (!schedViewContainer || !col.contains(schedViewContainer)) {
+			schedViewContainer = document.createElement("div");
+			schedViewContainer.dataset.dshSchedView = "";
+			schedViewContainer.style.cssText = "z-index:60;background:var(--dsw-alias-bg-base);display:none;position:absolute;inset:0;";
+			col.appendChild(schedViewContainer);
+		}
+		if (!schedReactRoot) {
+			var rd = require("react-dom/client");
+			schedReactRoot = rd.createRoot(schedViewContainer);
+		}
+		schedReactRoot.render(el);
+	}
+
+	function deactivatePanel() {
+		document.documentElement.removeAttribute(SCHED_ACTIVE_ATTR);
+		if (schedViewContainer) schedViewContainer.style.display = "none";
+	}
+
 	function Dashboard({ onClose }) {
 		const [stream] = useSchedStream();
 		const [snap, refreshSnap] = useSnapshot("/sched/api/status", 20000);
