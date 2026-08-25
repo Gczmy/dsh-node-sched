@@ -752,60 +752,111 @@ function apply(cctx, config) {
 	}
 
 	// ── settings card: 手风琴卡片 (收起=摘要行 / 展开=完整面板入口) ────────
+	// ── settings card: 与 PluginSettingsCard 完全同构 (1:1 样式) ──────────
 	function StatusCard() {
 		const [open, setOpen] = useState(false);
 		const [snap] = useSnapshot("/sched/api/status", 30000);
 		const raw = snap?.raw;
 		const gpus = raw?.gpus ?? [];
 		const batches = raw?.batches ?? [];
-		const stColor = { free: "#22c55e", assigned: "#3b82f6", releasing: "#eab308",
-			unmanaged: "#f97316", quarantined: "#ef4444" };
+
+		// PluginSettingsCard 原始样式值 (settings-card.module.css 1:1)
+		const stCard = {
+			border: "1px solid var(--dsw-alias-border-l2)",
+			background: open ? "var(--dsw-alias-bg-layer-2)" : "var(--dsw-alias-bg-layer-3)",
+			borderRadius: 12,
+			listStyle: "none",
+			transition: "border-color .16s, background .16s",
+		};
+		if (open) stCard.borderColor = "var(--dsw-alias-label-dimmed)";
+		const stHeader = {
+			appearance: "none", width: "100%", font: "inherit", color: "inherit",
+			textAlign: "left", cursor: "pointer", background: "0 0", border: 0,
+			borderRadius: 12, alignItems: "center", gap: 12, padding: "14px 16px",
+			display: "flex",
+		};
+		const stHeadText = {
+			flexDirection: "column", flex: 1, gap: 4, minWidth: 0, display: "flex",
+		};
+		const stName = {
+			color: "var(--dsw-alias-label-primary)", fontSize: 15,
+			fontWeight: 600, lineHeight: 1.4,
+		};
+		const stDesc = {
+			color: "var(--dsw-alias-label-tertiary)", fontSize: 13, lineHeight: 1.5,
+		};
+		const stBody = {
+			borderTop: "1px solid var(--dsw-alias-border-l2)",
+			margin: "0 16px", paddingBottom: 8,
+		};
+
 		const act = batches.filter((b) => b.status === "active").length;
 		const blk = batches.filter((b) => b.status === "blocked").length;
 		const done = batches.filter((b) => ["done", "skip"].includes(b.status)).length;
-		const freeN = gpus.filter((g) => g.status === "free").length;
 
-		return jsxs2("div", { style: {
-			border: `1px solid ${T.border}`, borderRadius: 8,
-			background: T.bgLayer, fontSize: 11, overflow: "hidden",
-		} }, [
-			// 收起态摘要行 (点击整行切换)
-			jsxs2("div", {
+		return jsxs2("div", { style: stCard }, [
+			j("button", {
+				type: "button",
+				style: stHeader,
+				"aria-expanded": open,
 				onClick: () => setOpen(!open),
-				style: { display: "flex", alignItems: "center", gap: 8,
-					padding: "8px 12px", cursor: "pointer", userSelect: "none" },
 			}, [
-				j("span", { style: { color: T.brand } }, "⚡"),
-				j("span", { style: { fontWeight: 700 } }, "node-sched 调度器"),
-				j("span", { style: { color: freeN > 0 ? "#22c55e" : T.label2 } },
-					`${freeN}/${gpus.length || "?"} GPU 空闲`),
-				(act > 0 || blk > 0) && j("span", { style: { color: T.label2 } },
-					`活跃 ${act}· 阻塞 ${blk}`),
-				j("span", { style: { flex: 1 } }),
-				j("span", { style: { color: T.label2, fontSize: 10 } }, open ? "▾" : "▸"),
+				jsxs2("span", { style: stHeadText }, [
+					j("span", { style: stName }, "node-sched 调度器"),
+					j("span", { style: stDesc }, "GPU 共享装箱 · 批量重跑 · OOM 快照"),
+				]),
+				// chevron (与原插件一致的 14x14 svg, 展开旋转 180deg)
+				j("svg", {
+					width: 14, height: 14, viewBox: "0 0 14 14",
+					style: {
+						color: "var(--dsw-alias-label-tertiary)", flex: "none",
+						transition: "transform .16s",
+						transform: open ? "rotate(180deg)" : "none",
+					},
+				}, [
+					j("path", {
+						d: "M3.5 5.25 L7 8.75 L10.5 5.25",
+						stroke: "currentColor", strokeWidth: 1.5,
+						fill: "none", strokeLinecap: "round", strokeLinejoin: "round",
+					}),
+				]),
 			]),
-			// 展开态: GPU 彩片 + 批次统计 + 打开面板按钮
-			open && jsxs2("div", { style: { padding: "0 12px 10px" } }, [
-				jsxs2("div", { style: { display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 } },
+			open && jsxs2("div", { style: stBody }, [
+				jsxs2("div", { style: { display: "flex", gap: 6, flexWrap: "wrap" } },
 					gpus.map((g) => jsxs2("span", { key: g.idx, style: {
-						border: `1px solid ${T.border}`, borderRadius: 4, padding: "2px 6px",
-						color: stColor[g.status] || T.label2,
+						border: `1px solid var(--dsw-alias-border-l2)`, borderRadius: 4,
+						padding: "2px 6px", fontSize: 11,
+						color: g.status === "free"
+							? "var(--dsw-alias-label-secondary)"
+							: "var(--dsw-alias-label-primary)",
 					} }, [
-						j("span", { style: { marginRight: 4, color: T.label } }, "GPU" + g.idx),
+						j("b", { style: { marginRight: 4 } }, "GPU" + g.idx),
 						g.status,
 					]))),
-				jsxs2("div", { style: { display: "flex", alignItems: "center" } }, [
-					j("span", { style: { color: T.label2 } },
-						`批次: 活跃 ${act} · 阻塞 ${blk} · 完成 ${done}`),
+				jsxs2("div", { style: {
+					borderTop: `1px solid var(--dsw-alias-border-l2)`,
+					justifyContent: "flex-end", alignItems: "center", gap: 8,
+					padding: "10px 0 4px", marginTop: 8, display: "flex",
+				} }, [
+					j("span", { style: {
+						color: "var(--dsw-alias-label-secondary)", fontSize: 13,
+					} }, `批次: 活跃 ${act} \u00b7 阻塞 ${blk} \u00b7 完成 ${done}`),
 					j("span", { style: { flex: 1 } }),
 					j("button", {
 						onClick: () => window.dispatchEvent(new CustomEvent("nodesched-open")),
-						style: btn(T.brand),
+						style: {
+							appearance: "none", font: "inherit", cursor: "pointer",
+							border: "1px solid #0000", borderRadius: 8, padding: "5px 14px",
+							fontSize: 13, lineHeight: 1.5,
+							background: "var(--dsw-alias-label-primary)",
+							color: "var(--dsw-alias-bg-layer-3)",
+						},
 					}, "打开面板"),
 				]),
 			]),
 		]);
 	}
+
 
 	// ── sidebar footer entry: button toggling the fullscreen dashboard ──────
 	function FooterEntry(props) {
