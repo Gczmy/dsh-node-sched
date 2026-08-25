@@ -341,20 +341,20 @@ function apply(cctx, config) {
 				INC_DETAIL[inc.id] = inc;
 			};
 
-			const view = useCallback(async (id) => {
+			const openDetail = useCallback(async (id) => {
 				const gen = ++INC_VIEW_GEN;
 				setDetailT({ id, loading: true }, "view-loading");
 				INC_OPEN_ID = id;
 				try {
 					const r = await fetch(`/sched/api/incidents?id=${id}`);
 					const d = await r.json();
-					// 响应返回时若已收起/切换, 丢弃过期结果 (防竞态重展开)
-					if (gen !== INC_VIEW_GEN || INC_OPEN_ID !== id) return;
-					if (!d.ok) { setDetailT({ id, error: d.text }, "view-err"); return; }
-					applyDetailT(JSON.parse(d.text).incident);
-				} catch (e) {
-					if (gen === INC_VIEW_GEN && INC_OPEN_ID === id) setDetail({ id, error: String(e) });
-				}
+					const inc = JSON.parse(d.text).incident;
+					// 先写模块缓存 (跨重挂载存活 —— 水合时可原样恢复展开态)
+					INC_DETAIL = { ...(INC_DETAIL || {}), [inc.id]: inc };
+					// UI 更新带代数守卫: 已收起/切换则只留缓存不改界面
+					if (gen !== INC_VIEW_GEN || INC_OPEN_ID !== inc.id) return;
+					setDetailT(inc, "applyDetail");
+				} catch (e) { setDetailT({ id, error: String(e) }, "view-catch"); }
 			}, []);
 
 			const load = useCallback(async () => {
@@ -376,6 +376,11 @@ function apply(cctx, config) {
 				msg || (INC_CACHE ? "" : "loading…"));
 
 			const p = detail && !detail.loading && !detail.error ? detail.payload || {} : null;
+			// B19 调试: 展开态渲染打点 —— 若无写入日志却出现此行, 问题在渲染/水合层
+			if (p && (!INC_DETAIL || !(INC_DETAIL[detail.id]))) {
+				console.log("[inc] ⚠️ 渲染了展开态但模块缓存中无此条目 id=" + detail.id,
+					"(水合丢失或外部写入)");
+			}
 			const failed = p ? p.failed || {} : {};
 			const mem = p ? p.memory || {} : {};
 
@@ -393,7 +398,7 @@ function apply(cctx, config) {
 					"暂无事故快照 (OOM/gpu_fault 发生时自动采集)"),
 				list.map((r) => jsxs2("div", {
 					key: r.id,
-					onClick: () => view(r.id),
+					onClick: () => openDetail(r.id),
 					style: { display: "flex", gap: 8, padding: "4px 6px", cursor: "pointer",
 						borderRadius: 4, background: detail && detail.id === r.id ? T.bgLayer : "transparent" },
 				}, [

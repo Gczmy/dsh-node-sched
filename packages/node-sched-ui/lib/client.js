@@ -420,21 +420,19 @@ function apply(cctx, config) {
         INC_DETAIL = INC_DETAIL || {};
         INC_DETAIL[inc.id] = inc;
       };
-      const view = useCallback(async (id) => {
+      const openDetail = useCallback(async (id) => {
         const gen = ++INC_VIEW_GEN;
         setDetailT({ id, loading: true }, "view-loading");
         INC_OPEN_ID = id;
         try {
           const r = await fetch(`/sched/api/incidents?id=${id}`);
           const d = await r.json();
-          if (gen !== INC_VIEW_GEN || INC_OPEN_ID !== id) return;
-          if (!d.ok) {
-            setDetailT({ id, error: d.text }, "view-err");
-            return;
-          }
-          applyDetailT(JSON.parse(d.text).incident);
+          const inc = JSON.parse(d.text).incident;
+          INC_DETAIL = { ...INC_DETAIL || {}, [inc.id]: inc };
+          if (gen !== INC_VIEW_GEN || INC_OPEN_ID !== inc.id) return;
+          setDetailT(inc, "applyDetail");
         } catch (e) {
-          if (gen === INC_VIEW_GEN && INC_OPEN_ID === id) setDetail({ id, error: String(e) });
+          setDetailT({ id, error: String(e) }, "view-catch");
         }
       }, []);
       const load = useCallback(async () => {
@@ -460,6 +458,12 @@ function apply(cctx, config) {
         msg || (INC_CACHE ? "" : "loading\u2026")
       );
       const p = detail && !detail.loading && !detail.error ? detail.payload || {} : null;
+      if (p && (!INC_DETAIL || !INC_DETAIL[detail.id])) {
+        console.log(
+          "[inc] \u26A0\uFE0F \u6E32\u67D3\u4E86\u5C55\u5F00\u6001\u4F46\u6A21\u5757\u7F13\u5B58\u4E2D\u65E0\u6B64\u6761\u76EE id=" + detail.id,
+          "(\u6C34\u5408\u4E22\u5931\u6216\u5916\u90E8\u5199\u5165)"
+        );
+      }
       const failed = p ? p.failed || {} : {};
       const mem = p ? p.memory || {} : {};
       return jsxs2("div", { style: { fontSize: 11 } }, [
@@ -489,7 +493,7 @@ function apply(cctx, config) {
         ),
         list.map((r) => jsxs2("div", {
           key: r.id,
-          onClick: () => view(r.id),
+          onClick: () => openDetail(r.id),
           style: {
             display: "flex",
             gap: 8,
