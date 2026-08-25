@@ -913,38 +913,76 @@ function apply(cctx, config) {
 	const disposeSettings = cctx.slots.inject(SLOT_SETTINGS, () =>
 		cctx.slots.register({ name: SLOT_SETTINGS, id: NS, order: 90 }, StatusCard));
 
-	// ── B20: 侧栏入口 + 页面视图挂载 ──────────────────────────────────────
-	const sidebarRoot = findSidebarRoot();
-	if (sidebarRoot) {
-		const entry = createSidebarEntry();
-		entry.addEventListener("click", () => {
-			const isActive = document.documentElement.hasAttribute(SCHED_ACTIVE_ATTR);
-			if (isActive) {
-				deactivatePanel();
-			} else {
-				document.documentElement.removeAttribute("data-dsh-taskboard-active");
-				document.documentElement.removeAttribute("data-dsh-ssh-active");
-				activatePanel();
-				mountPageView(
-					j(Dashboard, { onClose: () => deactivatePanel() })
-				);
-			}
-		});
-		// 插到 New Session 下方
-		const nsBtn = newSessionButton(sidebarRoot);
-		if (nsBtn) {
-			const anchor = nsBtn.nextElementSibling;
-			sidebarRoot.insertBefore(entry, anchor ?? null);
-		} else {
-			sidebarRoot.appendChild(entry);
-		}
-		// 监听其他面板激活 -> 自动关闭本面板
-		document.addEventListener(PANEL_ACTIVATE_EVENT, (e) => {
-			if (e.detail !== NS_ENTRY && document.documentElement.hasAttribute(SCHED_ACTIVE_ATTR)) {
-				deactivatePanel();
-			}
-		});
+	// ── B20: 侧栏入口 + 页面视图 (task-board/ssh 同构, MutationObserver 自愈) ──
+	var schedEntry = document.createElement("button");
+	schedEntry.type = "button";
+	schedEntry.dataset.dshSchedEntry = "";
+	schedEntry.className = "_7D6uKa_entry";
+	schedEntry.innerHTML = '<span class="_7D6uKa_entryIcon"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1.5" y="1.5" width="13" height="13" rx="2"/><path d="M4.5 10.5 L7 7 L9.5 9.5 L12 6"/></svg></span><span class="_7D6uKa_entryLabel">sched 看板</span>';
+
+	var schedIsActive = false;
+	var schedContainer = null;
+	var schedReactRoot = null;
+
+	function activateSched() {
+		schedIsActive = true;
+		document.documentElement.setAttribute("data-dsh-sched-active", "");
+		document.dispatchEvent(new CustomEvent("dsh-panel-activate", { detail: "sched" }));
+		mountSchedPage();
 	}
+	function deactivateSched() {
+		schedIsActive = false;
+		document.documentElement.removeAttribute("data-dsh-sched-active");
+		if (schedContainer) schedContainer.style.display = "none";
+	}
+	function mountSchedPage() {
+		var conv = document.querySelector('[data-pane="conversation"], [class*="centerCol"]');
+		if (!conv) return;
+		if (!schedContainer || !conv.contains(schedContainer)) {
+			schedContainer = document.createElement("div");
+			schedContainer.dataset.dshSchedView = "";
+			schedContainer.style.cssText = "z-index:60;background:var(--dsw-alias-bg-base);display:block;position:absolute;inset:0;";
+			conv.appendChild(schedContainer);
+		}
+		var rdMod = require("react-dom/client");
+		schedReactRoot = rdMod.createRoot(schedContainer);
+		schedReactRoot.render(j(Dashboard, { onClose: function() { deactivateSched(); } }));
+	}
+
+	schedEntry.addEventListener("click", function() {
+		if (!schedIsActive) { activateSched(); } else { deactivateSched(); }
+	});
+
+	// MutationObserver 自愈放置 (task-board 同构)
+	var placed = false;
+	var rootEl = undefined;
+	function tryPlace() {
+		if (rootEl !== void 0 && !rootEl.isConnected) { rootObs.disconnect(); rootEl = void 0; placed = false; }
+		if (placed && document.body.contains(schedEntry)) { rootObs.disconnect(); rootEl = void 0; placed = false; }
+		var col = document.querySelector('[data-pane="sidebar"], [class*="sidebarCol"]');
+		if (!col) return;
+		rootEl = col.querySelector('[class*="logoRow"]')?.parentElement ?? col.firstElementChild;
+		if (rootEl === void 0 || rootEl === null) return;
+		var nsBtns = rootEl.querySelectorAll("[class*='newSession']");
+		var nsBtn = nsBtns.length > 0 ? nsBtns[nsBtns.length - 1] : undefined;
+		var anchor = nsBtn ? nsBtn.nextElementSibling : null;
+		try { rootEl.insertBefore(schedEntry, anchor); placed = true; } catch(_) {}
+		if (placed) rootObs.observe(rootEl, { childList: true, subtree: true });
+	}
+	var waitObs = new MutationObserver(function() { tryPlace(); });
+	waitObs.observe(document.body, { childList: true, subtree: true });
+	var rootObs = new MutationObserver(function() {
+		if (!rootEl || !rootEl.isConnected) { placed = false; tryPlace(); }
+		else if (!rootEl.contains(schedEntry)) { placed = false; tryPlace(); }
+	});
+	tryPlace();
+
+	// 监听其他面板激活 -> 关闭本面板
+	document.addEventListener("dsh-panel-activate", function(e) {
+		if (e.detail !== "sched" && schedIsActive) deactivateSched();
+	});
+
+
 	return () => { disposeSettings?.(); };
 }
 
