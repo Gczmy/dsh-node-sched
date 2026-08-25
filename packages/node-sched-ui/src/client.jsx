@@ -42,6 +42,12 @@ const COLORS = {
 
 function apply(cctx, config) {
 	const { useEffect, useState, useCallback, useRef, memo } = require("react");
+
+	// B19: 跨重挂载缓存 —— 上游(看板外壳/轮询)可能随时重建本 tab 的组件树,
+	// 把数据与展开状态放模块级, 重挂载瞬间水合, 视觉零感知。
+	let INC_CACHE = null;        // {list, frozenAt}
+	let INC_OPEN_ID = null;      // 当前展开的 incident id
+	let INC_DETAIL = null;       // {id -> incident} 已取详情缓存
 	const { jsx: _jsx } = require("react/jsx-runtime");
 	const j = (tag, props, ...kids) => {
 		const p = { ...(props ?? {}) };
@@ -306,44 +312,53 @@ function apply(cctx, config) {
 		}
 
 		const IncidentsTab = memo(function IncidentsTab() {
-			// 冻结式阅读: 挂载时取一次快照, 阅读期间绝不自动刷新;
-			// 手动刷新静默更新(不折叠已展开详情); 切走再回来 = 新快照重新冻结。
-			const [list, setList] = useState(null);
-			const [detail, setDetail] = useState(null);
-			const [frozenAt, setFrozenAt] = useState("");
+			// 挂载即从模块缓存水合 (有缓存则无 loading 态), 再静默刷新
+			const [list, setList] = useState(INC_CACHE ? INC_CACHE.list : null);
+			const [frozenAt, setFrozenAt] = useState(INC_CACHE ? INC_CACHE.frozenAt : "");
+			const [detail, setDetail] = useState(
+				INC_OPEN_ID && INC_DETAIL && INC_DETAIL[INC_OPEN_ID]
+					? { ...INC_DETAIL[INC_OPEN_ID], id: INC_OPEN_ID } : null);
 			const [msg, setMsg] = useState("");
-			const detailIdRef = useRef(null);
-			const busyRef = useRef(false);
+
+			const applyList = (incidents) => {
+				setList(incidents);
+				INC_CACHE = { list: incidents };
+			};
+			const applyDetail = (inc) => {
+				setDetail(inc);
+				INC_OPEN_ID = inc.id;
+				INC_DETAIL = INC_DETAIL || {};
+				INC_DETAIL[inc.id] = inc;
+			};
 
 			const view = useCallback(async (id, silent) => {
 				if (!silent) setDetail({ id, loading: true });
-				detailIdRef.current = id;
+				INC_OPEN_ID = id;
 				try {
 					const r = await fetch(`/sched/api/incidents?id=${id}`);
 					const d = await r.json();
 					if (!d.ok) { setDetail({ id, error: d.text }); return; }
-					setDetail(JSON.parse(d.text).incident);
+					applyDetail(JSON.parse(d.text).incident);
 				} catch (e) { setDetail({ id, error: String(e) }); }
 			}, []);
 
 			const load = useCallback(async () => {
-				if (busyRef.current) return;
-				busyRef.current = true;
 				try {
 					const r = await fetch("/sched/api/incidents?limit=30");
 					const d = await r.json();
 					if (!d.ok) { setMsg("❌ " + (d.text || "").slice(0, 120)); return; }
-					setList(JSON.parse(d.text).incidents || []);
+					applyList(JSON.parse(d.text).incidents || []);
 					setFrozenAt(new Date().toLocaleTimeString("zh-CN", { hour12: false }));
-					// 静默刷新已展开的详情 (不折叠、不闪加载态)
-					if (detailIdRef.current) await view(detailIdRef.current, true);
 				} catch (e) { setMsg("❌ " + String(e)); }
-				finally { busyRef.current = false; }
-			}, [view]);
+			}, []);
 
-			useEffect(() => { load(); }, [load]);
+			useEffect(() => {
+				load();
+				if (INC_OPEN_ID) view(INC_OPEN_ID, true);   // 静默恢复展开详情
+			}, [load, view]);
 
-			if (!list) return j("div", { style: { color: T.label2, fontSize: 11 } }, msg || "loading…");
+			if (!list) return j("div", { style: { color: T.label2, fontSize: 11 } },
+				msg || (INC_CACHE ? "" : "loading…"));
 
 			const p = detail && !detail.loading && !detail.error ? detail.payload || {} : null;
 			const failed = p ? p.failed || {} : {};
@@ -379,7 +394,7 @@ function apply(cctx, config) {
 					jsxs2("div", { style: { marginBottom: 4 } }, [
 						j("span", { style: { fontWeight: 600, color: T.brand } },
 							`#${detail.id} ${detail.kind} @ gpu${detail.gpu_idx ?? "-"}`),
-						j("button", { onClick: () => { setDetail(null); detailIdRef.current = null; },
+						j("button", { onClick: () => { setDetail(null); INC_OPEN_ID = null; },
 							style: { ...ghostBtn, marginLeft: 8 } }, "收起"),
 					]),
 					j("div", { style: { color: T.label2, fontSize: 10, marginBottom: 4 } },
@@ -408,6 +423,7 @@ function apply(cctx, config) {
 				msg && j("div", { style: { color: T.err, fontSize: 11 } }, msg),
 			]);
 		});
+
 
 		function ConfigTab() {
 			const [cfgText, setCfgText] = useState("");   // 原始 JSON 文本 (可编辑, 高级模式)

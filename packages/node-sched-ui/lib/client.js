@@ -68,6 +68,9 @@ var COLORS = {
 };
 function apply(cctx, config) {
   const { useEffect, useState, useCallback, useRef, memo } = require("react");
+  let INC_CACHE = null;
+  let INC_OPEN_ID = null;
+  let INC_DETAIL = null;
   const { jsx: _jsx } = require("react/jsx-runtime");
   const j = (tag, props, ...kids) => {
     const p = { ...props ?? {} };
@@ -389,15 +392,25 @@ function apply(cctx, config) {
       ]);
     }
     const IncidentsTab = memo(function IncidentsTab2() {
-      const [list, setList] = useState(null);
-      const [detail, setDetail] = useState(null);
-      const [frozenAt, setFrozenAt] = useState("");
+      const [list, setList] = useState(INC_CACHE ? INC_CACHE.list : null);
+      const [frozenAt, setFrozenAt] = useState(INC_CACHE ? INC_CACHE.frozenAt : "");
+      const [detail, setDetail] = useState(
+        INC_OPEN_ID && INC_DETAIL && INC_DETAIL[INC_OPEN_ID] ? { ...INC_DETAIL[INC_OPEN_ID], id: INC_OPEN_ID } : null
+      );
       const [msg, setMsg] = useState("");
-      const detailIdRef = useRef(null);
-      const busyRef = useRef(false);
+      const applyList = (incidents) => {
+        setList(incidents);
+        INC_CACHE = { list: incidents };
+      };
+      const applyDetail = (inc) => {
+        setDetail(inc);
+        INC_OPEN_ID = inc.id;
+        INC_DETAIL = INC_DETAIL || {};
+        INC_DETAIL[inc.id] = inc;
+      };
       const view = useCallback(async (id, silent) => {
         if (!silent) setDetail({ id, loading: true });
-        detailIdRef.current = id;
+        INC_OPEN_ID = id;
         try {
           const r = await fetch(`/sched/api/incidents?id=${id}`);
           const d = await r.json();
@@ -405,14 +418,12 @@ function apply(cctx, config) {
             setDetail({ id, error: d.text });
             return;
           }
-          setDetail(JSON.parse(d.text).incident);
+          applyDetail(JSON.parse(d.text).incident);
         } catch (e) {
           setDetail({ id, error: String(e) });
         }
       }, []);
       const load = useCallback(async () => {
-        if (busyRef.current) return;
-        busyRef.current = true;
         try {
           const r = await fetch("/sched/api/incidents?limit=30");
           const d = await r.json();
@@ -420,19 +431,21 @@ function apply(cctx, config) {
             setMsg("\u274C " + (d.text || "").slice(0, 120));
             return;
           }
-          setList(JSON.parse(d.text).incidents || []);
+          applyList(JSON.parse(d.text).incidents || []);
           setFrozenAt((/* @__PURE__ */ new Date()).toLocaleTimeString("zh-CN", { hour12: false }));
-          if (detailIdRef.current) await view(detailIdRef.current, true);
         } catch (e) {
           setMsg("\u274C " + String(e));
-        } finally {
-          busyRef.current = false;
         }
-      }, [view]);
+      }, []);
       useEffect(() => {
         load();
-      }, [load]);
-      if (!list) return j("div", { style: { color: T.label2, fontSize: 11 } }, msg || "loading\u2026");
+        if (INC_OPEN_ID) view(INC_OPEN_ID, true);
+      }, [load, view]);
+      if (!list) return j(
+        "div",
+        { style: { color: T.label2, fontSize: 11 } },
+        msg || (INC_CACHE ? "" : "loading\u2026")
+      );
       const p = detail && !detail.loading && !detail.error ? detail.payload || {} : null;
       const failed = p ? p.failed || {} : {};
       const mem = p ? p.memory || {} : {};
@@ -495,7 +508,7 @@ function apply(cctx, config) {
             j("button", {
               onClick: () => {
                 setDetail(null);
-                detailIdRef.current = null;
+                INC_OPEN_ID = null;
               },
               style: { ...ghostBtn, marginLeft: 8 }
             }, "\u6536\u8D77")
