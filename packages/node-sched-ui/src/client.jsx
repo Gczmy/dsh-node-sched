@@ -762,7 +762,7 @@ function apply(cctx, config) {
 
 		// PluginSettingsCard 原始样式值 (settings-card.module.css 1:1)
 		const stCard = {
-			border: "1px solid var(--dsw-alias-border-l2)",
+			border: "1px solid var(--dsw-alias-border-l1)",
 			background: open ? "var(--dsw-alias-bg-layer-2)" : "var(--dsw-alias-bg-layer-3)",
 			borderRadius: 12,
 			listStyle: "none",
@@ -793,6 +793,8 @@ function apply(cctx, config) {
 		const act = batches.filter((b) => b.status === "active").length;
 		const blk = batches.filter((b) => b.status === "blocked").length;
 		const done = batches.filter((b) => ["done", "skip"].includes(b.status)).length;
+		const gpuColor = { free: "#22c55e", assigned: "#3b82f6",
+			releasing: "#eab308", unmanaged: "#f97316", quarantined: "#ef4444" };
 
 		return jsxs2("div", { style: stCard }, [
 			j("button", {

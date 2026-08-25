@@ -21,7 +21,7 @@ var __copyProps = (to, from, except, desc) => {
 };
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-// src/client.jsx
+// packages/node-sched-ui/src/client.jsx
 var client_exports = {};
 __export(client_exports, {
   apply: () => apply,
@@ -932,7 +932,7 @@ function apply(cctx, config) {
     const gpus = raw?.gpus ?? [];
     const batches = raw?.batches ?? [];
     const stCard = {
-      border: "1px solid var(--dsw-alias-border-l2)",
+      border: "1px solid var(--dsw-alias-border-l1)",
       background: open ? "var(--dsw-alias-bg-layer-2)" : "var(--dsw-alias-bg-layer-3)",
       borderRadius: 12,
       listStyle: "none",
@@ -980,6 +980,13 @@ function apply(cctx, config) {
     const act = batches.filter((b) => b.status === "active").length;
     const blk = batches.filter((b) => b.status === "blocked").length;
     const done = batches.filter((b) => ["done", "skip"].includes(b.status)).length;
+    const gpuColor = {
+      free: "#22c55e",
+      assigned: "#3b82f6",
+      releasing: "#eab308",
+      unmanaged: "#f97316",
+      quarantined: "#ef4444"
+    };
     return jsxs2("div", { style: stCard }, [
       j("button", {
         type: "button",
