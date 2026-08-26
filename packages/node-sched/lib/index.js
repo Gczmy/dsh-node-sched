@@ -526,7 +526,16 @@ function apply(ctx, config) {
 				handler: async (_req, res) => {
 					if (_statusCache) return void json(res, _statusCache.body);
 					const { raw, text } = await query(`${S} status --json`);
-					const body = raw ? { ok: true, summary: summarizeStatus(raw), raw } : { ok: false, text };
+					// B26: daemon 健康透传 (CLI 已解析出 raw.daemon_health)
+					const parsedRaw = (() => {
+						if (!raw) return null;
+						if (typeof raw === "object") return raw;
+						try { return JSON.parse(text); } catch (_) { return null; }
+					})();
+					const dhealth = parsedRaw?.daemon_health ?? null;
+					const body = parsedRaw
+						? { ok: true, summary: summarizeStatus(raw), raw: parsedRaw, daemon_health: dhealth }
+						: { ok: false, text };
 					_statusCache = { ts: Date.now(), body };
 					json(res, body);
 				},
