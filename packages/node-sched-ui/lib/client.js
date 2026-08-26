@@ -6453,7 +6453,7 @@ function apply(cctx, config) {
     return _jsx(tag, p);
   };
   const jsxs2 = j;
-  const pre = { margin: "4px 0", whiteSpace: "pre-wrap", background: T.bgLayer, border: `1px solid ${T.border}`, borderRadius: 8, padding: 10, fontSize: 11.5, color: T.label };
+  const pre = { margin: "4px 0", whiteSpace: "pre-wrap", background: T.bgLayer, border: `1px solid ${T.border}`, borderRadius: 8, padding: 10, fontSize: 13, color: T.label };
   const btn = (color = T.brand, disabled) => {
     if (disabled) {
       return { background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label2, borderRadius: 8, padding: "6px 14px", fontSize: 13, cursor: "default", marginRight: 4 };
@@ -6491,7 +6491,7 @@ function apply(cctx, config) {
       color: c,
       borderRadius: 999,
       padding: "2px 9px",
-      fontSize: 12,
+      fontSize: 13,
       marginRight: 6
     };
   };
@@ -6554,7 +6554,7 @@ function apply(cctx, config) {
   function TypedConfirm({ placeholder, color, onConfirm, children }) {
     const [typed, setTyped] = useState("");
     return j("span", {}, [
-      j("input", { placeholder, value: typed, onChange: (e) => setTyped(e.target.value), style: { fontSize: 11, width: 150, marginRight: 4 } }),
+      j("input", { placeholder, value: typed, onChange: (e) => setTyped(e.target.value), style: { fontSize: 13, width: 150, marginRight: 4 } }),
       j("button", { disabled: typed !== placeholder, onClick: async () => {
         await onConfirm();
         setTyped("");
@@ -6612,7 +6612,7 @@ function apply(cctx, config) {
     if (!pp || pp.total === 0) return null;
     return jsxs2("span", { style: { display: "inline-flex", alignItems: "center", flex: 1 } }, [
       j("span", { style: bar() }, j("span", { style: barFill(pp.done / pp.total * 100) })),
-      j("span", { style: { fontSize: 10, color: T.label2 } }, p)
+      j("span", { style: { fontSize: 12, color: T.label2 } }, p)
     ]);
   }
   function LogViewer({ taskId, onClose }) {
@@ -6730,7 +6730,7 @@ function apply(cctx, config) {
           ),
           j("button", { onClick: cancel, disabled: busy, title: "\u653E\u5F03\u672C\u6B21\u8FDE\u63A5", style: { ...ghostBtn, flexShrink: 0 } }, "\u53D6\u6D88")
         ]),
-        j("div", { style: { fontSize: 11, color: T.label2 } }, "180 \u79D2\u5185\u672A\u63D0\u4EA4\u5C06\u81EA\u52A8\u653E\u5F03\u672C\u6B21\u8FDE\u63A5")
+        j("div", { style: { fontSize: 13, color: T.label2 } }, "180 \u79D2\u5185\u672A\u63D0\u4EA4\u5C06\u81EA\u52A8\u653E\u5F03\u672C\u6B21\u8FDE\u63A5")
       ])
     ]);
   }
@@ -6836,7 +6836,7 @@ function apply(cctx, config) {
         ),
         j(
           "span",
-          { style: { color: T.label2, fontSize: 12 } },
+          { style: { color: T.label2, fontSize: 13 } },
           `\u5171 ${hosts ? hosts.length : "\u2026"} \u53F0\u4E3B\u673A \xB7 \u5BC6\u94A5\u8BA4\u8BC1\u8D70\u672C\u673A ~/.ssh \u6587\u4EF6\u6216 ssh-agent`
         ),
         msg && j("span", { style: { color: msg.includes("\u5931\u8D25") ? T.err : T.ok, fontSize: 13 } }, msg)
@@ -6864,7 +6864,7 @@ function apply(cctx, config) {
           }, [
             // 左：身份区（一行一条 ssh 配置）
             j("span", { style: { fontWeight: 700, fontSize: 13, flexShrink: 0 } }, h.alias),
-            boundHere && j("span", { style: { color: T.ok, fontWeight: 700, fontSize: 11, border: `1px solid ${T.ok}`, borderRadius: 999, padding: "1px 8px", flexShrink: 0 } }, "SCHED"),
+            boundHere && j("span", { style: { color: T.ok, fontWeight: 700, fontSize: 13, border: `1px solid ${T.ok}`, borderRadius: 999, padding: "1px 8px", flexShrink: 0 } }, "SCHED"),
             j("span", { style: { color: T.label2, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 } }, [
               h.user !== "root" ? `${h.user}@${h.host}` : h.host,
               `:${h.port}`,
@@ -6873,7 +6873,7 @@ function apply(cctx, config) {
               h.description ? ` \xB7 ${h.description}` : ""
             ].join("")),
             // 右：操作区
-            boundHere ? j("span", { key: "sb", style: { color: T.ok, fontWeight: 700, fontSize: 12, flexShrink: 0 } }, "\u2714 \u6570\u636E\u6E90") : j(
+            boundHere ? j("span", { key: "sb", style: { color: T.ok, fontWeight: 700, fontSize: 13, flexShrink: 0 } }, "\u2714 \u6570\u636E\u6E90") : j(
               "button",
               { key: "bnd", onClick: () => doBind(h.alias), disabled: !!busy, title: "\u8BBE\u4E3A sched \u6570\u636E\u6E90\u4E3B\u673A\uFF08\u5F15\u64CE\u6A21\u5F0F\uFF0C\u770B\u677F\u6570\u636E\u76F4\u8FDE\u8BE5\u673A\uFF09", style: { ...ghostBtn, color: T.brand, borderColor: `color-mix(in srgb, ${T.brand} 45%, transparent)`, flexShrink: 0 } },
               busy === "bind:" + h.alias ? "\u7ED1\u5B9A\u4E2D\u2026" : "\u8BBE\u4E3ASCHED"
@@ -6888,7 +6888,7 @@ function apply(cctx, config) {
           ]);
         })
       ]),
-      confirmAlias && j("div", { style: { fontSize: 12, color: T.warn } }, `\u518D\u6B21\u70B9\u300C\u786E\u8BA4\u5220\u9664\u300D\u4EE5\u79FB\u9664 ${confirmAlias}\uFF08\u8FDE\u63A5\u7ACB\u5373\u65AD\u5F00\uFF09`)
+      confirmAlias && j("div", { style: { fontSize: 13, color: T.warn } }, `\u518D\u6B21\u70B9\u300C\u786E\u8BA4\u5220\u9664\u300D\u4EE5\u79FB\u9664 ${confirmAlias}\uFF08\u8FDE\u63A5\u7ACB\u5373\u65AD\u5F00\uFF09`)
     ]);
   }
   function SshTerminal({ alias, onClose }) {
@@ -6979,7 +6979,7 @@ function apply(cctx, config) {
           j("span", null, "\u8FD4\u56DE")
         ]),
         j("h3", { style: { ...boardTitleStyle, fontSize: 14 } }, `\u7EC8\u7AEF \xB7 ${alias}`),
-        j("span", { style: { color: T.label2, fontSize: 12 } }, "\u5173\u95ED\u9875\u7B7E\u5373\u65AD\u5F00\u8FDC\u7AEF shell")
+        j("span", { style: { color: T.label2, fontSize: 13 } }, "\u5173\u95ED\u9875\u7B7E\u5373\u65AD\u5F00\u8FDC\u7AEF shell")
       ]),
       j("div", { ref: boxRef, style: { flex: 1, minHeight: 320, borderRadius: 10, border: `1px solid ${T.border2}`, overflow: "hidden", padding: 6, background: "#111318" } })
     ]);
@@ -7042,7 +7042,7 @@ function apply(cctx, config) {
           }
         })),
         tasks.length > SEG_MAX_VISIBLE && j("span", {
-          style: { fontSize: 10, color: T.label2, alignSelf: "center" }
+          style: { fontSize: 12, color: T.label2, alignSelf: "center" }
         }, `+${tasks.length - SEG_MAX_VISIBLE}`)
       ]);
     }
@@ -7060,11 +7060,11 @@ function apply(cctx, config) {
             e.stopPropagation();
             setOpen(!open);
           } }, [
-            j("b", { style: { fontSize: 11.5 }, title: b.name }, b.name),
-            b.project && j("span", { style: { fontSize: 9, color: T.label2, marginLeft: 6 } }, b.project)
+            j("b", { style: { fontSize: 13 }, title: b.name }, b.name),
+            b.project && j("span", { style: { fontSize: 11, color: T.label2, marginLeft: 6 } }, b.project)
           ]),
           j(TaskSegments, { tasks }),
-          j("span", { style: { fontSize: 10.5, color: T.label2, textAlign: "right", lineHeight: "15px" } }, b.progress ?? ""),
+          j("span", { style: { fontSize: 12.5, color: T.label2, textAlign: "right", lineHeight: "15px" } }, b.progress ?? ""),
           j(ArmButton, {
             label: "cancel",
             confirmLabel: "cancel(\u53D6\u6D88\u4EFB\u52A1!)",
@@ -7074,8 +7074,8 @@ function apply(cctx, config) {
           })
         ]),
         open && jsxs2("div", { style: { marginTop: 6, marginLeft: 76, paddingLeft: 10, borderLeft: `2px solid ${T.border}` } }, [
-          b.depends_on?.length > 0 && j("div", { style: { fontSize: 10, color: T.label2 } }, `\u4F9D\u8D56: ${b.depends_on.join(", ")}`),
-          ...tasks.filter((t) => ["failed", "timed_out", "cancelled"].includes(t.status)).map((t) => jsxs2("div", { style: { fontSize: 11, marginLeft: 14, marginTop: 2, display: "flex", alignItems: "center" } }, [
+          b.depends_on?.length > 0 && j("div", { style: { fontSize: 12, color: T.label2 } }, `\u4F9D\u8D56: ${b.depends_on.join(", ")}`),
+          ...tasks.filter((t) => ["failed", "timed_out", "cancelled"].includes(t.status)).map((t) => jsxs2("div", { style: { fontSize: 13, marginLeft: 14, marginTop: 2, display: "flex", alignItems: "center" } }, [
             j("span", { style: { fontFamily: "monospace", cursor: "pointer", textDecoration: "underline", marginRight: 6 }, onClick: () => setLogTask(`${t.batch}:${t.task}`), title: "\u67E5\u770B\u65E5\u5FD7" }, t.task),
             Badge({ s: t.status }),
             t.retries != null && j("span", { style: { color: T.label2, marginRight: 4 } }, `retries=${t.retries}`),
@@ -7090,8 +7090,8 @@ function apply(cctx, config) {
       return jsxs2("div", { style: { marginBottom: 6, display: "flex", alignItems: "center" } }, [
         Badge({ s: g.status }),
         j("span", { style: { fontFamily: "monospace", marginRight: 8 } }, `GPU${g.idx}`),
-        g.job && j("span", { style: { fontSize: 10, marginRight: 8, color: T.label2, flex: 1 } }, g.job),
-        g.quarantined && j("span", { style: { color: T.err, marginRight: 8, fontSize: 10 } }, "[quarantined]"),
+        g.job && j("span", { style: { fontSize: 12, marginRight: 8, color: T.label2, flex: 1 } }, g.job),
+        g.quarantined && j("span", { style: { color: T.err, marginRight: 8, fontSize: 12 } }, "[quarantined]"),
         !g.job && g.status === "free" && j("span", { style: { flex: 1 } }),
         g.status === "unmanaged" && j(ArmButton, {
           label: "gpu-free \u5F3A\u5236\u56DE\u6536",
@@ -7130,7 +7130,7 @@ function apply(cctx, config) {
         j("span", {
           title: "\u8FDE\u63A5\u901A\u9053\u5728 ssh \u9875\u7BA1\u7406",
           style: {
-            fontSize: 11,
+            fontSize: 13,
             padding: "2px 8px",
             borderRadius: 999,
             flexShrink: 0,
@@ -7229,7 +7229,7 @@ function apply(cctx, config) {
       }, [load]);
       if (!list) return j(
         "div",
-        { style: { color: T.label2, fontSize: 11 } },
+        { style: { color: T.label2, fontSize: 13 } },
         msg || (INC_CACHE ? "" : "loading\u2026")
       );
       const p = detail && !detail.loading && !detail.error ? detail.payload || {} : null;
@@ -7241,7 +7241,7 @@ function apply(cctx, config) {
       }
       const failed = p ? p.failed || {} : {};
       const mem = p ? p.memory || {} : {};
-      return jsxs2("div", { style: { fontSize: 11 } }, [
+      return jsxs2("div", { style: { fontSize: 13 } }, [
         jsxs2("div", { style: {
           display: "flex",
           alignItems: "center",
@@ -7308,7 +7308,7 @@ function apply(cctx, config) {
           ]),
           j(
             "div",
-            { style: { color: T.label2, fontSize: 10, marginBottom: 4 } },
+            { style: { color: T.label2, fontSize: 12, marginBottom: 4 } },
             `${detail.ts} \xB7 job ${detail.job_id} \xB7 batch ${detail.batch_id}`
           ),
           failed.dispatch_mode && j(
@@ -7343,7 +7343,7 @@ function apply(cctx, config) {
             j("pre", { style: { ...pre, maxHeight: 120, margin: "2px 0" } }, p.log_excerpt)
           ])
         ]),
-        msg && j("div", { style: { color: T.err, fontSize: 11 } }, msg)
+        msg && j("div", { style: { color: T.err, fontSize: 13 } }, msg)
       ]);
     });
     function ConfigTab() {
@@ -7365,7 +7365,7 @@ function apply(cctx, config) {
       useEffect(() => {
         load();
       }, []);
-      if (!cfg) return j("div", { style: { color: T.label2, fontSize: 11 } }, msg || "loading config\u2026");
+      if (!cfg) return j("div", { style: { color: T.label2, fontSize: 13 } }, msg || "loading config\u2026");
       const upd = (fn) => setCfg((c) => {
         const n = JSON.parse(JSON.stringify(c));
         fn(n);
@@ -7389,10 +7389,10 @@ function apply(cctx, config) {
       const numInput = (value, onChange, style) => j("input", {
         value: value ?? "",
         onChange: (e) => onChange(e.target.value === "" ? null : Number(e.target.value)),
-        style: { ...style, width: 52, background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label, borderRadius: 4, padding: "2px 4px", fontSize: 11 }
+        style: { ...style, width: 52, background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label, borderRadius: 4, padding: "2px 4px", fontSize: 13 }
       });
-      const secTitle = (t) => j("div", { style: { fontSize: 11, color: T.brand, margin: "8px 0 4px", fontWeight: 600 } }, t);
-      const rowStyle = { display: "flex", alignItems: "center", gap: 6, marginBottom: 4, fontSize: 11, flexWrap: "wrap" };
+      const secTitle = (t) => j("div", { style: { fontSize: 13, color: T.brand, margin: "8px 0 4px", fontWeight: 600 } }, t);
+      const rowStyle = { display: "flex", alignItems: "center", gap: 6, marginBottom: 4, fontSize: 13, flexWrap: "wrap" };
       const projects2 = cfg.projects || {};
       const projRows = Object.entries(projects2).map(([name2, pj]) => jsxs2("div", { key: name2, style: rowStyle }, [
         j("span", { style: { width: 80, color: T.label } }, name2),
@@ -7417,7 +7417,7 @@ function apply(cctx, config) {
             if (v === "") delete n.projects[name2].colocate;
             else n.projects[name2].colocate = v === "true";
           }),
-          style: { background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label, borderRadius: 4, fontSize: 11 }
+          style: { background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label, borderRadius: 4, fontSize: 13 }
         }, [
           j("option", { value: "" }, "colocate\u8DDF\u968F\u5168\u5C40"),
           j("option", { value: "true" }, "\u5141\u8BB8\u5171\u4EAB"),
@@ -7448,7 +7448,7 @@ function apply(cctx, config) {
           file: { ...nf.file || {}, enabled: fileOn }
         }
       });
-      return jsxs2("div", { style: { fontSize: 11 } }, [
+      return jsxs2("div", { style: { fontSize: 13 } }, [
         secTitle("\u9879\u76EE\u53C2\u6570\uFF08\u53CC\u9879\u76EE\u5171\u4EAB\u914D\u7F6E \u2014 \u4FDD\u5B58\u5F71\u54CD\u4E24\u4E2A\u4EE3\u7406\uFF09"),
         jsxs2("div", { style: rowStyle }, [
           j("span", { style: { color: T.err } }, "\u26A0\uFE0F \u4FDD\u5B58\u9700\u4E8C\u6B21\u786E\u8BA4\uFF1B\u51B7\u952E(node/state_dir/gpus \u5361\u96C6)\u4EC5\u53EF\u8BFB\uFF0C\u53D8\u66F4\u987B ssh \u91CD\u542F daemon")
@@ -7474,7 +7474,7 @@ function apply(cctx, config) {
             onChange: (e) => upd((n) => {
               n.co_locate_safety = Number(e.target.value);
             }),
-            style: { width: 50, background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label, borderRadius: 4, fontSize: 11 }
+            style: { width: 50, background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label, borderRadius: 4, fontSize: 13 }
           }),
           j("span", { style: { color: T.label2 } }, "\u6BCF\u5361\u4E0A\u9650"),
           numInput(cfg.co_locate_max_jobs ?? 3, (v) => upd((n) => {
@@ -7547,9 +7547,9 @@ function apply(cctx, config) {
         advanced && j("textarea", {
           value: cfgText,
           onChange: (e) => setCfgText(e.target.value),
-          style: { width: "100%", minHeight: 200, background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label, borderRadius: 6, fontSize: 11, fontFamily: "monospace", padding: 6 }
+          style: { width: "100%", minHeight: 200, background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label, borderRadius: 6, fontSize: 13, fontFamily: "monospace", padding: 6 }
         }),
-        msg && j("div", { style: { fontSize: 11, marginTop: 6, color: msg.startsWith("\u2705") ? T.ok : T.warn } }, msg)
+        msg && j("div", { style: { fontSize: 13, marginTop: 6, color: msg.startsWith("\u2705") ? T.ok : T.warn } }, msg)
       ]);
     }
     function SubmitTab() {
@@ -7587,12 +7587,12 @@ function apply(cctx, config) {
           value: text,
           onChange: (e) => setText(e.target.value),
           placeholder: '\u7C98\u8D34 batch.json\uFF0C\u4F8B\u5982 {"schema_version":1,"name":"my_batch","tasks":[{"id":"t1","cmd":["{VENV:k}","..."],"duration_min":5}]}\uFF08venv \u522B\u540D\u89C1\u8FDC\u7AEF config.venvs\uFF0C\u5F53\u524D\u4E3A k\uFF09',
-          style: { width: "100%", height: 150, fontFamily: "monospace", fontSize: 12 }
+          style: { width: "100%", height: 150, fontFamily: "monospace", fontSize: 13 }
         }),
         jsxs2("div", { style: { margin: "6px 0" } }, [
           j("button", { onClick: doDryRun, disabled: !text.trim(), style: btn(T.brand, !text.trim()) }, "\u2460 dry-run \u9884\u89C8"),
           j("button", { onClick: doSubmit, disabled: !(preview?.ok && text.trim()), style: btn(T.ok, !(preview?.ok && text.trim())) }, "\u2461 \u786E\u8BA4\u63D0\u4EA4"),
-          j("span", { style: { fontSize: 11, marginLeft: 8 } }, msg)
+          j("span", { style: { fontSize: 13, marginLeft: 8 } }, msg)
         ]),
         preview && j("pre", { style: { ...pre, maxHeight: 240, overflow: "auto" } }, preview.text)
       ]);
@@ -7611,7 +7611,7 @@ function apply(cctx, config) {
             j("span", null, "\u8FD4\u56DE")
           ]),
           j("h2", { style: boardTitleStyle }, "sched \u770B\u677F"),
-          j("span", { style: { color: stream.connected ? T.ok : T.err, fontSize: 12 } }, stream.connected ? "\u25CF live" : "\u25CB offline"),
+          j("span", { style: { color: stream.connected ? T.ok : T.err, fontSize: 13 } }, stream.connected ? "\u25CF live" : "\u25CB offline"),
           j("button", { onClick: refreshSnap, style: ghostBtn }, "refresh"),
           j("select", {
             value: projFilter,
@@ -7631,7 +7631,7 @@ function apply(cctx, config) {
           !summary && j("div", null, "loading\u2026"),
           summary && j("pre", { style: { ...pre, maxHeight: 110, overflow: "auto" } }, summary.split("\njobs:")[0]),
           raw && jsxs2("div", {}, [
-            jsxs2("div", { style: { fontSize: 12, color: T.label2, marginBottom: 6 } }, [
+            jsxs2("div", { style: { fontSize: 13, color: T.label2, marginBottom: 6 } }, [
               j("span", { style: { marginRight: 10, color: "#ef4444" } }, "\u25A0 \u7EA2=\u51FA\u9519"),
               j("span", { style: { marginRight: 10, color: "#22c55e" } }, "\u25A0 \u7EFF=\u6210\u529F"),
               j("span", { style: { marginRight: 10, color: "#3b82f6" } }, "\u25A0 \u84DD=\u8FD0\u884C\u4E2D"),
@@ -7757,7 +7757,7 @@ function apply(cctx, config) {
             border: `1px solid ${gpuColor[g.status] || "var(--dsw-alias-border-l2)"}`,
             borderRadius: 4,
             padding: "2px 6px",
-            fontSize: 11,
+            fontSize: 13,
             color: gpuColor[g.status] || T.label2
           } }, [
             j("b", { style: { marginRight: 4 } }, "GPU" + g.idx),

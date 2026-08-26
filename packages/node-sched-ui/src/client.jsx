@@ -118,7 +118,7 @@ function apply(cctx, config) {
 	const jsxs2 = j; // children-array variant shares the corrected semantics
 
 	// ── styles ──────────────────────────────────────────────────────────────
-	const pre = { margin: "4px 0", whiteSpace: "pre-wrap", background: T.bgLayer, border: `1px solid ${T.border}`, borderRadius: 8, padding: 10, fontSize: 11.5, color: T.label };
+	const pre = { margin: "4px 0", whiteSpace: "pre-wrap", background: T.bgLayer, border: `1px solid ${T.border}`, borderRadius: 8, padding: 10, fontSize: 13, color: T.label };
 	// 柔和按钮：状态色 12% 底纹 + 同色文字，双主题自动柔和（不再用高饱和实底）
 	const btn = (color = T.brand, disabled) => {
 		if (disabled) {
@@ -145,7 +145,7 @@ function apply(cctx, config) {
 		return {
 			background: `color-mix(in srgb, ${c} 13%, transparent)`,
 			border: `1px solid color-mix(in srgb, ${c} 30%, transparent)`,
-			color: c, borderRadius: 999, padding: "2px 9px", fontSize: 12, marginRight: 6,
+			color: c, borderRadius: 999, padding: "2px 9px", fontSize: 13, marginRight: 6,
 		};
 	};
 	// 页面视图：填满接管容器（不再是 fixed 弹窗；显隐由 html data 属性驱动）
@@ -185,7 +185,7 @@ function apply(cctx, config) {
 	function TypedConfirm({ placeholder, color, onConfirm, children }) {
 		const [typed, setTyped] = useState("");
 		return j("span", {}, [
-			j("input", { placeholder, value: typed, onChange: (e) => setTyped(e.target.value), style: { fontSize: 11, width: 150, marginRight: 4 } }),
+			j("input", { placeholder, value: typed, onChange: (e) => setTyped(e.target.value), style: { fontSize: 13, width: 150, marginRight: 4 } }),
 			j("button", { disabled: typed !== placeholder, onClick: async () => { await onConfirm(); setTyped(""); }, style: btn(color, typed !== placeholder) }, children),
 			j("button", { onClick: () => setTyped(""), style: ghostBtn }, "×"),
 		]);
@@ -230,7 +230,7 @@ function apply(cctx, config) {
 		if (!pp || pp.total === 0) return null;
 		return jsxs2("span", { style: { display: "inline-flex", alignItems: "center", flex: 1 } }, [
 			j("span", { style: bar() }, j("span", { style: barFill((pp.done / pp.total) * 100) })),
-			j("span", { style: { fontSize: 10, color: T.label2 } }, p),
+			j("span", { style: { fontSize: 12, color: T.label2 } }, p),
 		]);
 	}
 
@@ -314,7 +314,7 @@ function apply(cctx, config) {
 						busy ? "\u63d0\u4ea4\u4e2d\u2026" : "\u786e\u8ba4"),
 					j("button", { onClick: cancel, disabled: busy, title: "放弃本次连接", style: { ...ghostBtn, flexShrink: 0 } }, "\u53d6\u6d88"),
 				]),
-				j("div", { style: { fontSize: 11, color: T.label2 } }, "180 秒内未提交将自动放弃本次连接"),
+				j("div", { style: { fontSize: 13, color: T.label2 } }, "180 秒内未提交将自动放弃本次连接"),
 			]),
 		]);
 	}
@@ -405,7 +405,7 @@ function apply(cctx, config) {
 			jsxs2("div", { style: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" } }, [
 				j("button", { onClick: doImport, disabled: !!busy, style: btn(T.brand, !!busy) },
 					busy === "import" ? "导入中…" : "从 ~/.ssh/config 导入"),
-				j("span", { style: { color: T.label2, fontSize: 12 } },
+				j("span", { style: { color: T.label2, fontSize: 13 } },
 					`共 ${hosts ? hosts.length : "…"} 台主机 · 密钥认证走本机 ~/.ssh 文件或 ssh-agent`),
 				msg && j("span", { style: { color: msg.includes("失败") ? T.err : T.ok, fontSize: 13 } }, msg),
 			]),
@@ -426,7 +426,7 @@ function apply(cctx, config) {
 					}, [
 						// 左：身份区（一行一条 ssh 配置）
 						j("span", { style: { fontWeight: 700, fontSize: 13, flexShrink: 0 } }, h.alias),
-						boundHere && j("span", { style: { color: T.ok, fontWeight: 700, fontSize: 11, border: `1px solid ${T.ok}`, borderRadius: 999, padding: "1px 8px", flexShrink: 0 } }, "SCHED"),
+						boundHere && j("span", { style: { color: T.ok, fontWeight: 700, fontSize: 13, border: `1px solid ${T.ok}`, borderRadius: 999, padding: "1px 8px", flexShrink: 0 } }, "SCHED"),
 						j("span", { style: { color: T.label2, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 } }, [
 							h.user !== "root" ? `${h.user}@${h.host}` : h.host,
 							`:${h.port}`,
@@ -436,7 +436,7 @@ function apply(cctx, config) {
 						].join("")),
 						// 右：操作区
 						boundHere
-							? j("span", { key: "sb", style: { color: T.ok, fontWeight: 700, fontSize: 12, flexShrink: 0 } }, "✔ 数据源")
+							? j("span", { key: "sb", style: { color: T.ok, fontWeight: 700, fontSize: 13, flexShrink: 0 } }, "✔ 数据源")
 							: j("button", { key: "bnd", onClick: () => doBind(h.alias), disabled: !!busy, title: "设为 sched 数据源主机（引擎模式，看板数据直连该机）", style: { ...ghostBtn, color: T.brand, borderColor: `color-mix(in srgb, ${T.brand} 45%, transparent)`, flexShrink: 0 } },
 								busy === "bind:" + h.alias ? "绑定中…" : "设为SCHED"),
 						j("button", { key: "o", onClick: () => setTermAlias(h.alias), title: "打开网页终端", style: { ...ghostBtn, flexShrink: 0 } }, "终端"),
@@ -450,7 +450,7 @@ function apply(cctx, config) {
 					]);
 				}),
 			]),
-			confirmAlias && j("div", { style: { fontSize: 12, color: T.warn } }, `再次点「确认删除」以移除 ${confirmAlias}（连接立即断开）`),
+			confirmAlias && j("div", { style: { fontSize: 13, color: T.warn } }, `再次点「确认删除」以移除 ${confirmAlias}（连接立即断开）`),
 		]);
 	}
 
@@ -510,7 +510,7 @@ function apply(cctx, config) {
 					j("span", null, "返回"),
 				]),
 				j("h3", { style: { ...boardTitleStyle, fontSize: 14 } }, `终端 · ${alias}`),
-				j("span", { style: { color: T.label2, fontSize: 12 } }, "关闭页签即断开远端 shell"),
+				j("span", { style: { color: T.label2, fontSize: 13 } }, "关闭页签即断开远端 shell"),
 			]),
 			j("div", { ref: boxRef, style: { flex: 1, minHeight: 320, borderRadius: 10, border: `1px solid ${T.border2}`, overflow: "hidden", padding: 6, background: "#111318" } }),
 		]);
@@ -578,7 +578,7 @@ function apply(cctx, config) {
 							cursor: "default" },
 					})),
 				tasks.length > SEG_MAX_VISIBLE && j("span", {
-					style: { fontSize: 10, color: T.label2, alignSelf: "center" },
+					style: { fontSize: 12, color: T.label2, alignSelf: "center" },
 				}, `+${tasks.length - SEG_MAX_VISIBLE}`),
 			]);
 		}
@@ -595,18 +595,18 @@ function apply(cctx, config) {
 				jsxs2("div", { style: { ...GRID, alignItems: "start" }, onClick: () => setOpen(!open) }, [
 					j("span", { style: { textAlign: "center", cursor: "pointer", lineHeight: "15px" } }, Badge({ s: b.status })),
 					jsxs2("span", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "pointer", lineHeight: "15px" }, onClick: (e) => { e.stopPropagation(); setOpen(!open); } }, [
-					j("b", { style: { fontSize: 11.5 }, title: b.name }, b.name),
-					b.project && j("span", { style: { fontSize: 9, color: T.label2, marginLeft: 6 } }, b.project),
+					j("b", { style: { fontSize: 13 }, title: b.name }, b.name),
+					b.project && j("span", { style: { fontSize: 11, color: T.label2, marginLeft: 6 } }, b.project),
 				]),
 					j(TaskSegments, { tasks }),
-					j("span", { style: { fontSize: 10.5, color: T.label2, textAlign: "right", lineHeight: "15px" } }, b.progress ?? ""),
+					j("span", { style: { fontSize: 12.5, color: T.label2, textAlign: "right", lineHeight: "15px" } }, b.progress ?? ""),
 					j(ArmButton, { label: "cancel", confirmLabel: "cancel(取消任务!)", color: T.err, stopProp: true,
 					onConfirm: () => runOp("cancel", b.name) }),
 				]),
 				open && jsxs2("div", { style: { marginTop: 6, marginLeft: 76, paddingLeft: 10, borderLeft: `2px solid ${T.border}` } }, [
-					b.depends_on?.length > 0 && j("div", { style: { fontSize: 10, color: T.label2 } }, `依赖: ${b.depends_on.join(", ")}`),
+					b.depends_on?.length > 0 && j("div", { style: { fontSize: 12, color: T.label2 } }, `依赖: ${b.depends_on.join(", ")}`),
 					...tasks.filter((t) => ["failed", "timed_out", "cancelled"].includes(t.status)).map((t) =>
-						jsxs2("div", { style: { fontSize: 11, marginLeft: 14, marginTop: 2, display: "flex", alignItems: "center" } }, [
+						jsxs2("div", { style: { fontSize: 13, marginLeft: 14, marginTop: 2, display: "flex", alignItems: "center" } }, [
 							j("span", { style: { fontFamily: "monospace", cursor: "pointer", textDecoration: "underline", marginRight: 6 }, onClick: () => setLogTask(`${t.batch}:${t.task}`), title: "查看日志" }, t.task),
 							Badge({ s: t.status }),
 							t.retries != null && j("span", { style: { color: T.label2, marginRight: 4 } }, `retries=${t.retries}`),
@@ -622,8 +622,8 @@ function apply(cctx, config) {
 			return jsxs2("div", { style: { marginBottom: 6, display: "flex", alignItems: "center" } }, [
 				Badge({ s: g.status }),
 				j("span", { style: { fontFamily: "monospace", marginRight: 8 } }, `GPU${g.idx}`),
-				g.job && j("span", { style: { fontSize: 10, marginRight: 8, color: T.label2, flex: 1 } }, g.job),
-				g.quarantined && j("span", { style: { color: T.err, marginRight: 8, fontSize: 10 } }, "[quarantined]"),
+				g.job && j("span", { style: { fontSize: 12, marginRight: 8, color: T.label2, flex: 1 } }, g.job),
+				g.quarantined && j("span", { style: { color: T.err, marginRight: 8, fontSize: 12 } }, "[quarantined]"),
 				!g.job && g.status === "free" && j("span", { style: { flex: 1 } }),
 				g.status === "unmanaged" && j(ArmButton, { label: "gpu-free 强制回收", confirmLabel: "确认回收?", color: T.warn,
 					onConfirm: () => runOp("gpu-free", String(g.idx)) }),
@@ -652,7 +652,7 @@ function apply(cctx, config) {
 				// B24f: 只读通道徽章 —— 连接控制唯一入口在 ssh tab
 				j("span", {
 					title: "\u8fde\u63a5\u901a\u9053\u5728 ssh \u9875\u7ba1\u7406",
-					style: { fontSize: 11, padding: "2px 8px", borderRadius: 999, flexShrink: 0,
+					style: { fontSize: 13, padding: "2px 8px", borderRadius: 999, flexShrink: 0,
 						color: channel?.mode === "engine" ? T.ok : T.label2,
 						border: `1px solid ${channel?.mode === "engine" ? `color-mix(in srgb, ${T.ok} 35%, transparent)` : T.border}`,
 						background: channel?.mode === "engine" ? `color-mix(in srgb, ${T.ok} 8%, transparent)` : "transparent",
@@ -740,7 +740,7 @@ function apply(cctx, config) {
 			// 详情反复"复活"(用户实测自动展开)。重进本页只看最新列表冻结态,
 			// 详情需要时点行展开。
 
-			if (!list) return j("div", { style: { color: T.label2, fontSize: 11 } },
+			if (!list) return j("div", { style: { color: T.label2, fontSize: 13 } },
 				msg || (INC_CACHE ? "" : "loading…"));
 
 			const p = detail && !detail.loading && !detail.error ? detail.payload || {} : null;
@@ -752,7 +752,7 @@ function apply(cctx, config) {
 			const failed = p ? p.failed || {} : {};
 			const mem = p ? p.memory || {} : {};
 
-			return jsxs2("div", { style: { fontSize: 11 } }, [
+			return jsxs2("div", { style: { fontSize: 13 } }, [
 				jsxs2("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 6,
 					padding: "5px 8px", borderRadius: 6, background: T.bgLayer,
 					border: `1px solid ${T.border}` } }, [
@@ -785,7 +785,7 @@ function apply(cctx, config) {
 						j("button", { onClick: () => { INC_VIEW_GEN++; setDetailT(null, "collapse"); INC_OPEN_ID = null; },
 							style: { ...ghostBtn, marginLeft: 8 } }, "收起"),
 					]),
-					j("div", { style: { color: T.label2, fontSize: 10, marginBottom: 4 } },
+					j("div", { style: { color: T.label2, fontSize: 12, marginBottom: 4 } },
 						`${detail.ts} · job ${detail.job_id} · batch ${detail.batch_id}`),
 					failed.dispatch_mode && j("div", {},
 						`派发方式: ${failed.dispatch_mode} · 声明 ${failed.declared_vram_gib ?? "-"} GiB · 历史峰值 ${failed.profile_peak_gib ?? "-"}`),
@@ -808,7 +808,7 @@ function apply(cctx, config) {
 						j("pre", { style: { ...pre, maxHeight: 120, margin: "2px 0" } }, p.log_excerpt),
 					]),
 				]),
-				msg && j("div", { style: { color: T.err, fontSize: 11 } }, msg),
+				msg && j("div", { style: { color: T.err, fontSize: 13 } }, msg),
 			]);
 		});
 
@@ -829,7 +829,7 @@ function apply(cctx, config) {
 			}, []);
 			useEffect(() => { load(); }, []);
 
-			if (!cfg) return j("div", { style: { color: T.label2, fontSize: 11 } }, msg || "loading config…");
+			if (!cfg) return j("div", { style: { color: T.label2, fontSize: 13 } }, msg || "loading config…");
 
 			const upd = (fn) => setCfg((c) => { const n = JSON.parse(JSON.stringify(c)); fn(n); return n; });
 
@@ -848,10 +848,10 @@ function apply(cctx, config) {
 
 			const numInput = (value, onChange, style) => j("input", {
 				value: value ?? "", onChange: (e) => onChange(e.target.value === "" ? null : Number(e.target.value)),
-				style: { ...style, width: 52, background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label, borderRadius: 4, padding: "2px 4px", fontSize: 11 },
+				style: { ...style, width: 52, background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label, borderRadius: 4, padding: "2px 4px", fontSize: 13 },
 			});
-			const secTitle = (t) => j("div", { style: { fontSize: 11, color: T.brand, margin: "8px 0 4px", fontWeight: 600 } }, t);
-			const rowStyle = { display: "flex", alignItems: "center", gap: 6, marginBottom: 4, fontSize: 11, flexWrap: "wrap" };
+			const secTitle = (t) => j("div", { style: { fontSize: 13, color: T.brand, margin: "8px 0 4px", fontWeight: 600 } }, t);
+			const rowStyle = { display: "flex", alignItems: "center", gap: 6, marginBottom: 4, fontSize: 13, flexWrap: "wrap" };
 
 			// ---- 项目区 ----
 			const projects = cfg.projects || {};
@@ -869,7 +869,7 @@ function apply(cctx, config) {
 						const v = e.target.value;
 						if (v === "") delete n.projects[name].colocate; else n.projects[name].colocate = v === "true";
 					}),
-					style: { background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label, borderRadius: 4, fontSize: 11 },
+					style: { background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label, borderRadius: 4, fontSize: 13 },
 				}, [
 					j("option", { value: "" }, "colocate跟随全局"),
 					j("option", { value: "true" }, "允许共享"),
@@ -907,7 +907,7 @@ function apply(cctx, config) {
 				},
 			});
 
-			return jsxs2("div", { style: { fontSize: 11 } }, [
+			return jsxs2("div", { style: { fontSize: 13 } }, [
 				secTitle("项目参数（双项目共享配置 — 保存影响两个代理）"),
 				jsxs2("div", { style: rowStyle }, [
 					j("span", { style: { color: T.err } }, "⚠️ 保存需二次确认；冷键(node/state_dir/gpus 卡集)仅可读，变更须 ssh 重启 daemon"),
@@ -925,7 +925,7 @@ function apply(cctx, config) {
 					j("span", { style: { color: T.label2 } }, "safety"),
 					j("input", { value: cfg.co_locate_safety ?? 0.7,
 						onChange: (e) => upd((n) => { n.co_locate_safety = Number(e.target.value); }),
-						style: { width: 50, background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label, borderRadius: 4, fontSize: 11 } }),
+						style: { width: 50, background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label, borderRadius: 4, fontSize: 13 } }),
 					j("span", { style: { color: T.label2 } }, "每卡上限"),
 					numInput(cfg.co_locate_max_jobs ?? 3, (v) => upd((n) => { if (v !== null) n.co_locate_max_jobs = v; })),
 					j(ArmButton, { label: "保存", confirmLabel: "确认保存?", color: T.brand, onConfirm: () => save(clPatch()) }),
@@ -977,9 +977,9 @@ function apply(cctx, config) {
 				]),
 				advanced && j("textarea", {
 					value: cfgText, onChange: (e) => setCfgText(e.target.value),
-					style: { width: "100%", minHeight: 200, background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label, borderRadius: 6, fontSize: 11, fontFamily: "monospace", padding: 6 },
+					style: { width: "100%", minHeight: 200, background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label, borderRadius: 6, fontSize: 13, fontFamily: "monospace", padding: 6 },
 				}),
-				msg && j("div", { style: { fontSize: 11, marginTop: 6, color: msg.startsWith("✅") ? T.ok : T.warn } }, msg),
+				msg && j("div", { style: { fontSize: 13, marginTop: 6, color: msg.startsWith("✅") ? T.ok : T.warn } }, msg),
 			]);
 		}
 
@@ -1006,12 +1006,12 @@ function apply(cctx, config) {
 				j("textarea", {
 					value: text, onChange: (e) => setText(e.target.value),
 					placeholder: '粘贴 batch.json，例如 {"schema_version":1,"name":"my_batch","tasks":[{"id":"t1","cmd":["{VENV:k}","..."],"duration_min":5}]}（venv 别名见远端 config.venvs，当前为 k）',
-					style: { width: "100%", height: 150, fontFamily: "monospace", fontSize: 12 },
+					style: { width: "100%", height: 150, fontFamily: "monospace", fontSize: 13 },
 				}),
 				jsxs2("div", { style: { margin: "6px 0" } }, [
 					j("button", { onClick: doDryRun, disabled: !text.trim(), style: btn(T.brand, !text.trim()) }, "① dry-run 预览"),
 					j("button", { onClick: doSubmit, disabled: !(preview?.ok && text.trim()), style: btn(T.ok, !(preview?.ok && text.trim())) }, "② 确认提交"),
-					j("span", { style: { fontSize: 11, marginLeft: 8 } }, msg),
+					j("span", { style: { fontSize: 13, marginLeft: 8 } }, msg),
 				]),
 				preview && j("pre", { style: { ...pre, maxHeight: 240, overflow: "auto" } }, preview.text),
 			]);
@@ -1028,7 +1028,7 @@ function apply(cctx, config) {
 						j("span", null, "返回"),
 					]),
 					j("h2", { style: boardTitleStyle }, "sched 看板"),
-					j("span", { style: { color: stream.connected ? T.ok : T.err, fontSize: 12 } }, stream.connected ? "\u25cf live" : "\u25cb offline"),
+					j("span", { style: { color: stream.connected ? T.ok : T.err, fontSize: 13 } }, stream.connected ? "\u25cf live" : "\u25cb offline"),
 					j("button", { onClick: refreshSnap, style: ghostBtn }, "refresh"),
 					j("select", {
 						value: projFilter,
@@ -1049,7 +1049,7 @@ function apply(cctx, config) {
 					!summary && j("div", null, "loading…"),
 					summary && j("pre", { style: { ...pre, maxHeight: 110, overflow: "auto" } }, summary.split("\njobs:")[0]),
 					raw && jsxs2("div", {}, [
-					jsxs2("div", { style: { fontSize: 12, color: T.label2, marginBottom: 6 } }, [
+					jsxs2("div", { style: { fontSize: 13, color: T.label2, marginBottom: 6 } }, [
 						j("span", { style: { marginRight: 10, color: "#ef4444" } }, "■ 红=出错"),
 						j("span", { style: { marginRight: 10, color: "#22c55e" } }, "■ 绿=成功"),
 						j("span", { style: { marginRight: 10, color: "#3b82f6" } }, "■ 蓝=运行中"),
@@ -1153,7 +1153,7 @@ function apply(cctx, config) {
 				jsxs2("div", { style: { display: "flex", gap: 6, flexWrap: "wrap" } },
 					gpus.map((g) => jsxs2("span", { key: g.idx, style: {
 						border: `1px solid ${gpuColor[g.status] || "var(--dsw-alias-border-l2)"}`, borderRadius: 4,
-						padding: "2px 6px", fontSize: 11,
+						padding: "2px 6px", fontSize: 13,
 						color: gpuColor[g.status] || T.label2,
 					} }, [
 						j("b", { style: { marginRight: 4 } }, "GPU" + g.idx),
