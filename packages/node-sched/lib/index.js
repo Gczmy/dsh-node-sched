@@ -922,7 +922,17 @@ function apply(ctx, config) {
 						const command = String(body.command ?? "").trim();
 						if (!command) return void json(res, { error: "command required" }, 400);
 						ctx.logger.warn("[node-sched] audit ssh-exec %s: %s", body.alias, command.slice(0, 120));
-						json(res, await sshEngine.exec(String(body.alias ?? ""), command, body.timeoutMs));
+						// B24g: 引擎连接失败时回退 CLI 通道 (ControlMaster mux 可用时最可靠)
+						let result;
+						try {
+							result = await sshEngine.exec(String(body.alias ?? ""), command, body.timeoutMs);
+						} catch (engineErr) {
+							if (String(body.alias ?? "") !== config.sshEntry) throw engineErr;
+							const cli = await runRemoteCli(command, { timeoutMs: body.timeoutMs ?? 60_000 });
+							result = { success: cli.ok, exitCode: cli.code, timedOut: false,
+								stdout: cli.stdout, stderr: cli.stderr, durationMs: -1 };
+						}
+						json(res, result);
 					} catch (e) {
 						json(res, { success: false, exitCode: null, timedOut: false, stdout: "", stderr: "", durationMs: 0, error: String(e.message ?? e) });
 					}
