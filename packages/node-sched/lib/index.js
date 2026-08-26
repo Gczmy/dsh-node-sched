@@ -998,6 +998,22 @@ function apply(ctx, config) {
 
 			ctx.webServer.register({
 				kind: "prefix",
+				path: "/sched/api/client-log",
+				handler: async (req, res) => {
+					if (!loopbackOnly(req, res)) return;
+					try {
+						const body = await readBodyJson(req);
+						ctx.logger.error("[client-exception] %s %s %s",
+							body.kind, body.ts, String(body.detail ?? "").slice(0, 500));
+						json(res, { ok: true });
+					} catch (e) {
+						json(res, { ok: false }, 400);
+					}
+				},
+			}),
+
+			ctx.webServer.register({
+				kind: "prefix",
 				path: "/sched/ssh/2fa-pending",
 				handler: async (req, res) => {
 					if (!loopbackOnly(req, res)) return;

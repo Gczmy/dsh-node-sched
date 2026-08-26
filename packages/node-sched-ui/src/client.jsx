@@ -813,16 +813,20 @@ function apply(cctx, config) {
 		});
 
 
+		// B25c: 模块级水合缓存 —— 重挂载时立即恢复内容, 杜绝 "loading config…" 闪屏
+		let CFG_CACHE = null;
 		function ConfigTab() {
-			const [cfgText, setCfgText] = useState("");   // 原始 JSON 文本 (可编辑, 高级模式)
-			const [cfg, setCfg] = useState(null);          // 解析后的工作副本
+			const [cfgText, setCfgText] = useState(CFG_CACHE ? CFG_CACHE.text : "");
+			const [cfg, setCfg] = useState(CFG_CACHE ? JSON.parse(JSON.stringify(CFG_CACHE.cfg)) : null);
 			const [msg, setMsg] = useState("");
 			const [advanced, setAdvanced] = useState(false);
 
 			const load = useCallback(() => {
 				fetch("/sched/api/config").then((r) => r.json()).then((d) => {
 					if (!d.ok) { setMsg("❌ 加载失败: " + (d.text || "").slice(0, 120)); return; }
-					setCfg(JSON.parse(d.text));
+					const parsed = JSON.parse(d.text);
+					CFG_CACHE = { cfg: parsed, text: d.text };
+					setCfg(parsed);
 					setCfgText(d.text);
 					setMsg("");
 				}).catch(() => setMsg("❌ 加载异常"));
@@ -1322,6 +1326,20 @@ function apply(cctx, config) {
 
 			disposersUI.push(() => { waitObs.disconnect(); rootObs.disconnect(); unsubActive(); entry.remove(); });
 		}
+	}
+
+	// B25c: 渲染树异常遥测 —— 掀树根因捕获 (错误对象回传 host 落盘)
+	{
+		const report = (kind, detail) => {
+			try {
+				fetch("/sched/api/client-log", {
+					method: "POST", headers: { "content-type": "application/json" },
+					body: JSON.stringify({ kind, detail: String(detail).slice(0, 2000), ts: new Date().toISOString() }),
+				}).catch(() => {});
+			} catch (_) {}
+		};
+		window.addEventListener("error", (e) => report("js-error", e.message + " @ " + (e.filename || "") + ":" + e.lineno));
+		window.addEventListener("unhandledrejection", (e) => report("unhandled-rejection", e.reason && (e.reason.stack || e.reason.message) || String(e.reason)));
 	}
 
 	const disposeSettings = cctx.slots.inject(SLOT_SETTINGS, () =>

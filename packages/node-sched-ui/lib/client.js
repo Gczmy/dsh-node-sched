@@ -7346,9 +7346,10 @@ function apply(cctx, config) {
         msg && j("div", { style: { color: T.err, fontSize: 13 } }, msg)
       ]);
     });
+    let CFG_CACHE = null;
     function ConfigTab() {
-      const [cfgText, setCfgText] = useState("");
-      const [cfg, setCfg] = useState(null);
+      const [cfgText, setCfgText] = useState(CFG_CACHE ? CFG_CACHE.text : "");
+      const [cfg, setCfg] = useState(CFG_CACHE ? JSON.parse(JSON.stringify(CFG_CACHE.cfg)) : null);
       const [msg, setMsg] = useState("");
       const [advanced, setAdvanced] = useState(false);
       const load = useCallback(() => {
@@ -7357,7 +7358,9 @@ function apply(cctx, config) {
             setMsg("\u274C \u52A0\u8F7D\u5931\u8D25: " + (d.text || "").slice(0, 120));
             return;
           }
-          setCfg(JSON.parse(d.text));
+          const parsed = JSON.parse(d.text);
+          CFG_CACHE = { cfg: parsed, text: d.text };
+          setCfg(parsed);
           setCfgText(d.text);
           setMsg("");
         }).catch(() => setMsg("\u274C \u52A0\u8F7D\u5F02\u5E38"));
@@ -7946,6 +7949,21 @@ function apply(cctx, config) {
         entry.remove();
       });
     }
+  }
+  {
+    const report = (kind, detail) => {
+      try {
+        fetch("/sched/api/client-log", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ kind, detail: String(detail).slice(0, 2e3), ts: (/* @__PURE__ */ new Date()).toISOString() })
+        }).catch(() => {
+        });
+      } catch (_) {
+      }
+    };
+    window.addEventListener("error", (e) => report("js-error", e.message + " @ " + (e.filename || "") + ":" + e.lineno));
+    window.addEventListener("unhandledrejection", (e) => report("unhandled-rejection", e.reason && (e.reason.stack || e.reason.message) || String(e.reason)));
   }
   const disposeSettings = cctx.slots.inject(SLOT_SETTINGS, () => cctx.slots.register({ name: SLOT_SETTINGS, id: NS, order: 90 }, StatusCard));
   disposersUI.push(disposeSettings);
