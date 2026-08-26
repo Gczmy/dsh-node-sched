@@ -547,7 +547,13 @@ function apply(ctx, config) {
 				handler: async (req, res) => {
 					try {
 						if (req.method === "GET") {
-							return void json(res, { ok: true, entry: config.sshEntry });
+							// B24f: 统一通道描述结构 {alias, mode, sshEntry}（与 /sched/ssh/binding 一致）
+						return void json(res, {
+							ok: true,
+							alias: boundAlias ?? null,
+							mode: boundAlias ? "engine" : "cli",
+							sshEntry: config.sshEntry,
+						});
 						}
 						const body = await readBodyJson(req);
 						const entry = String(body.entry || "").trim();
