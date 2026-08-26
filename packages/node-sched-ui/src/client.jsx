@@ -536,7 +536,7 @@ function apply(cctx, config) {
 		// 批次行网格：徽章 | 名称 | 分段进度条 | 计数 | cancel —— 固定列宽对齐
 		const GRID = {
 			display: "grid",
-			gridTemplateColumns: "76px minmax(120px, 1.1fr) minmax(160px, 1.6fr) 56px 84px",
+			gridTemplateColumns: "76px minmax(120px, 1.1fr) 190px 56px 84px",
 			gap: "0 12px", alignItems: "center",
 		};
 
@@ -553,12 +553,34 @@ function apply(cctx, config) {
 		}
 		const SEG_COLOR = { bad: "#ef4444", ok: "#22c55e", run: "#3b82f6", off: "#9ca3af" };
 
-		function SegmentedBar({ seg }) {
-			const total = seg.bad + seg.ok + seg.run + seg.off;
-			if (!total) return null;
-			return j("span", { style: bar() }, ["bad", "ok", "run", "off"].map((k) =>
-				j("span", { key: k, style: { height: "100%", width: `${(seg[k] / total) * 100}%`, background: SEG_COLOR[k], display: "inline-block" } }),
-			));
+		// B25: 离散任务段 —— 一段一任务, 颜色即状态; 每行最多 10 段自动换行。
+		// 超过 MAX_VISIBLE 段截断并显示 "+N"（如 crypto_pool 168 任务全画会淹没列表）。
+		const SEG_PER_ROW = 10;
+		const SEG_MAX_VISIBLE = 30;
+		function TaskSegments({ tasks }) {
+			if (!tasks || !tasks.length) return null;
+			const colorOf = (st) =>
+				["failed", "timed_out"].includes(st) ? SEG_COLOR.bad :
+				["done", "skip"].includes(st) ? SEG_COLOR.ok :
+				st === "running" ? SEG_COLOR.run : SEG_COLOR.off;
+			const shown = Math.min(tasks.length, SEG_MAX_VISIBLE);
+			return jsxs2("span", { style: {
+				display: "flex", flexWrap: "wrap", gap: 3,
+				width: SEG_PER_ROW * 18 + (SEG_PER_ROW - 1) * 3,
+				alignContent: "start",
+			} }, [
+				...tasks.slice(0, shown).map((t, i) =>
+					j("span", {
+						key: (t.id ?? t.task ?? i) + "",
+						title: `${t.task}: ${t.status}`,
+						style: { width: 18, height: 15, borderRadius: 3,
+							background: colorOf(t.status), display: "inline-block",
+							cursor: "default" },
+					})),
+				tasks.length > SEG_MAX_VISIBLE && j("span", {
+					style: { fontSize: 10, color: T.label2, alignSelf: "center" },
+				}, `+${tasks.length - SEG_MAX_VISIBLE}`),
+			]);
 		}
 
 		function BatchRow({ b }) {
@@ -570,14 +592,14 @@ function apply(cctx, config) {
 			const seg = taskSegments(tasks);
 
 			return jsxs2("div", { style: { marginBottom: 10 } }, [
-				jsxs2("div", { style: GRID, onClick: () => setOpen(!open) }, [
-					j("span", { style: { textAlign: "center", cursor: "pointer" } }, Badge({ s: b.status })),
-					jsxs2("span", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "pointer" }, onClick: (e) => { e.stopPropagation(); setOpen(!open); } }, [
+				jsxs2("div", { style: { ...GRID, alignItems: "start" }, onClick: () => setOpen(!open) }, [
+					j("span", { style: { textAlign: "center", cursor: "pointer", lineHeight: "15px" } }, Badge({ s: b.status })),
+					jsxs2("span", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "pointer", lineHeight: "15px" }, onClick: (e) => { e.stopPropagation(); setOpen(!open); } }, [
 					j("b", { style: { fontSize: 11.5 }, title: b.name }, b.name),
 					b.project && j("span", { style: { fontSize: 9, color: T.label2, marginLeft: 6 } }, b.project),
 				]),
-					j(SegmentedBar, { seg: taskSegments(tasks) }),
-					j("span", { style: { fontSize: 10.5, color: T.label2, textAlign: "right" } }, b.progress ?? ""),
+					j(TaskSegments, { tasks }),
+					j("span", { style: { fontSize: 10.5, color: T.label2, textAlign: "right", lineHeight: "15px" } }, b.progress ?? ""),
 					j(ArmButton, { label: "cancel", confirmLabel: "cancel(取消任务!)", color: T.err, stopProp: true,
 					onConfirm: () => runOp("cancel", b.name) }),
 				]),
