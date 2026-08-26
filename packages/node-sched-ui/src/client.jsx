@@ -609,43 +609,11 @@ function apply(cctx, config) {
 			]);
 		}
 
-		function EntrySwitch() {
-			const [entry, setEntry] = useState(null);
-			const [note, setNote] = useState("");
-			useEffect(() => {
-				fetch("/sched/api/entry").then((r) => r.json())
-					.then((d) => setEntry(d.entry || "?")).catch(() => setEntry("?"));
-			}, []);
-			const pick = async (target) => {
-				if (target === entry) return;
-				setNote("切换中…");
-				try {
-					const r = await fetch("/sched/api/entry", {
-						method: "POST", headers: { "Content-Type": "application/json" },
-						body: JSON.stringify({ entry: target }),
-					});
-					const d = await r.json();
-					setEntry(d.entry || target);
-					setNote(d.probeText ? `探测: ${d.probeText}` : "已切换");
-				} catch (e) { setNote("❌ " + String(e)); }
-			};
-			const seg = (label) => j("button", {
-				onClick: () => pick(label),
-				style: entry === label ? btn(T.brand) : ghostBtn,
-			}, label);
-			return jsxs2("span", { style: { display: "inline-flex", alignItems: "center", gap: 4,
-				marginRight: 10, fontSize: 11 } }, [
-				j("span", { style: { color: T.label2 } }, "入口"),
-				seg("HPDC"),
-				seg("HPDC_outside"),
-				note && j("span", { style: { color: T.label2, marginLeft: 4 } }, note),
-			]);
-		}
-
 		function DaemonBar() {
 			const [status, setStatus] = useState(null);      // 上次成功查询的状态文本（保留不清空）
 			const [querying, setQuerying] = useState(true);  // 是否正在查询
 			const [confirmStop, setConfirmStop] = useState(false);
+			const [channel, setChannel] = useState(null);    // B24f: 生效通道 {alias, mode, sshEntry}
 			const load = useCallback(() => {
 				setQuerying(true);
 				fetch("/sched/api/daemon").then((r) => r.json()).then((d) => {
@@ -653,11 +621,23 @@ function apply(cctx, config) {
 					else setStatus((prev) => prev ?? ("查询失败: " + String(d.text ?? "").slice(0, 80)));
 					setQuerying(false);
 				}).catch(() => { setQuerying(false); }); // 失败保留上次值
+				// 只读通道徽章：单一事实来源在 ssh tab 的绑定状态条，这里仅展示
+				fetch("/sched/api/entry").then((r) => r.json()).then(setChannel).catch(() => {});
 			}, []);
 			useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, [load]);
 			const running = status != null && status.includes("运行中");
 			return jsxs2("div", { style: { marginBottom: 8, paddingBottom: 6, borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center" } }, [
-				jsxs2("span", { style: { fontSize: 11, marginRight: 8, flex: 1 } }, [
+				// B24f: 只读通道徽章 —— 连接控制唯一入口在 ssh tab
+				j("span", {
+					title: "\u8fde\u63a5\u901a\u9053\u5728 ssh \u9875\u7ba1\u7406",
+					style: { fontSize: 11, padding: "2px 8px", borderRadius: 999, flexShrink: 0,
+						color: channel?.mode === "engine" ? T.ok : T.label2,
+						border: `1px solid ${channel?.mode === "engine" ? `color-mix(in srgb, ${T.ok} 35%, transparent)` : T.border}`,
+						background: channel?.mode === "engine" ? `color-mix(in srgb, ${T.ok} 8%, transparent)` : "transparent",
+						marginRight: 8, whiteSpace: "nowrap" },
+				}, channel?.mode === "engine" ? `\u26a1 ${channel.alias}` :
+					channel ? `cli:${channel.sshEntry}` : "\u2026"),
+				jsxs2("span", { style: { fontSize: 13, marginRight: 8, flex: 1 } }, [
 					j("span", { style: { color: running ? T.ok : (status ? T.err : T.label2) } },
 						`daemon: ${status ?? ""}`),
 					querying && j("span", { style: { color: T.label2 } }, " …等待查询"),
@@ -754,7 +734,6 @@ function apply(cctx, config) {
 				jsxs2("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 6,
 					padding: "5px 8px", borderRadius: 6, background: T.bgLayer,
 					border: `1px solid ${T.border}` } }, [
-					j(EntrySwitch, null),
 					j("span", { style: { color: T.warn } }, "⏸ 冻结"),
 					j("span", { style: { color: T.label2 } },
 						`快照时间 ${frozenAt || "…"} —— 阅读期间内容不变。点「刷新」或切走再回来获取最新。`),

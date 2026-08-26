@@ -7079,49 +7079,11 @@ function apply(cctx, config) {
         g.quarantined && j("button", { onClick: () => runOp("gpu-ok", String(g.idx)), style: btn(T.ok) }, "gpu-ok \u89E3\u9664\u9694\u79BB")
       ]);
     }
-    function EntrySwitch() {
-      const [entry, setEntry] = useState(null);
-      const [note, setNote] = useState("");
-      useEffect(() => {
-        fetch("/sched/api/entry").then((r) => r.json()).then((d) => setEntry(d.entry || "?")).catch(() => setEntry("?"));
-      }, []);
-      const pick = async (target) => {
-        if (target === entry) return;
-        setNote("\u5207\u6362\u4E2D\u2026");
-        try {
-          const r = await fetch("/sched/api/entry", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ entry: target })
-          });
-          const d = await r.json();
-          setEntry(d.entry || target);
-          setNote(d.probeText ? `\u63A2\u6D4B: ${d.probeText}` : "\u5DF2\u5207\u6362");
-        } catch (e) {
-          setNote("\u274C " + String(e));
-        }
-      };
-      const seg = (label) => j("button", {
-        onClick: () => pick(label),
-        style: entry === label ? btn(T.brand) : ghostBtn
-      }, label);
-      return jsxs2("span", { style: {
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 4,
-        marginRight: 10,
-        fontSize: 11
-      } }, [
-        j("span", { style: { color: T.label2 } }, "\u5165\u53E3"),
-        seg("HPDC"),
-        seg("HPDC_outside"),
-        note && j("span", { style: { color: T.label2, marginLeft: 4 } }, note)
-      ]);
-    }
     function DaemonBar() {
       const [status, setStatus] = useState(null);
       const [querying, setQuerying] = useState(true);
       const [confirmStop, setConfirmStop] = useState(false);
+      const [channel, setChannel] = useState(null);
       const load = useCallback(() => {
         setQuerying(true);
         fetch("/sched/api/daemon").then((r) => r.json()).then((d) => {
@@ -7131,6 +7093,8 @@ function apply(cctx, config) {
         }).catch(() => {
           setQuerying(false);
         });
+        fetch("/sched/api/entry").then((r) => r.json()).then(setChannel).catch(() => {
+        });
       }, []);
       useEffect(() => {
         load();
@@ -7139,7 +7103,22 @@ function apply(cctx, config) {
       }, [load]);
       const running = status != null && status.includes("\u8FD0\u884C\u4E2D");
       return jsxs2("div", { style: { marginBottom: 8, paddingBottom: 6, borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center" } }, [
-        jsxs2("span", { style: { fontSize: 11, marginRight: 8, flex: 1 } }, [
+        // B24f: 只读通道徽章 —— 连接控制唯一入口在 ssh tab
+        j("span", {
+          title: "\u8FDE\u63A5\u901A\u9053\u5728 ssh \u9875\u7BA1\u7406",
+          style: {
+            fontSize: 11,
+            padding: "2px 8px",
+            borderRadius: 999,
+            flexShrink: 0,
+            color: channel?.mode === "engine" ? T.ok : T.label2,
+            border: `1px solid ${channel?.mode === "engine" ? `color-mix(in srgb, ${T.ok} 35%, transparent)` : T.border}`,
+            background: channel?.mode === "engine" ? `color-mix(in srgb, ${T.ok} 8%, transparent)` : "transparent",
+            marginRight: 8,
+            whiteSpace: "nowrap"
+          }
+        }, channel?.mode === "engine" ? `\u26A1 ${channel.alias}` : channel ? `cli:${channel.sshEntry}` : "\u2026"),
+        jsxs2("span", { style: { fontSize: 13, marginRight: 8, flex: 1 } }, [
           j(
             "span",
             { style: { color: running ? T.ok : status ? T.err : T.label2 } },
@@ -7250,7 +7229,6 @@ function apply(cctx, config) {
           background: T.bgLayer,
           border: `1px solid ${T.border}`
         } }, [
-          j(EntrySwitch, null),
           j("span", { style: { color: T.warn } }, "\u23F8 \u51BB\u7ED3"),
           j(
             "span",
