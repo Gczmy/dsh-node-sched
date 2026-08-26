@@ -211,6 +211,53 @@ function apply(ctx, config) {
 		}
 		return runRemoteCli(args, opts);
 	}
+
+		// batch.json 上传：内容经 ssh stdin 写远端临时文件（本地不落盘），
+	// dry-run 纯只读预览；submit 走 operate() 门+审计。两者用后即删临时文件。
+	// ── B24e: 写操作统一走 ambiorix 本机执行 (screen 注入) ──────────────
+	// B24d 守卫 + NFS+WAL 双主机丢数据实测: 网关上的 sched 写操作会被
+	// daemon 检查点静默抹掉 (2026-08-26 sd_repro_v3 事故)。所有产生状态
+	// 变更的命令必须在计算节点上跑。通道: 往 ambior1 screen 注入命令行,
+	// 输出重定向到共享盘结果文件, 轮询该文件取回 stdout/stderr。
+	const SCREEN_SESSION = "3323979.ambior1";
+	const INBOX = "$HOME/.sched/inbox";
+	let screenExecSeq = 0;
+	async function screenExec(cmd, { timeoutMs = 60_000 } = {}) {
+		const id = `se${Date.now().toString(36)}${++screenExecSeq}`;
+		const out = `${INBOX}/${id}.out`;
+		const wrapped = `{ echo "--- begin ${id}"; (${cmd}); echo "--- end rc=$?"; } > ${out} 2>&1`;
+		// 注入两行: 先确保 inbox 存在, 再执行
+		const stuff = `mkdir -p ${INBOX} && ${wrapped}\n`;
+		await new Promise((resolve, reject) => {
+			let errBuf = "";
+			const child = cp.spawn("ssh",
+				["-o", `ConnectTimeout=${config.connectTimeoutSec}`, "-o", "BatchMode=yes",
+					config.sshEntry,
+					`screen -S ${SCREEN_SESSION} -X stuff ${shellQuote(stuff)}`],
+				{ timeout: 15_000 });
+			child.stderr.on("data", (d) => { errBuf += d; });
+			child.on("close", (c) => c === 0 ? resolve() : reject(new Error(`screen stuff failed rc=${c}: ${errBuf.trim().slice(0, 200)}`)));
+		});
+		// 轮询结果文件 (NFS 延迟容忍)
+		const deadline = Date.now() + timeoutMs;
+		while (Date.now() < deadline) {
+			await new Promise((r) => setTimeout(r, 1500));
+			const pr = await runRemoteCli(`cat ${out} 2>/dev/null`, { timeoutMs: 15_000 });
+			if (pr.stdout.includes(`--- end rc=`)) {
+				const m = pr.stdout.match(/--- end rc=(\d+)/);
+				// 取 begin 标记与 end 标记之间的正文作为命令输出
+				const body = pr.stdout.split(/--- begin \S+\n?/)[1] || "";
+				const text = body.split("\n--- end rc=")[0].trim();
+				return {
+					ok: !!m && m[1] === "0",
+					code: m ? parseInt(m[1], 10) : -1,
+					stdout: text,
+					stderr: "",
+				};
+			}
+		}
+		throw new Error(`screenExec 超时 (${timeoutMs}ms): ${cmd.slice(0, 80)}`);
+	}
 	const gate = new WriteGate();
 	let auditSeq = 0;
 
@@ -250,7 +297,8 @@ function apply(ctx, config) {
 			async function operate(key, args, { timeoutMs } = {}) {
 				return gate.run(key, async () => {
 					ctx.logger.warn("[node-sched] audit #%d op=%s cmd=`%s`", ++auditSeq, key, args);
-					const res = await runRemote(args, { timeoutMs });
+					// B24e: 写操作走 ambiorix 本机通道 (NFS+WAL 跨主机写会丢数据)
+					const res = await screenExec(args, { timeoutMs });
 					return envelope(res, { json: false });
 				});
 			}
@@ -421,15 +469,14 @@ function apply(ctx, config) {
 			"daemon-stop": { cmd: () => `${S} daemon stop`, needsId: false },
 		};
 
-		// batch.json 上传：内容经 ssh stdin 写远端临时文件（本地不落盘），
-		// dry-run 纯只读预览；submit 走 operate() 门+审计。两者用后即删临时文件。
+
 		const uploadRemote = async (content) => {
 			if (!/^\s*\{/.test(content)) throw new Error("content is not a JSON object");
 			JSON.parse(content);
 			const name = `nodesched-upload-${Date.now()}.json`;
 			// B24: 引擎模式走连接池 exec+stdin；CLI 模式走 ssh 子进程 stdin
 			if (boundAlias) {
-				const r = await sshEngine.execStdin(boundAlias, `cat > /tmp/${name}`, content, 60_000);
+				const r = await sshEngine.execStdin(boundAlias, `mkdir -p ~/.sched/inbox && cat > ~/.sched/inbox/${name}`, content, 60_000);
 				if (!r.success) throw new Error(r.stderr || r.error || "upload failed");
 				return `/tmp/${name}`;
 			}
@@ -437,12 +484,12 @@ function apply(ctx, config) {
 				const child = cp.spawn(
 					"ssh",
 					["-o", `ConnectTimeout=${config.connectTimeoutSec}`, "-o", "BatchMode=yes",
-						config.sshEntry, `cat > /tmp/${name}`],
+						config.sshEntry, `mkdir -p ~/.sched/inbox && cat > ~/.sched/inbox/${name}`],
 				);
 				let err = "";
 				child.stderr.on("data", (d) => { err += d; });
 				child.on("error", reject);
-				child.on("close", (code) => code === 0 ? resolve(`/tmp/${name}`) : reject(new Error(err || "upload failed")));
+				child.on("close", (code) => code === 0 ? resolve(`$HOME/.sched/inbox/${name}`) : reject(new Error(err || "upload failed")));
 				child.stdin.end(content);
 			});
 		};
@@ -575,9 +622,10 @@ function apply(ctx, config) {
 							// 配置是双项目共享的 —— 写操作走 WriteGate 单飞 + 审计
 							const r = await gate.run("config-set", async () => {
 								ctx.logger.warn("[node-sched] audit #%d op=config-set", ++auditSeq);
-								return runRemote(
+								// B24e: 配置写入必须在计算节点上落库 (NFS+WAL 守卫)
+								return screenExec(
 									`${S} config set -f ${shellQuote(remotePath)} --yes && rm -f ${shellQuote(remotePath)}`,
-									{ timeoutMs: 60_000 },
+									{ timeoutMs: 90_000 },
 								);
 							});
 							await json(res, {
