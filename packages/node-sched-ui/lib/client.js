@@ -7366,6 +7366,12 @@ function apply(cctx, config) {
         }).catch(() => setMsg("\u274C \u52A0\u8F7D\u5F02\u5E38"));
       }, []);
       useEffect(() => {
+        fetch("/sched/api/client-log", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ kind: "lifecycle", detail: "config-mount ts=" + (/* @__PURE__ */ new Date()).toISOString() + " cache=" + (CFG_CACHE ? "hit" : "miss"), ts: (/* @__PURE__ */ new Date()).toISOString() })
+        }).catch(() => {
+        });
         load();
       }, []);
       if (!cfg) return j("div", { style: { color: T.label2, fontSize: 13 } }, msg || "loading config\u2026");
@@ -7848,6 +7854,15 @@ function apply(cctx, config) {
         col.appendChild(container);
         root = require("react-dom/client").createRoot(container);
         root.render(j(Dashboard, { onClose: () => panel.hide() }));
+        try {
+          fetch("/sched/api/client-log", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ kind: "lifecycle", detail: "view-mounted ts=" + (/* @__PURE__ */ new Date()).toISOString(), ts: (/* @__PURE__ */ new Date()).toISOString() })
+          }).catch(() => {
+          });
+        } catch (_) {
+        }
       } catch (e) {
         cctx.logger?.warn?.("[node-sched-ui] view mount failed:", e?.message);
       }
