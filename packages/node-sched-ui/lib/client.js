@@ -7001,7 +7001,7 @@ function apply(cctx, config) {
     };
     const GRID = {
       display: "grid",
-      gridTemplateColumns: "76px minmax(120px, 1.1fr) 190px 56px 84px",
+      gridTemplateColumns: "76px minmax(110px, 1fr) minmax(150px, 1.8fr) 56px 84px",
       gap: "0 12px",
       alignItems: "center"
     };
@@ -7016,7 +7016,6 @@ function apply(cctx, config) {
       return seg;
     }
     const SEG_COLOR = { bad: "#ef4444", ok: "#22c55e", run: "#3b82f6", off: "#9ca3af" };
-    const SEG_PER_ROW = 10;
     const SEG_MAX_VISIBLE = 30;
     function TaskSegments({ tasks }) {
       if (!tasks || !tasks.length) return null;
@@ -7026,7 +7025,8 @@ function apply(cctx, config) {
         display: "flex",
         flexWrap: "wrap",
         gap: 3,
-        width: SEG_PER_ROW * 18 + (SEG_PER_ROW - 1) * 3,
+        width: "100%",
+        maxWidth: 400,
         alignContent: "start"
       } }, [
         ...tasks.slice(0, shown).map((t, i) => j("span", {

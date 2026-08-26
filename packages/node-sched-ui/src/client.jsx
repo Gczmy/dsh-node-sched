@@ -536,7 +536,7 @@ function apply(cctx, config) {
 		// 批次行网格：徽章 | 名称 | 分段进度条 | 计数 | cancel —— 固定列宽对齐
 		const GRID = {
 			display: "grid",
-			gridTemplateColumns: "76px minmax(120px, 1.1fr) 190px 56px 84px",
+			gridTemplateColumns: "76px minmax(110px, 1fr) minmax(150px, 1.8fr) 56px 84px",
 			gap: "0 12px", alignItems: "center",
 		};
 
@@ -553,9 +553,9 @@ function apply(cctx, config) {
 		}
 		const SEG_COLOR = { bad: "#ef4444", ok: "#22c55e", run: "#3b82f6", off: "#9ca3af" };
 
-		// B25: 离散任务段 —— 一段一任务, 颜色即状态; 每行最多 10 段自动换行。
-		// 超过 MAX_VISIBLE 段截断并显示 "+N"（如 crypto_pool 168 任务全画会淹没列表）。
-		const SEG_PER_ROW = 10;
+		// B25/B25b: 离散任务段 —— 一段一任务, 颜色即状态。每行段数由中列实际
+		// 宽度自适应决定 (flex wrap): 窗口宽 → 一行多段, 窗口窄 → 自动减段换行。
+		// 超过 MAX_VISIBLE 段截断并显示 "+N"（168 任务全画会淹没列表）。
 		const SEG_MAX_VISIBLE = 30;
 		function TaskSegments({ tasks }) {
 			if (!tasks || !tasks.length) return null;
@@ -566,7 +566,7 @@ function apply(cctx, config) {
 			const shown = Math.min(tasks.length, SEG_MAX_VISIBLE);
 			return jsxs2("span", { style: {
 				display: "flex", flexWrap: "wrap", gap: 3,
-				width: SEG_PER_ROW * 18 + (SEG_PER_ROW - 1) * 3,
+				width: "100%", maxWidth: 400,
 				alignContent: "start",
 			} }, [
 				...tasks.slice(0, shown).map((t, i) =>
