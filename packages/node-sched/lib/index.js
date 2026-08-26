@@ -1003,8 +1003,9 @@ function apply(ctx, config) {
 					if (!loopbackOnly(req, res)) return;
 					try {
 						const body = await readBodyJson(req);
-						ctx.logger.error("[client-exception] %s %s %s",
-							body.kind, body.ts, String(body.detail ?? "").slice(0, 500));
+						// ctx.logger 只进内存缓冲不落盘 —— 直接追加共享盘文件供远程排查读取
+						const line = `[${body.ts}] ${body.kind} ${String(body.detail ?? "").slice(0, 500)}\n`;
+						fs.appendFileSync(path.join(os.homedir(), ".sched", "client-exceptions.log"), line);
 						json(res, { ok: true });
 					} catch (e) {
 						json(res, { ok: false }, 400);
