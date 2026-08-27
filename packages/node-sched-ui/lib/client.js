@@ -7262,10 +7262,10 @@ function apply(cctx, config) {
           background: detail && detail.id === r.id ? T.bgLayer : "transparent"
         }
       }, [
-        j("span", { style: { width: 30, color: T.label2 } }, "#" + r.id),
-        j("span", { style: { width: 130, color: T.label } }, r.ts),
-        j("span", { style: { width: 70, color: r.kind === "oom" ? T.err : T.warn } }, r.kind),
-        j("span", { style: { width: 36 } }, "gpu" + (r.gpu_idx ?? "-")),
+        j("span", { style: { width: 30, flexShrink: 0, color: T.label2 } }, "#" + r.id),
+        j("span", { style: { width: 130, flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: T.label } }, r.ts),
+        j("span", { style: { width: 70, flexShrink: 0, color: r.kind === "oom" ? T.err : T.warn } }, r.kind),
+        j("span", { style: { width: 36, flexShrink: 0 } }, "gpu" + (r.gpu_idx ?? "-")),
         j(
           "span",
           { style: { flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
