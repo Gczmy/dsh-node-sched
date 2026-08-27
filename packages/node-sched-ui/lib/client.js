@@ -6615,7 +6615,7 @@ function apply(cctx, config) {
       j("span", { style: { fontSize: 12, color: T.label2 } }, p)
     ]);
   }
-  function LogViewer({ taskId, onClose }) {
+  function LogViewer({ taskId, onClose: onClose2 }) {
     const [text, setText] = useState("loading\u2026");
     useEffect(() => {
       let alive = true;
@@ -6636,7 +6636,7 @@ function apply(cctx, config) {
         jsxs2("div", { style: { display: "flex", alignItems: "center", marginBottom: 6 } }, [
           j("b", null, `log: ${taskId}`),
           j("span", { style: { flex: 1 } }),
-          j("button", { onClick: onClose, style: ghostBtn }, "\xD7")
+          j("button", { onClick: onClose2, style: ghostBtn }, "\xD7")
         ]),
         j("pre", { style: { ...pre, maxHeight: "60vh", overflow: "auto" } }, text)
       ])
@@ -6891,7 +6891,7 @@ function apply(cctx, config) {
       confirmAlias && j("div", { style: { fontSize: 13, color: T.warn } }, `\u518D\u6B21\u70B9\u300C\u786E\u8BA4\u5220\u9664\u300D\u4EE5\u79FB\u9664 ${confirmAlias}\uFF08\u8FDE\u63A5\u7ACB\u5373\u65AD\u5F00\uFF09`)
     ]);
   }
-  function SshTerminal({ alias, onClose }) {
+  function SshTerminal({ alias, onClose: onClose2 }) {
     const boxRef = useRef(null);
     useEffect(() => {
       const el = boxRef.current;
@@ -6974,7 +6974,7 @@ function apply(cctx, config) {
     }, [alias]);
     return jsxs2("div", { style: { display: "flex", flexDirection: "column", gap: 8, flex: 1, minHeight: 0 } }, [
       jsxs2("div", { style: { display: "flex", gap: 10, alignItems: "center" } }, [
-        j("button", { onClick: onClose, style: backBtn, title: "\u8FD4\u56DE\u4E3B\u673A\u5217\u8868" }, [
+        j("button", { onClick: onClose2, style: backBtn, title: "\u8FD4\u56DE\u4E3B\u673A\u5217\u8868" }, [
           j("span", { "aria-hidden": true, style: { fontSize: 15 } }, "\u2039"),
           j("span", null, "\u8FD4\u56DE")
         ]),
@@ -6990,8 +6990,6 @@ function apply(cctx, config) {
     gap: "0 12px",
     alignItems: "center"
   };
-  const SEG_COLOR = { bad: "#ef4444", ok: "#22c55e", run: "#3b82f6", off: "#9ca3af" };
-  const SEG_MAX_VISIBLE = 30;
   function taskSegments(tasks) {
     const seg = { bad: 0, ok: 0, run: 0, off: 0 };
     for (const t of tasks) {
@@ -7002,6 +7000,8 @@ function apply(cctx, config) {
     }
     return seg;
   }
+  const SEG_COLOR = { bad: "#ef4444", ok: "#22c55e", run: "#3b82f6", off: "#9ca3af" };
+  const SEG_MAX_VISIBLE = 30;
   function TaskSegments({ tasks }) {
     if (!tasks || !tasks.length) return null;
     const colorOf = (st) => ["failed", "timed_out"].includes(st) ? SEG_COLOR.bad : ["done", "skip"].includes(st) ? SEG_COLOR.ok : st === "running" ? SEG_COLOR.run : SEG_COLOR.off;
@@ -7031,9 +7031,9 @@ function apply(cctx, config) {
       }, `+${tasks.length - SEG_MAX_VISIBLE}`)
     ]);
   }
-  function BatchRow({ b, jobsAll, runOp, setLogTask }) {
+  function BatchRow({ b }) {
     const [open, setOpen] = useState(false);
-    const tasks = (jobsAll ?? []).filter(
+    const tasks = (raw?.jobs ?? []).filter(
       (x) => x.batch === b.id
     );
     const failedTasks = tasks.filter((x) => ["failed", "timed_out", "cancelled"].includes(x.status));
@@ -7050,7 +7050,7 @@ function apply(cctx, config) {
         ]),
         j(TaskSegments, { tasks }),
         j("span", { style: { fontSize: 12.5, color: T.label2, textAlign: "right", lineHeight: "15px" } }, b.progress ?? ""),
-        b.status === "discarded" ? j("span", { style: { fontSize: 13, color: T.label2 } }, "\u5DF2\u5E9F\u5F03") : j(ArmButton, {
+        j(ArmButton, {
           label: "cancel",
           confirmLabel: "cancel(\u53D6\u6D88\u4EFB\u52A1!)",
           color: T.err,
@@ -7071,7 +7071,7 @@ function apply(cctx, config) {
       ])
     ]);
   }
-  function GpuRow({ g, runOp }) {
+  function GpuRow({ g }) {
     return jsxs2("div", { style: { marginBottom: 6, display: "flex", alignItems: "center" } }, [
       Badge({ s: g.status }),
       j("span", { style: { fontFamily: "monospace", marginRight: 8 } }, `GPU${g.idx}`),
@@ -7087,7 +7087,7 @@ function apply(cctx, config) {
       g.quarantined && j("button", { onClick: () => runOp("gpu-ok", String(g.idx)), style: btn(T.ok) }, "gpu-ok \u89E3\u9664\u9694\u79BB")
     ]);
   }
-  function DaemonBar({ runOp }) {
+  function DaemonBar() {
     const [status, setStatus] = useState(null);
     const [querying, setQuerying] = useState(true);
     const [confirmStop, setConfirmStop] = useState(false);
@@ -7387,8 +7387,8 @@ function apply(cctx, config) {
     });
     const secTitle = (t) => j("div", { style: { fontSize: 13, color: T.brand, margin: "8px 0 4px", fontWeight: 600 } }, t);
     const rowStyle = { display: "flex", alignItems: "center", gap: 6, marginBottom: 4, fontSize: 13, flexWrap: "wrap" };
-    const projects = cfg.projects || {};
-    const projRows = Object.entries(projects).map(([name2, pj]) => jsxs2("div", { key: name2, style: rowStyle }, [
+    const projects2 = cfg.projects || {};
+    const projRows = Object.entries(projects2).map(([name2, pj]) => jsxs2("div", { key: name2, style: rowStyle }, [
       j("span", { style: { width: 80, color: T.label } }, name2),
       j("span", { style: { color: T.label2 } }, "\u914D\u989D"),
       numInput(pj.gpu_quota, (v) => upd((n) => {
@@ -7591,18 +7591,72 @@ function apply(cctx, config) {
       preview && j("pre", { style: { ...pre, maxHeight: 240, overflow: "auto" } }, preview.text)
     ]);
   }
-  function Dashboard({ onClose }) {
-    const [stream] = useSchedStream();
+  return jsxs2("div", { style: overlayStyle }, [
+    jsxs2("div", { style: panelStyle }, [
+      jsxs2("div", { style: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" } }, [
+        j("button", {
+          type: "button",
+          onClick: onClose,
+          style: backBtn,
+          title: "\u8FD4\u56DE\u5BF9\u8BDD",
+          "aria-label": "\u8FD4\u56DE"
+        }, [
+          j("span", { "aria-hidden": true, style: { fontSize: 15 } }, "\u2039"),
+          j("span", null, "\u8FD4\u56DE")
+        ]),
+        j("h2", { style: boardTitleStyle }, "sched \u770B\u677F"),
+        j("span", { style: { color: stream.connected ? T.ok : T.err, fontSize: 13 } }, stream.connected ? "\u25CF live" : "\u25CB offline"),
+        j("button", { onClick: refreshSnap, style: ghostBtn }, "refresh"),
+        j("select", {
+          value: projFilter,
+          onChange: (e) => setProjFilter(e.target.value),
+          style: { background: "transparent", border: `1px solid ${T.border}`, color: T.label, borderRadius: 8, padding: "5px 8px", fontSize: 13, marginRight: 4 }
+        }, [
+          j("option", { value: "" }, "all projects"),
+          ...projects.map((pr) => j("option", { key: pr, value: pr }, pr))
+        ]),
+        ...["batches", "gpus", "events", "submit", "config", "incidents", "ssh"].map((t) => j("button", { key: t, onClick: () => setTab(t), style: tab === t ? btn(T.brand) : ghostBtn }, t))
+      ]),
+      // B24c: SSH 2FA 动态码弹窗（引擎质询桥接到看板）
+      j(KbdintModal, { req: stream.kbdint }),
+      opMsg && j("div", { style: { fontSize: 13, color: T.warn, marginBottom: 4 } }, opMsg),
+      tab === "batches" && jsxs2("div", null, [
+        j(DaemonBar, null),
+        !summary && j("div", null, "loading\u2026"),
+        summary && j("pre", { style: { ...pre, maxHeight: 110, overflow: "auto" } }, summary.split("\njobs:")[0]),
+        raw && jsxs2("div", {}, [
+          jsxs2("div", { style: { fontSize: 13, color: T.label2, marginBottom: 6 } }, [
+            j("span", { style: { marginRight: 10, color: "#ef4444" } }, "\u25A0 \u7EA2=\u51FA\u9519"),
+            j("span", { style: { marginRight: 10, color: "#22c55e" } }, "\u25A0 \u7EFF=\u6210\u529F"),
+            j("span", { style: { marginRight: 10, color: "#3b82f6" } }, "\u25A0 \u84DD=\u8FD0\u884C\u4E2D"),
+            j("span", { style: { color: "#9ca3af" } }, "\u25A0 \u7070=\u6392\u961F/\u53D6\u6D88")
+          ]),
+          (raw.batches ?? []).filter((b) => !["done", "skip"].includes(b.status)).filter((b) => !projFilter || b.project === projFilter).map((b) => j(BatchRow, { key: b.id ?? b.name, b }))
+        ])
+      ]),
+      tab === "gpus" && jsxs2("div", { key: "tab-gpus" }, [
+        raw && (raw.gpus ?? []).map((g) => j(GpuRow, { key: g.idx, g })),
+        !raw && j("div", null, "loading\u2026")
+      ]),
+      tab === "events" && j("pre", { key: "tab-events", style: { ...pre, maxHeight: "55vh", overflow: "auto" } }, stream.lines.join("\n") || "(no events yet)"),
+      tab === "submit" && j(SubmitTab, { key: "tab-submit" }),
+      tab === "config" && j(ConfigTab, { key: "tab-config" }),
+      tab === "incidents" && j(IncidentsTab, { key: "tab-incidents" }),
+      tab === "ssh" && j(SshTab, { key: "tab-ssh" }),
+      logTask && j(LogViewer, { taskId: logTask, onClose: () => setLogTask(null) })
+    ])
+  ]);
+  function Dashboard({ onClose: onClose2 }) {
+    const [stream2] = useSchedStream();
     const [snap, refreshSnap2] = useSnapshot("/sched/api/status", 2e4);
-    const [tab, setTab2] = useState("batches");
-    const [opMsg, setOpMsg] = useState("");
-    const [logTask, setLogTask] = useState(null);
-    const [projFilter, setProjFilter] = useState("");
-    const raw = snap?.raw;
-    const summary = snap?.summary;
-    const projects = [...new Set((raw?.batches ?? []).map((b) => b.project).filter(Boolean))];
-    const jobsAll = raw?.jobs;
-    const runOp = async (op, id) => {
+    const [tab2, setTab2] = useState("batches");
+    const [opMsg2, setOpMsg] = useState("");
+    const [logTask2, setLogTask2] = useState(null);
+    const [projFilter2, setProjFilter2] = useState("");
+    const raw2 = snap?.raw;
+    const summary2 = snap?.summary;
+    const projects2 = [...new Set((raw2?.batches ?? []).map((b) => b.project).filter(Boolean))];
+    const runOp2 = async (op, id) => {
       const r = await post("op", { op, id });
       setOpMsg(`${op} ${id ?? ""}: ${r.ok ? "ok" : `fail (${r.error ?? r.code})`} ${r.text ? "\u2014 " + String(r.text).slice(0, 120) : ""}`);
       refreshSnap2();
@@ -7612,7 +7666,7 @@ function apply(cctx, config) {
         jsxs2("div", { style: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" } }, [
           j("button", {
             type: "button",
-            onClick: onClose,
+            onClick: onClose2,
             style: backBtn,
             title: "\u8FD4\u56DE\u5BF9\u8BDD",
             "aria-label": "\u8FD4\u56DE"
@@ -7621,54 +7675,54 @@ function apply(cctx, config) {
             j("span", null, "\u8FD4\u56DE")
           ]),
           j("h2", { style: boardTitleStyle }, "sched \u770B\u677F"),
-          j("span", { style: { color: stream.connected ? T.ok : T.err, fontSize: 13 } }, stream.connected ? "\u25CF live" : "\u25CB offline"),
+          j("span", { style: { color: stream2.connected ? T.ok : T.err, fontSize: 13 } }, stream2.connected ? "\u25CF live" : "\u25CB offline"),
           j("button", { onClick: refreshSnap2, style: ghostBtn }, "refresh"),
           j("select", {
-            value: projFilter,
-            onChange: (e) => setProjFilter(e.target.value),
+            value: projFilter2,
+            onChange: (e) => setProjFilter2(e.target.value),
             style: { background: "transparent", border: `1px solid ${T.border}`, color: T.label, borderRadius: 8, padding: "5px 8px", fontSize: 13, marginRight: 4 }
           }, [
             j("option", { value: "" }, "all projects"),
-            ...projects.map((pr) => j("option", { key: pr, value: pr }, pr))
+            ...projects2.map((pr) => j("option", { key: pr, value: pr }, pr))
           ]),
-          ...["batches", "gpus", "events", "submit", "config", "incidents", "ssh"].map((t) => j("button", { key: t, onClick: () => setTab2(t), style: tab === t ? btn(T.brand) : ghostBtn }, t))
+          ...["batches", "gpus", "events", "submit", "config", "incidents", "ssh"].map((t) => j("button", { key: t, onClick: () => setTab2(t), style: tab2 === t ? btn(T.brand) : ghostBtn }, t))
         ]),
-        // B24c: SSH 2FA 动态码弹窗
-        j(KbdintModal, { req: stream.kbdint }),
-        opMsg && j("div", { style: { fontSize: 13, color: T.warn, marginBottom: 4 } }, opMsg),
-        tab === "batches" && jsxs2("div", null, [
-          j(DaemonBar, { runOp }),
-          !summary && j("div", null, "loading\u2026"),
-          summary && j("pre", { style: { ...pre, maxHeight: 110, overflow: "auto" } }, summary.split("\njobs:")[0]),
-          raw && jsxs2("div", {}, [
+        // B24c: SSH 2FA 动态码弹窗（引擎质询桥接到看板）
+        j(KbdintModal, { req: stream2.kbdint }),
+        opMsg2 && j("div", { style: { fontSize: 13, color: T.warn, marginBottom: 4 } }, opMsg2),
+        tab2 === "batches" && jsxs2("div", null, [
+          j(DaemonBar, { runOp: runOp2 }),
+          !summary2 && j("div", null, "loading\u2026"),
+          summary2 && j("pre", { style: { ...pre, maxHeight: 110, overflow: "auto" } }, summary2.split("\njobs:")[0]),
+          raw2 && jsxs2("div", {}, [
             jsxs2("div", { style: { fontSize: 13, color: T.label2, marginBottom: 6 } }, [
               j("span", { style: { marginRight: 10, color: "#ef4444" } }, "\u25A0 \u7EA2=\u51FA\u9519"),
               j("span", { style: { marginRight: 10, color: "#22c55e" } }, "\u25A0 \u7EFF=\u6210\u529F"),
               j("span", { style: { marginRight: 10, color: "#3b82f6" } }, "\u25A0 \u84DD=\u8FD0\u884C\u4E2D"),
               j("span", { style: { color: "#9ca3af" } }, "\u25A0 \u7070=\u6392\u961F/\u53D6\u6D88")
             ]),
-            (raw.batches ?? []).filter((b) => !["done", "skip", "discarded"].includes(b.status)).filter((b) => !projFilter || b.project === projFilter).map((b) => j(BatchRow, { key: b.id ?? b.name, b, jobsAll, runOp, setLogTask }))
+            (raw2.batches ?? []).filter((b) => !["done", "skip", "discarded"].includes(b.status)).filter((b) => !projFilter2 || b.project === projFilter2).map((b) => j(BatchRow, { key: b.id ?? b.name, b, jobsAll, runOp: runOp2, setLogTask: setLogTask2 }))
           ])
-        ])
-      ]),
-      tab === "gpus" && jsxs2("div", { key: "tab-gpus" }, [
-        raw && (raw.gpus ?? []).map((g) => j(GpuRow, { key: g.idx, g, runOp })),
-        !raw && j("div", null, "loading\u2026")
-      ]),
-      tab === "events" && j("pre", { key: "tab-events", style: { ...pre, maxHeight: "55vh", overflow: "auto" } }, stream.lines.join("\n") || "(no events yet)"),
-      tab === "submit" && j(SubmitTab, { key: "tab-submit", post, refreshSnap: refreshSnap2, setTab: setTab2 }),
-      tab === "config" && j(ConfigTab, { key: "tab-config" }),
-      tab === "incidents" && j(IncidentsTab, { key: "tab-incidents" }),
-      tab === "ssh" && j(SshTab, { key: "tab-ssh" }),
-      logTask && j(LogViewer, { taskId: logTask, onClose: () => setLogTask(null) })
+        ]),
+        tab2 === "gpus" && jsxs2("div", { key: "tab-gpus" }, [
+          raw2 && (raw2.gpus ?? []).map((g) => j(GpuRow, { key: g.idx, g, runOp: runOp2 })),
+          !raw2 && j("div", null, "loading\u2026")
+        ]),
+        tab2 === "events" && j("pre", { key: "tab-events", style: { ...pre, maxHeight: "55vh", overflow: "auto" } }, stream2.lines.join("\n") || "(no events yet)"),
+        tab2 === "submit" && j(SubmitTab, { key: "tab-submit", post, refreshSnap: refreshSnap2, setTab: setTab2 }),
+        tab2 === "config" && j(ConfigTab, { key: "tab-config" }),
+        tab2 === "incidents" && j(IncidentsTab, { key: "tab-incidents" }),
+        tab2 === "ssh" && j(SshTab, { key: "tab-ssh" }),
+        logTask2 && j(LogViewer, { taskId: logTask2, onClose: () => setLogTask2(null) })
+      ])
     ]);
   }
   function StatusCard() {
     const [open, setOpen] = useState(false);
     const [snap] = useSnapshot("/sched/api/status", 3e4);
-    const raw = snap?.raw;
-    const gpus = raw?.gpus ?? [];
-    const batches = raw?.batches ?? [];
+    const raw2 = snap?.raw;
+    const gpus = raw2?.gpus ?? [];
+    const batches = raw2?.batches ?? [];
     const stCard = {
       border: "1px solid var(--dsw-alias-border-l1)",
       background: open ? "var(--dsw-alias-bg-layer-2)" : "var(--dsw-alias-bg-layer-3)",
