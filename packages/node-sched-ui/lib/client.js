@@ -7854,6 +7854,16 @@ function apply(cctx, config) {
         col.appendChild(container);
         root = require("react-dom/client").createRoot(container);
         root.render(j(Dashboard, { onClose: () => panel.hide() }));
+        console.log("[node-sched-ui] \u2705 Dashboard mounted into container");
+        setTimeout(() => {
+          const html = container.innerHTML;
+          console.log(
+            "[node-sched-ui] container innerHTML length:",
+            html.length,
+            "| first 200:",
+            html.slice(0, 200)
+          );
+        }, 100);
         try {
           fetch("/sched/api/client-log", {
             method: "POST",
