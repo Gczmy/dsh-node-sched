@@ -1131,11 +1131,11 @@ function apply(cctx, config) {
 
 
 
-	function BatchRow({ b }) {
+	function BatchRow({ b, jobsAll, runOp, setLogTask }) {
 
 		const [open, setOpen] = useState(false);
 
-		const tasks = (raw?.jobs ?? []).filter(
+		const tasks = (jobsAll ?? []).filter(
 
 			(x) => x.batch === b.id,
 
@@ -1201,7 +1201,7 @@ function apply(cctx, config) {
 
 
 
-	function GpuRow({ g }) {
+	function GpuRow({ g, runOp }) {
 
 		return jsxs2("div", { style: { marginBottom: 6, display: "flex", alignItems: "center" } }, [
 
@@ -1227,7 +1227,7 @@ function apply(cctx, config) {
 
 
 
-	function DaemonBar() {
+	function DaemonBar({ runOp }) {
 
 		const [status, setStatus] = useState(null);      // 上次成功查询的状态文本（保留不清空）
 
@@ -1949,7 +1949,7 @@ function apply(cctx, config) {
 
 
 
-	function SubmitTab() {
+	function SubmitTab({ post, refreshSnap, setTab }) {
 
 		const [text, setText] = useState("");
 

@@ -7031,9 +7031,9 @@ function apply(cctx, config) {
       }, `+${tasks.length - SEG_MAX_VISIBLE}`)
     ]);
   }
-  function BatchRow({ b }) {
+  function BatchRow({ b, jobsAll: jobsAll2, runOp, setLogTask }) {
     const [open, setOpen] = useState(false);
-    const tasks = (raw?.jobs ?? []).filter(
+    const tasks = (jobsAll2 ?? []).filter(
       (x) => x.batch === b.id
     );
     const failedTasks = tasks.filter((x) => ["failed", "timed_out", "cancelled"].includes(x.status));
@@ -7071,7 +7071,7 @@ function apply(cctx, config) {
       ])
     ]);
   }
-  function GpuRow({ g }) {
+  function GpuRow({ g, runOp }) {
     return jsxs2("div", { style: { marginBottom: 6, display: "flex", alignItems: "center" } }, [
       Badge({ s: g.status }),
       j("span", { style: { fontFamily: "monospace", marginRight: 8 } }, `GPU${g.idx}`),
@@ -7087,7 +7087,7 @@ function apply(cctx, config) {
       g.quarantined && j("button", { onClick: () => runOp("gpu-ok", String(g.idx)), style: btn(T.ok) }, "gpu-ok \u89E3\u9664\u9694\u79BB")
     ]);
   }
-  function DaemonBar() {
+  function DaemonBar({ runOp }) {
     const [status, setStatus] = useState(null);
     const [querying, setQuerying] = useState(true);
     const [confirmStop, setConfirmStop] = useState(false);
@@ -7546,7 +7546,7 @@ function apply(cctx, config) {
       msg && j("div", { style: { fontSize: 13, marginTop: 6, color: msg.startsWith("\u2705") ? T.ok : T.warn } }, msg)
     ]);
   }
-  function SubmitTab() {
+  function SubmitTab({ post: post2, refreshSnap, setTab }) {
     const [text, setText] = useState("");
     const [preview, setPreview] = useState(null);
     const [msg, setMsg] = useState("");
@@ -7554,7 +7554,7 @@ function apply(cctx, config) {
       setPreview(null);
       setMsg("dry-run \u4E2D\u2026");
       try {
-        const r = await post("dryrun", { content: text });
+        const r = await post2("dryrun", { content: text });
         setPreview(r);
         setMsg(r.ok ? "\u9884\u89C8\u901A\u8FC7\uFF0C\u53EF\u63D0\u4EA4" : "\u9884\u89C8\u5931\u8D25");
       } catch (e) {
@@ -7564,7 +7564,7 @@ function apply(cctx, config) {
     const doSubmit = async () => {
       setMsg("\u63D0\u4EA4\u4E2D\u2026");
       try {
-        const r = await post("submit", { content: text });
+        const r = await post2("submit", { content: text });
         setMsg(r.ok ? `\u5DF2\u63D0\u4EA4\uFF1A${String(r.text).slice(0, 160)}` : `\u5931\u8D25\uFF1A${String(r.text).slice(0, 160)}`);
         if (r.ok) {
           setPreview(null);
@@ -7593,18 +7593,18 @@ function apply(cctx, config) {
   }
   function Dashboard({ onClose }) {
     const [stream] = useSchedStream();
-    const [snap, refreshSnap2] = useSnapshot("/sched/api/status", 2e4);
-    const [tab, setTab2] = useState("batches");
+    const [snap, refreshSnap] = useSnapshot("/sched/api/status", 2e4);
+    const [tab, setTab] = useState("batches");
     const [opMsg, setOpMsg] = useState("");
-    const [logTask, setLogTask2] = useState(null);
+    const [logTask, setLogTask] = useState(null);
     const [projFilter, setProjFilter] = useState("");
-    const raw2 = snap?.raw;
+    const raw = snap?.raw;
     const summary = snap?.summary;
-    const projects = [...new Set((raw2?.batches ?? []).map((b) => b.project).filter(Boolean))];
-    const runOp2 = async (op, id) => {
+    const projects = [...new Set((raw?.batches ?? []).map((b) => b.project).filter(Boolean))];
+    const runOp = async (op, id) => {
       const r = await post("op", { op, id });
       setOpMsg(`${op} ${id ?? ""}: ${r.ok ? "ok" : `fail (${r.error ?? r.code})`} ${r.text ? "\u2014 " + String(r.text).slice(0, 120) : ""}`);
-      refreshSnap2();
+      refreshSnap();
     };
     return jsxs2("div", { style: overlayStyle }, [
       jsxs2("div", { style: panelStyle }, [
@@ -7621,7 +7621,7 @@ function apply(cctx, config) {
           ]),
           j("h2", { style: boardTitleStyle }, "sched \u770B\u677F"),
           j("span", { style: { color: stream.connected ? T.ok : T.err, fontSize: 13 } }, stream.connected ? "\u25CF live" : "\u25CB offline"),
-          j("button", { onClick: refreshSnap2, style: ghostBtn }, "refresh"),
+          j("button", { onClick: refreshSnap, style: ghostBtn }, "refresh"),
           j("select", {
             value: projFilter,
             onChange: (e) => setProjFilter(e.target.value),
@@ -7630,44 +7630,44 @@ function apply(cctx, config) {
             j("option", { value: "" }, "all projects"),
             ...projects.map((pr) => j("option", { key: pr, value: pr }, pr))
           ]),
-          ...["batches", "gpus", "events", "submit", "config", "incidents", "ssh"].map((t) => j("button", { key: t, onClick: () => setTab2(t), style: tab === t ? btn(T.brand) : ghostBtn }, t))
+          ...["batches", "gpus", "events", "submit", "config", "incidents", "ssh"].map((t) => j("button", { key: t, onClick: () => setTab(t), style: tab === t ? btn(T.brand) : ghostBtn }, t))
         ]),
         // B24c: SSH 2FA 动态码弹窗（引擎质询桥接到看板）
         j(KbdintModal, { req: stream.kbdint }),
         opMsg && j("div", { style: { fontSize: 13, color: T.warn, marginBottom: 4 } }, opMsg),
         tab === "batches" && jsxs2("div", null, [
-          j(DaemonBar, { runOp: runOp2 }),
+          j(DaemonBar, { runOp }),
           !summary && j("div", null, "loading\u2026"),
           summary && j("pre", { style: { ...pre, maxHeight: 110, overflow: "auto" } }, summary.split("\njobs:")[0]),
-          raw2 && jsxs2("div", {}, [
+          raw && jsxs2("div", {}, [
             jsxs2("div", { style: { fontSize: 13, color: T.label2, marginBottom: 6 } }, [
               j("span", { style: { marginRight: 10, color: "#ef4444" } }, "\u25A0 \u7EA2=\u51FA\u9519"),
               j("span", { style: { marginRight: 10, color: "#22c55e" } }, "\u25A0 \u7EFF=\u6210\u529F"),
               j("span", { style: { marginRight: 10, color: "#3b82f6" } }, "\u25A0 \u84DD=\u8FD0\u884C\u4E2D"),
               j("span", { style: { color: "#9ca3af" } }, "\u25A0 \u7070=\u6392\u961F/\u53D6\u6D88")
             ]),
-            (raw2.batches ?? []).filter((b) => !["done", "skip", "discarded"].includes(b.status)).filter((b) => !projFilter || b.project === projFilter).map((b) => j(BatchRow, { key: b.id ?? b.name, b, jobsAll, runOp: runOp2, setLogTask: setLogTask2 }))
+            (raw.batches ?? []).filter((b) => !["done", "skip", "discarded"].includes(b.status)).filter((b) => !projFilter || b.project === projFilter).map((b) => j(BatchRow, { key: b.id ?? b.name, b, jobsAll, runOp, setLogTask }))
           ])
         ]),
         tab === "gpus" && jsxs2("div", { key: "tab-gpus" }, [
-          raw2 && (raw2.gpus ?? []).map((g) => j(GpuRow, { key: g.idx, g, runOp: runOp2 })),
-          !raw2 && j("div", null, "loading\u2026")
+          raw && (raw.gpus ?? []).map((g) => j(GpuRow, { key: g.idx, g, runOp })),
+          !raw && j("div", null, "loading\u2026")
         ]),
         tab === "events" && j("pre", { key: "tab-events", style: { ...pre, maxHeight: "55vh", overflow: "auto" } }, stream.lines.join("\n") || "(no events yet)"),
-        tab === "submit" && j(SubmitTab, { key: "tab-submit", post, refreshSnap: refreshSnap2, setTab: setTab2 }),
+        tab === "submit" && j(SubmitTab, { key: "tab-submit", post, refreshSnap, setTab }),
         tab === "config" && j(ConfigTab, { key: "tab-config" }),
         tab === "incidents" && j(IncidentsTab, { key: "tab-incidents" }),
         tab === "ssh" && j(SshTab, { key: "tab-ssh" }),
-        logTask && j(LogViewer, { taskId: logTask, onClose: () => setLogTask2(null) })
+        logTask && j(LogViewer, { taskId: logTask, onClose: () => setLogTask(null) })
       ])
     ]);
   }
   function StatusCard() {
     const [open, setOpen] = useState(false);
     const [snap] = useSnapshot("/sched/api/status", 3e4);
-    const raw2 = snap?.raw;
-    const gpus = raw2?.gpus ?? [];
-    const batches = raw2?.batches ?? [];
+    const raw = snap?.raw;
+    const gpus = raw?.gpus ?? [];
+    const batches = raw?.batches ?? [];
     const stCard = {
       border: "1px solid var(--dsw-alias-border-l1)",
       background: open ? "var(--dsw-alias-bg-layer-2)" : "var(--dsw-alias-bg-layer-3)",
