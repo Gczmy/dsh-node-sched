@@ -2036,6 +2036,7 @@ function apply(cctx, config) {
 		const summary = snap?.summary;
 
 		const projects = [...new Set((raw?.batches ?? []).map((b) => b.project).filter(Boolean))];
+		const jobsAll = raw?.jobs;
 
 
 

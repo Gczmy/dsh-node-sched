@@ -7031,9 +7031,9 @@ function apply(cctx, config) {
       }, `+${tasks.length - SEG_MAX_VISIBLE}`)
     ]);
   }
-  function BatchRow({ b, jobsAll: jobsAll2, runOp, setLogTask }) {
+  function BatchRow({ b, jobsAll, runOp, setLogTask }) {
     const [open, setOpen] = useState(false);
-    const tasks = (jobsAll2 ?? []).filter(
+    const tasks = (jobsAll ?? []).filter(
       (x) => x.batch === b.id
     );
     const failedTasks = tasks.filter((x) => ["failed", "timed_out", "cancelled"].includes(x.status));
@@ -7601,6 +7601,7 @@ function apply(cctx, config) {
     const raw = snap?.raw;
     const summary = snap?.summary;
     const projects = [...new Set((raw?.batches ?? []).map((b) => b.project).filter(Boolean))];
+    const jobsAll = raw?.jobs;
     const runOp = async (op, id) => {
       const r = await post("op", { op, id });
       setOpMsg(`${op} ${id ?? ""}: ${r.ok ? "ok" : `fail (${r.error ?? r.code})`} ${r.text ? "\u2014 " + String(r.text).slice(0, 120) : ""}`);
