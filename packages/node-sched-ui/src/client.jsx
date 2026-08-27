@@ -1481,9 +1481,8 @@ function apply(cctx, config) {
 
 				j("span", { style: { color: T.label2 } },
 
-					`快照时间 ${frozenAt || "…"} —— 阅读期间内容不变。点「刷新」或切走再回来获取最新。`),
+					`快照时间 ${frozenAt || "…"} —— 阅读期间内容不变。`),
 
-				j("span", { style: { flex: 1 } }),
 
 				j("button", { onClick: () => load(), style: btn(T.brand) }, "刷新"),
 
@@ -1539,11 +1538,11 @@ function apply(cctx, config) {
 
 					`${detail.ts} · job ${detail.job_id} · batch ${detail.batch_id}`),
 
-				failed.dispatch_mode && j("div", {},
+				failed.dispatch_mode && j("div", { style: { wordBreak: "break-word", lineHeight: 1.5 } },
 
 					`派发方式: ${failed.dispatch_mode} · 声明 ${failed.declared_vram_gib ?? "-"} GiB · 历史峰值 ${failed.profile_peak_gib ?? "-"}`),
 
-				mem.packed_sum_gib !== undefined && j("div", {},
+				mem.packed_sum_gib !== undefined && j("div", { style: { wordBreak: "break-word", lineHeight: 1.5 } },
 
 					`显存: cap=${mem.cap_gib ?? "?"} packed=${mem.packed_sum_gib} actual=${mem.actual_used_gib ?? "?"}${mem.degraded ? " [降级]" : ""}`),
 

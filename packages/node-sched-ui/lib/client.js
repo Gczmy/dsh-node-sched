@@ -7241,9 +7241,8 @@ function apply(cctx, config) {
         j(
           "span",
           { style: { color: T.label2 } },
-          `\u5FEB\u7167\u65F6\u95F4 ${frozenAt || "\u2026"} \u2014\u2014 \u9605\u8BFB\u671F\u95F4\u5185\u5BB9\u4E0D\u53D8\u3002\u70B9\u300C\u5237\u65B0\u300D\u6216\u5207\u8D70\u518D\u56DE\u6765\u83B7\u53D6\u6700\u65B0\u3002`
+          `\u5FEB\u7167\u65F6\u95F4 ${frozenAt || "\u2026"} \u2014\u2014 \u9605\u8BFB\u671F\u95F4\u5185\u5BB9\u4E0D\u53D8\u3002`
         ),
-        j("span", { style: { flex: 1 } }),
         j("button", { onClick: () => load(), style: btn(T.brand) }, "\u5237\u65B0")
       ]),
       list.length === 0 && j(
@@ -7298,12 +7297,12 @@ function apply(cctx, config) {
         ),
         failed.dispatch_mode && j(
           "div",
-          {},
+          { style: { wordBreak: "break-word", lineHeight: 1.5 } },
           `\u6D3E\u53D1\u65B9\u5F0F: ${failed.dispatch_mode} \xB7 \u58F0\u660E ${failed.declared_vram_gib ?? "-"} GiB \xB7 \u5386\u53F2\u5CF0\u503C ${failed.profile_peak_gib ?? "-"}`
         ),
         mem.packed_sum_gib !== void 0 && j(
           "div",
-          {},
+          { style: { wordBreak: "break-word", lineHeight: 1.5 } },
           `\u663E\u5B58: cap=${mem.cap_gib ?? "?"} packed=${mem.packed_sum_gib} actual=${mem.actual_used_gib ?? "?"}${mem.degraded ? " [\u964D\u7EA7]" : ""}`
         ),
         (mem.external_pids || []).length > 0 && jsxs2(
