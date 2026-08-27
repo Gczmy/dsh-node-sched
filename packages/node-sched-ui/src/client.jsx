@@ -580,8 +580,10 @@ function apply(cctx, config) {
 			]),
 				j(TaskSegments, { tasks }),
 				j("span", { style: { fontSize: 12.5, color: T.label2, textAlign: "right", lineHeight: "15px" } }, b.progress ?? ""),
-				j(ArmButton, { label: "cancel", confirmLabel: "cancel(取消任务!)", color: T.err, stopProp: true,
-				onConfirm: () => runOp("cancel", b.name) }),
+				b.status === "discarded"
+					? j("span", { style: { fontSize: 13, color: T.label2 } }, "已废弃")
+					: j(ArmButton, { label: "cancel", confirmLabel: "cancel(取消任务!)", color: T.err, stopProp: true,
+					onConfirm: () => runOp("cancel", b.name) }),
 			]),
 			open && jsxs2("div", { style: { marginTop: 6, marginLeft: 76, paddingLeft: 10, borderLeft: `2px solid ${T.border}` } }, [
 				b.depends_on?.length > 0 && j("div", { style: { fontSize: 12, color: T.label2 } }, `依赖: ${b.depends_on.join(", ")}`),
@@ -1006,62 +1008,6 @@ function apply(cctx, config) {
 		]);
 	}
 
-	return jsxs2("div", { style: overlayStyle }, [
-		jsxs2("div", { style: panelStyle }, [
-			jsxs2("div", { style: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" } }, [
-				j("button", {
-					type: "button", onClick: onClose, style: backBtn,
-					title: "返回对话", "aria-label": "返回",
-				}, [
-					j("span", { "aria-hidden": true, style: { fontSize: 15 } }, "\u2039"),
-					j("span", null, "返回"),
-				]),
-				j("h2", { style: boardTitleStyle }, "sched 看板"),
-				j("span", { style: { color: stream.connected ? T.ok : T.err, fontSize: 13 } }, stream.connected ? "\u25cf live" : "\u25cb offline"),
-				j("button", { onClick: refreshSnap, style: ghostBtn }, "refresh"),
-				j("select", {
-					value: projFilter,
-					onChange: (e) => setProjFilter(e.target.value),
-					style: { background: "transparent", border: `1px solid ${T.border}`, color: T.label, borderRadius: 8, padding: "5px 8px", fontSize: 13, marginRight: 4 },
-				}, [
-					j("option", { value: "" }, "all projects"),
-					...projects.map((pr) => j("option", { key: pr, value: pr }, pr)),
-				]),
-				...["batches", "gpus", "events", "submit", "config", "incidents", "ssh"].map((t) =>
-					j("button", { key: t, onClick: () => setTab(t), style: tab === t ? btn(T.brand) : ghostBtn }, t)),
-			]),
-			// B24c: SSH 2FA 动态码弹窗（引擎质询桥接到看板）
-			j(KbdintModal, { req: stream.kbdint }),
-			opMsg && j("div", { style: { fontSize: 13, color: T.warn, marginBottom: 4 } }, opMsg),
-			tab === "batches" && jsxs2("div", null, [
-				j(DaemonBar, null),
-				!summary && j("div", null, "loading…"),
-				summary && j("pre", { style: { ...pre, maxHeight: 110, overflow: "auto" } }, summary.split("\njobs:")[0]),
-				raw && jsxs2("div", {}, [
-				jsxs2("div", { style: { fontSize: 13, color: T.label2, marginBottom: 6 } }, [
-					j("span", { style: { marginRight: 10, color: "#ef4444" } }, "■ 红=出错"),
-					j("span", { style: { marginRight: 10, color: "#22c55e" } }, "■ 绿=成功"),
-					j("span", { style: { marginRight: 10, color: "#3b82f6" } }, "■ 蓝=运行中"),
-					j("span", { style: { color: "#9ca3af" } }, "■ 灰=排队/取消"),
-				]),
-				(raw.batches ?? [])
-					.filter((b) => !["done", "skip"].includes(b.status))
-					.filter((b) => !projFilter || b.project === projFilter)
-					.map((b) => j(BatchRow, { key: b.id ?? b.name, b })),
-			]),
-			]),
-			tab === "gpus" && jsxs2("div", { key: "tab-gpus" }, [
-				raw && (raw.gpus ?? []).map((g) => j(GpuRow, { key: g.idx, g })),
-				!raw && j("div", null, "loading…"),
-			]),
-			tab === "events" && j("pre", { key: "tab-events", style: { ...pre, maxHeight: "55vh", overflow: "auto" } }, stream.lines.join("\n") || "(no events yet)"),
-			tab === "submit" && j(SubmitTab, { key: "tab-submit" }),
-			tab === "config" && j(ConfigTab, { key: "tab-config" }),
-			tab === "incidents" && j(IncidentsTab, { key: "tab-incidents" }),
-			tab === "ssh" && j(SshTab, { key: "tab-ssh" }),
-			logTask && j(LogViewer, { taskId: logTask, onClose: () => setLogTask(null) }),
-		]),
-
 	function Dashboard({ onClose }) {
 		const [stream] = useSchedStream();
 		const [snap, refreshSnap] = useSnapshot("/sched/api/status", 20000);
@@ -1119,10 +1065,11 @@ function apply(cctx, config) {
 						j("span", { style: { color: "#9ca3af" } }, "\u25a0 灰=排队/取消"),
 					]),
 					(raw.batches ?? [])
-						.filter((b) => !["done", "skip"].includes(b.status))
+						.filter((b) => !["done", "skip", "discarded"].includes(b.status))
 						.filter((b) => !projFilter || b.project === projFilter)
 						.map((b) => j(BatchRow, { key: b.id ?? b.name, b, jobsAll, runOp, setLogTask })),
 				]),
+			]),
 			]),
 			tab === "gpus" && jsxs2("div", { key: "tab-gpus" }, [
 				raw && (raw.gpus ?? []).map((g) => j(GpuRow, { key: g.idx, g, runOp })),
