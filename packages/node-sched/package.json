@@ -15,6 +15,7 @@
     "lib/transport.js",
     "lib/request-guard.js",
     "lib/upload-path.js",
+    "lib/screen-result.js",
     "lib/entry-override.js"
   ],
   "license": "MIT",

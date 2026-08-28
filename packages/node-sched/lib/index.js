@@ -31,6 +31,7 @@ import { LocalTransport } from "./transport.js";
 import { isLoopbackAddress, loopbackRequestAllowed, originHostAllowed } from "./request-guard.js";
 import { parseUploadedPath } from "./upload-path.js";
 import { mergeEntryOverride } from "./entry-override.js";
+import { parseScreenResult } from "./screen-result.js";
 
 const name = "node-sched";
 
@@ -278,7 +279,7 @@ stderr: `[ssh-engine:${target.alias}] ${formatSshError(e)}`,
 	// 输出重定向到共享盘结果文件, 轮询该文件取回 stdout/stderr。
 	const SCREEN_SESSION = "3323979.ambior1";
 	const INBOX = "$HOME/.sched/inbox";
-const SCREEN_RESULT_PREFIX_BYTES = 2 * 1024 * 1024;
+	const SCREEN_RESULT_PREFIX_BYTES = 2 * 1024 * 1024;
 	const MAX_SCREEN_STUFF_BYTES = 640;
 	let screenExecSeq = 0;
 	async function screenExec(cmd, { timeoutMs = 60_000, target = captureTransportTarget() } = {}) {
@@ -289,16 +290,19 @@ const SCREEN_RESULT_PREFIX_BYTES = 2 * 1024 * 1024;
 		const id = `se${Date.now().toString(36)}${++screenExecSeq}`;
 		const out = `${INBOX}/${id}.out`;
 		const markerOut = `${INBOX}/${id}.done`;
+		const cancelOut = `${INBOX}/${id}.cancel`;
 		const remoteOpts = { timeoutMs: 15_000, sshEntry: target.sshEntry };
 		const cleanup = () => runRemoteCli(
-			`rm -f ${out} ${markerOut}`,
+			`rm -f ${out} ${markerOut} ${cancelOut}`,
 			{ ...remoteOpts, maxOutputBytes: 128 },
 		).catch(() => {});
-		const wrapped = `{ echo "--- begin ${id}"; (${cmd}); rc=$?; printf "\\n--- end rc=%s id=${id}\\n" "$rc" > ${markerOut}; } > ${out} 2>&1`;
+		const wrapped = `{ echo "--- begin ${id}"; (${cmd}); rc=$?; if [ ! -e ${cancelOut} ]; then printf "\\n--- end rc=%s id=${id}\\n" "$rc" > ${markerOut}; fi; (sleep 60; rm -f ${out} ${markerOut} ${cancelOut}) >/dev/null 2>&1 & } > ${out} 2>&1`;
 		const stuff = `mkdir -p ${INBOX} && ${wrapped}\n`;
 		if (Buffer.byteLength(stuff, "utf8") > MAX_SCREEN_STUFF_BYTES) {
 			throw new Error(`screenExec command too long (max ${MAX_SCREEN_STUFF_BYTES} bytes)`);
 		}
+		let started = false;
+		let markerSeen = false;
 		try {
 			await new Promise((resolve, reject) => {
 				let errBuf = "";
@@ -310,6 +314,7 @@ const SCREEN_RESULT_PREFIX_BYTES = 2 * 1024 * 1024;
 				child.stderr.on("data", (d) => { errBuf += d; });
 				child.on("close", (c) => c === 0 ? resolve() : reject(new Error(`screen stuff failed rc=${c}: ${errBuf.trim().slice(0, 200)}`)));
 			});
+			started = true;
 			// 轮询结果文件 (NFS 延迟容忍). Completion lives in a separate
 			// marker file so descendants retaining stdout cannot hide the result.
 			const deadline = Date.now() + timeoutMs;
@@ -321,6 +326,7 @@ const SCREEN_RESULT_PREFIX_BYTES = 2 * 1024 * 1024;
 				);
 				const marker = parseScreenEnd(markerResult.stdout, id);
 				if (!marker) continue;
+				markerSeen = true;
 				const prefix = await runRemoteCli(
 					`head -c ${SCREEN_RESULT_PREFIX_BYTES} ${out} 2>/dev/null`,
 					{ ...remoteOpts, maxOutputBytes: SCREEN_RESULT_PREFIX_BYTES + 1024 },
@@ -361,7 +367,11 @@ const SCREEN_RESULT_PREFIX_BYTES = 2 * 1024 * 1024;
 			}
 			throw new Error(`screenExec 超时 (${timeoutMs}ms): ${cmd.slice(0, 80)}`);
 		} finally {
-			await cleanup();
+			if (!started || markerSeen) {
+				await cleanup();
+			} else {
+				await runRemoteCli(`touch ${cancelOut}`, { ...remoteOpts, maxOutputBytes: 128 }).catch(() => {});
+			}
 		}
 	}
 	const gate = new WriteGate();
