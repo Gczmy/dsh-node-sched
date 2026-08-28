@@ -6841,26 +6841,34 @@ function apply(cctx, config) {
     const doDelete = async (alias) => {
       setBusy("del:" + alias);
       try {
-        await fetch(`/sched/ssh/hosts?alias=${encodeURIComponent(alias)}`, { method: "DELETE" });
+        const response = await fetch(`/sched/ssh/hosts?alias=${encodeURIComponent(alias)}`, { method: "DELETE" });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok || result.removed === false) {
+          setMsg(`\u5931\u8D25: ${result.error ?? `HTTP ${response.status}`}`);
+          return;
+        }
         setConfirmAlias(null);
         await load();
       } catch (e) {
         setMsg("\u5931\u8D25: " + e.message);
+      } finally {
+        setBusy("");
       }
-      setBusy("");
     };
     if (termAlias) return j(SshTerminal, { alias: termAlias, onClose: () => {
       setTermAlias(null);
     } });
+    const engineMode = binding?.mode === "engine";
+    const localMode = binding?.mode === "local";
     return jsxs2("div", { style: { display: "flex", flexDirection: "column", gap: 10 } }, [
       // B24: SCHED 绑定状态条
-      jsxs2("div", { style: { display: "flex", gap: 10, alignItems: "center", padding: "8px 12px", background: binding?.mode === "engine" ? `color-mix(in srgb, ${T.ok} 10%, transparent)` : T.bgLayer, borderRadius: 10, border: `1px solid ${binding?.mode === "engine" ? `color-mix(in srgb, ${T.ok} 30%, transparent)` : T.border}` } }, [
+      jsxs2("div", { style: { display: "flex", gap: 10, alignItems: "center", padding: "8px 12px", background: engineMode ? `color-mix(in srgb, ${T.ok} 10%, transparent)` : localMode ? `color-mix(in srgb, ${T.brand} 10%, transparent)` : T.bgLayer, borderRadius: 10, border: `1px solid ${engineMode ? `color-mix(in srgb, ${T.ok} 30%, transparent)` : localMode ? `color-mix(in srgb, ${T.brand} 30%, transparent)` : T.border}` } }, [
         j("span", { style: { fontSize: 13, fontWeight: 700 } }, "SCHED"),
         j("span", {
-          style: { fontSize: 13, color: binding?.mode === "engine" ? T.ok : T.label2, fontWeight: binding?.mode === "engine" ? 700 : 400 }
-        }, binding?.mode === "engine" ? `\u2192 ${binding.alias}\uFF08\u5F15\u64CE\u6A21\u5F0F\uFF0C\u8FDE\u63A5\u6C60\u590D\u7528\uFF09` : `\u2192 sshEntry ${binding?.sshEntry ?? "?"}\uFF08CLI \u6A21\u5F0F\uFF09`),
+          style: { fontSize: 13, color: engineMode ? T.ok : localMode ? T.brand : T.label2, fontWeight: engineMode || localMode ? 700 : 400 }
+        }, engineMode ? `\u2192 ${binding.alias}\uFF08\u5F15\u64CE\u6A21\u5F0F\uFF0C\u8FDE\u63A5\u6C60\u590D\u7528\uFF09` : localMode ? "\u2192 \u672C\u5730 transport\uFF08\u65E0\u9700 SSH\uFF09" : `\u2192 sshEntry ${binding?.sshEntry ?? "?"}\uFF08CLI \u6A21\u5F0F\uFF09`),
         j("span", { style: { flex: 1 } }),
-        binding?.mode === "engine" && j(
+        engineMode && j(
           "button",
           { onClick: doUnbind, disabled: !!busy, title: "\u56DE\u5230\u4F20\u7EDF ssh CLI \u6A21\u5F0F", style: ghostBtn },
           busy === "unbind" ? "\u89E3\u7ED1\u4E2D\u2026" : "\u89E3\u7ED1"
@@ -6911,7 +6919,7 @@ function apply(cctx, config) {
               h.description ? ` \xB7 ${h.description}` : ""
             ].join("")),
             // 右：操作区
-            boundHere ? j("span", { key: "sb", style: { color: T.ok, fontWeight: 700, fontSize: 13, flexShrink: 0 } }, "\u2714 \u6570\u636E\u6E90") : j(
+            localMode || boundHere ? j("span", { key: "sb", style: { color: localMode ? T.brand : T.ok, fontWeight: 700, fontSize: 13, flexShrink: 0 } }, localMode ? "\u672C\u5730\u8FD0\u884C" : "\u2714 \u6570\u636E\u6E90") : j(
               "button",
               { key: "bnd", onClick: () => doBind(h.alias), disabled: !!busy, title: "\u8BBE\u4E3A sched \u6570\u636E\u6E90\u4E3B\u673A\uFF08\u5F15\u64CE\u6A21\u5F0F\uFF0C\u770B\u677F\u6570\u636E\u76F4\u8FDE\u8BE5\u673A\uFF09", style: { ...ghostBtn, color: T.brand, borderColor: `color-mix(in srgb, ${T.brand} 45%, transparent)`, flexShrink: 0 } },
               busy === "bind:" + h.alias ? "\u7ED1\u5B9A\u4E2D\u2026" : "\u8BBE\u4E3ASCHED"
@@ -7148,6 +7156,8 @@ function apply(cctx, config) {
       return () => clearInterval(t);
     }, [load]);
     const running = status != null && status.includes("\u8FD0\u884C\u4E2D");
+    const engineMode = channel?.mode === "engine";
+    const localMode = channel?.mode === "local";
     return jsxs2("div", { style: { marginBottom: 8, paddingBottom: 6, borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center" } }, [
       // B24f: 只读通道徽章 —— 连接控制唯一入口在 ssh tab
       j("span", {
@@ -7157,13 +7167,13 @@ function apply(cctx, config) {
           padding: "2px 8px",
           borderRadius: 999,
           flexShrink: 0,
-          color: channel?.mode === "engine" ? T.ok : T.label2,
-          border: `1px solid ${channel?.mode === "engine" ? `color-mix(in srgb, ${T.ok} 35%, transparent)` : T.border}`,
-          background: channel?.mode === "engine" ? `color-mix(in srgb, ${T.ok} 8%, transparent)` : "transparent",
+          color: engineMode ? T.ok : localMode ? T.brand : T.label2,
+          border: `1px solid ${engineMode ? `color-mix(in srgb, ${T.ok} 35%, transparent)` : localMode ? `color-mix(in srgb, ${T.brand} 35%, transparent)` : T.border}`,
+          background: engineMode ? `color-mix(in srgb, ${T.ok} 8%, transparent)` : localMode ? `color-mix(in srgb, ${T.brand} 8%, transparent)` : "transparent",
           marginRight: 8,
           whiteSpace: "nowrap"
         }
-      }, channel?.mode === "engine" ? `\u26A1 ${channel.alias}` : channel ? `cli:${channel.sshEntry}` : "\u2026"),
+      }, engineMode ? `\u26A1 ${channel.alias}` : localMode ? "local transport" : channel ? `cli:${channel.sshEntry}` : "\u2026"),
       jsxs2("span", { style: { fontSize: 13, marginRight: 8, flex: 1 } }, [
         j(
           "span",

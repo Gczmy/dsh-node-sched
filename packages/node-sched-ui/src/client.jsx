@@ -776,21 +776,21 @@ function apply(cctx, config) {
 		};
 
 		const doDelete = async (alias) => {
-
 			setBusy("del:" + alias);
-
 			try {
-
-				await fetch(`/sched/ssh/hosts?alias=${encodeURIComponent(alias)}`, { method: "DELETE" });
-
+				const response = await fetch(`/sched/ssh/hosts?alias=${encodeURIComponent(alias)}`, { method: "DELETE" });
+				const result = await response.json().catch(() => ({}));
+				if (!response.ok || result.removed === false) {
+					setMsg(`失败: ${result.error ?? `HTTP ${response.status}`}`);
+					return;
+				}
 				setConfirmAlias(null);
-
 				await load();
-
-			} catch (e) { setMsg("失败: " + e.message); }
-
-			setBusy("");
-
+			} catch (e) {
+				setMsg("失败: " + e.message);
+			} finally {
+				setBusy("");
+			}
 		};
 
 
@@ -798,28 +798,32 @@ function apply(cctx, config) {
 		if (termAlias) return j(SshTerminal, { alias: termAlias, onClose: () => { setTermAlias(null); } });
 
 
+		const engineMode = binding?.mode === "engine";
+		const localMode = binding?.mode === "local";
 
 		return jsxs2("div", { style: { display: "flex", flexDirection: "column", gap: 10 } }, [
 
 			// B24: SCHED 绑定状态条
 
-			jsxs2("div", { style: { display: "flex", gap: 10, alignItems: "center", padding: "8px 12px", background: binding?.mode === "engine" ? `color-mix(in srgb, ${T.ok} 10%, transparent)` : T.bgLayer, borderRadius: 10, border: `1px solid ${binding?.mode === "engine" ? `color-mix(in srgb, ${T.ok} 30%, transparent)` : T.border}` } }, [
+			jsxs2("div", { style: { display: "flex", gap: 10, alignItems: "center", padding: "8px 12px", background: engineMode ? `color-mix(in srgb, ${T.ok} 10%, transparent)` : localMode ? `color-mix(in srgb, ${T.brand} 10%, transparent)` : T.bgLayer, borderRadius: 10, border: `1px solid ${engineMode ? `color-mix(in srgb, ${T.ok} 30%, transparent)` : localMode ? `color-mix(in srgb, ${T.brand} 30%, transparent)` : T.border}` } }, [
 
 				j("span", { style: { fontSize: 13, fontWeight: 700 } }, "SCHED"),
 
 				j("span", {
 
-					style: { fontSize: 13, color: binding?.mode === "engine" ? T.ok : T.label2, fontWeight: binding?.mode === "engine" ? 700 : 400 },
+					style: { fontSize: 13, color: engineMode ? T.ok : localMode ? T.brand : T.label2, fontWeight: engineMode || localMode ? 700 : 400 },
 
-				}, binding?.mode === "engine"
+				}, engineMode
 
 					? `→ ${binding.alias}（引擎模式，连接池复用）`
+
+					: localMode ? "→ 本地 transport（无需 SSH）"
 
 					: `→ sshEntry ${binding?.sshEntry ?? "?"}（CLI 模式）`),
 
 				j("span", { style: { flex: 1 } }),
 
-				binding?.mode === "engine" && j("button", { onClick: doUnbind, disabled: !!busy, title: "回到传统 ssh CLI 模式", style: ghostBtn },
+				engineMode && j("button", { onClick: doUnbind, disabled: !!busy, title: "回到传统 ssh CLI 模式", style: ghostBtn },
 
 					busy === "unbind" ? "解绑中…" : "解绑"),
 
@@ -891,9 +895,9 @@ function apply(cctx, config) {
 
 						// 右：操作区
 
-						boundHere
+						(localMode || boundHere)
 
-							? j("span", { key: "sb", style: { color: T.ok, fontWeight: 700, fontSize: 13, flexShrink: 0 } }, "✔ 数据源")
+							? j("span", { key: "sb", style: { color: localMode ? T.brand : T.ok, fontWeight: 700, fontSize: 13, flexShrink: 0 } }, localMode ? "本地运行" : "✔ 数据源")
 
 							: j("button", { key: "bnd", onClick: () => doBind(h.alias), disabled: !!busy, title: "设为 sched 数据源主机（引擎模式，看板数据直连该机）", style: { ...ghostBtn, color: T.brand, borderColor: `color-mix(in srgb, ${T.brand} 45%, transparent)`, flexShrink: 0 } },
 
@@ -1279,6 +1283,8 @@ function apply(cctx, config) {
 		useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, [load]);
 
 		const running = status != null && status.includes("运行中");
+		const engineMode = channel?.mode === "engine";
+		const localMode = channel?.mode === "local";
 
 		return jsxs2("div", { style: { marginBottom: 8, paddingBottom: 6, borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center" } }, [
 
@@ -1290,15 +1296,17 @@ function apply(cctx, config) {
 
 				style: { fontSize: 13, padding: "2px 8px", borderRadius: 999, flexShrink: 0,
 
-					color: channel?.mode === "engine" ? T.ok : T.label2,
+					color: engineMode ? T.ok : localMode ? T.brand : T.label2,
 
-					border: `1px solid ${channel?.mode === "engine" ? `color-mix(in srgb, ${T.ok} 35%, transparent)` : T.border}`,
+					border: `1px solid ${engineMode ? `color-mix(in srgb, ${T.ok} 35%, transparent)` : localMode ? `color-mix(in srgb, ${T.brand} 35%, transparent)` : T.border}`,
 
-					background: channel?.mode === "engine" ? `color-mix(in srgb, ${T.ok} 8%, transparent)` : "transparent",
+					background: engineMode ? `color-mix(in srgb, ${T.ok} 8%, transparent)` : localMode ? `color-mix(in srgb, ${T.brand} 8%, transparent)` : "transparent",
 
 					marginRight: 8, whiteSpace: "nowrap" },
 
-			}, channel?.mode === "engine" ? `\u26a1 ${channel.alias}` :
+			}, engineMode ? `\u26a1 ${channel.alias}` :
+
+				localMode ? "local transport" :
 
 				channel ? `cli:${channel.sshEntry}` : "\u2026"),
 
