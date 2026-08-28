@@ -8006,8 +8006,17 @@ function apply(cctx, config) {
       } catch (_) {
       }
     };
-    window.addEventListener("error", (e) => report("js-error", e.message + " @ " + (e.filename || "") + ":" + e.lineno));
-    window.addEventListener("unhandledrejection", (e) => report("unhandled-rejection", e.reason && (e.reason.stack || e.reason.message) || String(e.reason)));
+    const onError = (e) => report("js-error", e.message + " @ " + (e.filename || "") + ":" + e.lineno);
+    const onUnhandledRejection = (e) => report(
+      "unhandled-rejection",
+      e.reason && (e.reason.stack || e.reason.message) || String(e.reason)
+    );
+    window.addEventListener("error", onError);
+    window.addEventListener("unhandledrejection", onUnhandledRejection);
+    disposersUI.push(() => {
+      window.removeEventListener("error", onError);
+      window.removeEventListener("unhandledrejection", onUnhandledRejection);
+    });
   }
   const disposeSettings = cctx.slots.inject(SLOT_SETTINGS, () => cctx.slots.register({ name: SLOT_SETTINGS, id: NS, order: 90 }, StatusCard));
   disposersUI.push(disposeSettings);
