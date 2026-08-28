@@ -236,6 +236,9 @@ export class SshEngine {
 		this.opts = { ...DEFAULTS, ...options };
 		this.pool = new Map();       // alias -> record
 		this.acquireQueue = new Map();
+		this.aliasGeneration = new Map();
+		this.acquireActive = new Map();
+		this.disposed = false;
 		this.sweepTimer = setInterval(() => sweepPool(this), Math.max(10_000, this.opts.idleTimeoutMs / 4));
 		this.sweepTimer.unref?.();
 	}
@@ -290,12 +293,25 @@ export class SshEngine {
 	}
 
 	dropAlias(alias) {
+		if (
+			!this.pool.has(alias) &&
+			!this.acquireQueue.has(alias) &&
+			(this.acquireActive.get(alias) ?? 0) === 0
+		) {
+			this.aliasGeneration.delete(alias);
+			return;
+		}
+		this.aliasGeneration.set(alias, (this.aliasGeneration.get(alias) ?? 0) + 1);
 		disposeRecord(this, alias);
 	}
 
 	dispose() {
+		this.disposed = true;
 		clearInterval(this.sweepTimer);
-		for (const alias of [...this.pool.keys()]) disposeRecord(this, alias);
+		for (const alias of this.acquireQueue.keys()) {
+			this.aliasGeneration.set(alias, (this.aliasGeneration.get(alias) ?? 0) + 1);
+		}
+		for (const alias of [...this.pool.keys()]) disposeRecord(this, alias, undefined, { force: true });
 	}
 }
 
@@ -457,35 +473,75 @@ async function connectChain(engine, entry) {
 	}
 }
 
-async function acquire(engine, alias) {
-	const pending = engine.acquireQueue.get(alias);
-	if (pending !== undefined) return pending;
-	const task = doAcquire(engine, alias);
-	engine.acquireQueue.set(alias, task);
-	try {
-		return await task;
-	} finally {
-		if (engine.acquireQueue.get(alias) === task) engine.acquireQueue.delete(alias);
+function pruneAliasGeneration(engine, alias) {
+	if (
+		!engine.pool.has(alias) &&
+		!engine.acquireQueue.has(alias) &&
+		(engine.acquireActive.get(alias) ?? 0) === 0
+	) {
+		engine.aliasGeneration.delete(alias);
+		engine.acquireActive.delete(alias);
 	}
 }
 
-async function doAcquire(engine, alias) {
+async function acquire(engine, alias) {
+	if (engine.disposed) throw new Error("SSH engine disposed");
+	const generation = engine.aliasGeneration.get(alias) ?? 0;
+	const pending = engine.acquireQueue.get(alias);
+	if (pending?.generation === generation) return pending.promise;
+	engine.aliasGeneration.set(alias, generation);
+	engine.acquireActive.set(alias, (engine.acquireActive.get(alias) ?? 0) + 1);
+	const task = doAcquire(engine, alias, generation);
+	const current = { generation, promise: task };
+	engine.acquireQueue.set(alias, current);
+	try {
+		return await task;
+	} finally {
+		if (engine.acquireQueue.get(alias) === current) engine.acquireQueue.delete(alias);
+		engine.acquireActive.set(alias, Math.max(0, (engine.acquireActive.get(alias) ?? 1) - 1));
+		pruneAliasGeneration(engine, alias);
+	}
+}
+
+async function doAcquire(engine, alias, generation) {
 	const entry = engine.store.find(alias);
 	if (!entry) throw new Error(`alias '${alias}' not found — add it first`);
 	const { client, hops } = await connectChain(engine, entry);
-	const record = { client, hops, idleAt: Date.now(), pinned: false, broken: false, inFlight: 0 };
+	if (engine.disposed || (engine.aliasGeneration.get(alias) ?? 0) !== generation) {
+		endRecordChain({ client, hops });
+		throw new Error(`alias '${alias}' was invalidated while connecting`);
+	}
+	const record = {
+		client, hops, idleAt: Date.now(), pinned: false, broken: false,
+		inFlight: 0, disposed: false, closed: false,
+	};
 	client.on("error", () => { record.broken = true; });
 	client.on("close", () => { record.broken = true; });
 	engine.pool.set(alias, record);
 	return record;
 }
 
-export function disposeRecord(engine, alias, record) {
+export function disposeRecord(engine, alias, record, { force = false } = {}) {
 	const current = engine.pool.get(alias);
+	if (current === undefined) {
+		if (record?.disposed) closeRecord(record, force);
+		return;
+	}
 	if (record !== undefined && current !== record) return; // replaced concurrently
-	if (current === undefined) return;
 	engine.pool.delete(alias);
-	endRecordChain(current);
+	current.disposed = true;
+	if (force) closeRecord(current, true); else closeRecordIfIdle(current);
+	pruneAliasGeneration(engine, alias);
+}
+
+function closeRecordIfIdle(record) {
+	if (!record.closed && record.inFlight === 0) closeRecord(record);
+}
+
+function closeRecord(record, force = false) {
+	if (record.closed || (!force && record.inFlight > 0)) return;
+	record.closed = true;
+	endRecordChain(record);
 }
 
 function endRecordChain(record) {
@@ -523,6 +579,7 @@ async function withClient(engine, alias, fn, attempts = 3) {
 			disposeRecord(engine, alias, record);
 		} finally {
 			record.inFlight -= 1;
+			if (record.disposed) closeRecordIfIdle(record);
 		}
 	}
 	throw lastError instanceof Error ? lastError : new Error(String(lastError));
