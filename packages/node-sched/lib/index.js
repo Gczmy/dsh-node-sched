@@ -22,6 +22,7 @@ import cp from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import z from "@deepseek-ai/schemastery";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { WebSocketServer } from "ws";
@@ -182,7 +183,7 @@ function apply(ctx, config) {
 				config.sshEntry = ov.sshEntry.trim();
 				ctx.logger.info("[node-sched] ssh 入口覆盖(持久化): %s", config.sshEntry);
 			}
-			if (ov && typeof ov.schedAlias === "string" && ov.schedAlias.trim()) {
+			if (ov && typeof ov.schedAlias === "string" && ov.schedAlias.trim() && transportMode !== "local") {
 				boundAlias = ov.schedAlias.trim();
 				ctx.logger.info("[node-sched] sched 主机绑定(持久化): %s (引擎模式)", boundAlias);
 			}
@@ -641,7 +642,7 @@ const SCREEN_RESULT_PREFIX_BYTES = 2 * 1024 * 1024;
 		const uploadRemote = async (content, target = captureTransportTarget()) => {
 			if (!/^\s*\{/.test(content)) throw new Error("content is not a JSON object");
 			JSON.parse(content);
-			const name = `nodesched-upload-${Date.now()}.json`;
+			const name = `nodesched-upload-${Date.now()}-${randomUUID()}.json`;
 			// Transport-local mode writes directly beside the local daemon.
 			if (target.mode === "local") {
 				const inboxDir = path.join(os.homedir(), ".sched", "inbox");
@@ -1010,9 +1011,14 @@ const SCREEN_RESULT_PREFIX_BYTES = 2 * 1024 * 1024;
 			const remoteCmd = `tail -n 50 -F $HOME/.sched/${safeNode}/scheduler.log 2>/dev/null`;
 			let buffer = "";
 			const onLine = (text) => {
+				if (tailDisposed || generation !== tailGeneration || clients.size === 0) return;
 				buffer += text;
 				let at;
 				while ((at = buffer.indexOf("\n")) !== -1) {
+					if (tailDisposed || generation !== tailGeneration || clients.size === 0) {
+						buffer = "";
+						return;
+					}
 					const line = buffer.slice(0, at).trimEnd();
 					buffer = buffer.slice(at + 1);
 					if (line) broadcast({ type: "log", line });

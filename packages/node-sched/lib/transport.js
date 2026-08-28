@@ -1,4 +1,5 @@
 import cp from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 import { appendLimitedOutput, finalizeLimitedOutput, limitedOutputText } from "./output-limit.js";
 
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -97,6 +98,8 @@ export class LocalTransport {
 			stdio: ["ignore", "pipe", "pipe"],
 			detached: true,
 		});
+		const stdoutDecoder = new StringDecoder("utf8");
+		const stderrDecoder = new StringDecoder("utf8");
 		let closed = false;
 		let closeNotified = false;
 		let onData;
@@ -129,10 +132,20 @@ export class LocalTransport {
 			if (onData) onData(chunk);
 			else pendingChunks.push(chunk);
 		};
-		child.stdout.on("data", deliver);
-		child.stderr.on("data", deliver);
+		child.stdout.on("data", (chunk) => {
+			const text = stdoutDecoder.write(chunk);
+			if (text) deliver(Buffer.from(text, "utf8"));
+		});
+		child.stderr.on("data", (chunk) => {
+			const text = stderrDecoder.write(chunk);
+			if (text) deliver(Buffer.from(text, "utf8"));
+		});
 		const ended = () => {
 			if (closed) return;
+			const stdoutTail = stdoutDecoder.end();
+			const stderrTail = stderrDecoder.end();
+			if (stdoutTail) deliver(Buffer.from(stdoutTail, "utf8"));
+			if (stderrTail) deliver(Buffer.from(stderrTail, "utf8"));
 			closed = true;
 			this.streams.delete(session);
 			if (onClose && !closeNotified) {
