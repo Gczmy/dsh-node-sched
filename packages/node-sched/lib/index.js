@@ -26,6 +26,7 @@ import z from "@deepseek-ai/schemastery";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { WebSocketServer } from "ws";
 import { HostStore, SshEngine, openExecStream } from "./ssh-engine.js";
+import { LocalTransport } from "./transport.js";
 
 const name = "node-sched";
 
@@ -45,7 +46,9 @@ const Config = z.object({
 	/** ConnectTimeout passed to ssh for every invocation (seconds). */
 	connectTimeoutSec: z.number().min(5).max(120).default(20),
 	/** Fallback polling interval (seconds) when the events tail is unavailable. */
-	pollFallbackSec: z.number().min(10).max(600).default(30)
+	pollFallbackSec: z.number().min(10).max(600).default(30),
+	/** Transport for sched commands: auto keeps SSH compatibility, local runs on this host. */
+	transport: z.union([z.const("auto"), z.const("local")]).default("auto")
 });
 
 const inject = ["tools", "systemPrompt", "webServer"];
@@ -160,8 +163,28 @@ function apply(ctx, config) {
 	// ── B24: 内嵌 SSH 引擎（先于 runRemote 创建：绑定后 sched 命令走引擎通道）──
 	const sshStore = new HostStore();
 	const sshEngine = new SshEngine(sshStore);
+	const localTransport = new LocalTransport();
 	/** 绑定的 sched 主机别名；null = 传统 ssh CLI 模式 (config.sshEntry)。 */
 	let boundAlias = null;
+	const entryFile = path.join(os.homedir(), ".dsh", "nodesched_entry.json");
+	let transportMode = config.transport === "local" ? "local" : "auto";
+	try {
+		if (fs.existsSync(entryFile)) {
+			const ov = JSON.parse(fs.readFileSync(entryFile, "utf-8"));
+			if (ov && (ov.mode === "auto" || ov.mode === "local")) transportMode = ov.mode;
+			if (ov && typeof ov.sshEntry === "string" && ov.sshEntry.trim()) {
+				config.sshEntry = ov.sshEntry.trim();
+				ctx.logger.info("[node-sched] ssh 入口覆盖(持久化): %s", config.sshEntry);
+			}
+			if (ov && typeof ov.schedAlias === "string" && ov.schedAlias.trim()) {
+				boundAlias = ov.schedAlias.trim();
+				ctx.logger.info("[node-sched] sched 主机绑定(持久化): %s (引擎模式)", boundAlias);
+			}
+		}
+	} catch (e) {
+		ctx.logger.warn("[node-sched] 入口覆盖文件读取失败(忽略): %s", e);
+	}
+	const useLocalTransport = () => transportMode === "local";
 
 	// ── B24c: 交互式 2FA 桥接 ──
 	// 质询 → WS 广播给看板 → 用户输入动态码 → POST /sched/ssh/2fa-answer 回来。
@@ -195,6 +218,7 @@ function apply(ctx, config) {
 	 * 回落传统 ssh CLI 子进程 (config.sshEntry)。引擎故障诚实报错，不静默回退。
 	 */
 	function runRemote(args, opts = {}) {
+		if (useLocalTransport()) return localTransport.exec(args, opts);
 		if (boundAlias) {
 			return sshEngine.exec(boundAlias, args, opts.timeoutMs).then(
 				(r) => ({
@@ -223,6 +247,7 @@ function apply(ctx, config) {
 	const INBOX = "$HOME/.sched/inbox";
 	let screenExecSeq = 0;
 	async function screenExec(cmd, { timeoutMs = 60_000 } = {}) {
+		if (useLocalTransport()) return localTransport.exec(cmd, { timeoutMs });
 		const id = `se${Date.now().toString(36)}${++screenExecSeq}`;
 		const out = `${INBOX}/${id}.out`;
 		const wrapped = `{ echo "--- begin ${id}"; (${cmd}); echo "--- end rc=$?"; } > ${out} 2>&1`;
@@ -448,7 +473,10 @@ function apply(ctx, config) {
 			if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = undefined; }
 		}
 	const routeDisposers = [];
-	let postApplyCleanup = null;
+	let postApplyCleanup = () => {
+		localTransport.dispose();
+		sshEngine.dispose();
+	};
 	let heartbeat;
 	if (ctx.webServer) {
 		const json = async (res, body, code = 200) => {
@@ -474,6 +502,14 @@ function apply(ctx, config) {
 			if (!/^\s*\{/.test(content)) throw new Error("content is not a JSON object");
 			JSON.parse(content);
 			const name = `nodesched-upload-${Date.now()}.json`;
+			// Transport-local mode writes directly beside the local daemon.
+			if (useLocalTransport()) {
+				const inboxDir = path.join(os.homedir(), ".sched", "inbox");
+				const target = path.join(inboxDir, name);
+				fs.mkdirSync(inboxDir, { recursive: true, mode: 0o700 });
+				fs.writeFileSync(target, content, { encoding: "utf8", mode: 0o600 });
+				return target;
+			}
 			// B24: 引擎模式走连接池 exec+stdin；CLI 模式走 ssh 子进程 stdin
 			if (boundAlias) {
 				const r = await sshEngine.execStdin(boundAlias, `mkdir -p ~/.sched/inbox && cat > ~/.sched/inbox/${name}`, content, 60_000);
@@ -499,24 +535,6 @@ function apply(ctx, config) {
 			return JSON.parse(body);
 		};
 
-		// B20/B24: 双网络入口 + sched 主机绑定。覆盖文件优先于 profile 配置；
-		// ssh 面板可绑定主机（引擎模式）并持久化到该文件。
-		const entryFile = path.join(os.homedir(), ".dsh", "nodesched_entry.json");
-		try {
-			if (fs.existsSync(entryFile)) {
-				const ov = JSON.parse(fs.readFileSync(entryFile, "utf-8"));
-				if (ov && typeof ov.sshEntry === "string" && ov.sshEntry.trim()) {
-					config.sshEntry = ov.sshEntry.trim();
-					ctx.logger.info("[node-sched] ssh 入口覆盖(持久化): %s", config.sshEntry);
-				}
-				if (ov && typeof ov.schedAlias === "string" && ov.schedAlias.trim()) {
-					boundAlias = ov.schedAlias.trim();
-					ctx.logger.info("[node-sched] sched 主机绑定(持久化): %s (引擎模式)", boundAlias);
-				}
-			}
-		} catch (e) {
-			ctx.logger.warn("[node-sched] 入口覆盖文件读取失败(忽略): %s", e);
-		}
 		startRefresher();
 
 		routeDisposers.push(
@@ -750,6 +768,7 @@ function apply(ctx, config) {
 		/** @type {import('./ssh-engine.js').ExecStream | undefined} */
 		let tailStream;
 		let tailRestartTimer;
+		let tailDisposed = false;
 
 		function broadcast(obj) {
 			const msg = JSON.stringify(obj);
@@ -766,14 +785,22 @@ function apply(ctx, config) {
 		 * own hostname dir is empty) — so resolve `node` from the remote
 		 * ~/.sched/config.json rather than `hostname`. */
 		async function resolveNode() {
+			if (useLocalTransport()) {
+				try {
+					return JSON.parse(fs.readFileSync(path.join(os.homedir(), ".sched", "config.json"), "utf8")).node;
+				} catch {
+					return undefined;
+				}
+			}
 			const res = await runRemote("cat $HOME/.sched/config.json");
 			if (!res.ok) return undefined;
 			try { return JSON.parse(res.stdout).node; } catch { return undefined; }
 		}
 
 		async function startTail() {
-			if (tailChild || clients.size === 0) return;
+			if (tailDisposed || tailChild || tailStream || clients.size === 0) return;
 			const nodeName = await resolveNode();
+			if (tailDisposed || clients.size === 0) return;
 			if (!nodeName) {
 				ctx.logger.error("[node-sched] cannot resolve sched node from remote ~/.sched/config.json");
 				return;
@@ -792,6 +819,7 @@ function apply(ctx, config) {
 			};
 			const onEnd = () => {
 				tailChild = undefined; tailStream = undefined;
+				if (tailDisposed) return;
 				if (clients.size > 0 && !tailRestartTimer) {
 					tailRestartTimer = setTimeout(() => {
 						tailRestartTimer = undefined;
@@ -799,6 +827,18 @@ function apply(ctx, config) {
 					}, 5_000);
 				}
 			};
+			if (useLocalTransport()) {
+				localTransport.openStream(remoteCmd).then((stream) => {
+					if (tailDisposed || tailChild || tailStream || clients.size === 0) { stream.close(); return; }
+					tailStream = stream;
+					stream.onData = (chunk) => onLine(chunk.toString("utf8"));
+					stream.onClose = onEnd;
+				}).catch((e) => {
+					ctx.logger.warn("[node-sched] local tail failed: %s", String(e.message ?? e));
+					onEnd();
+				});
+				return;
+			}
 			// B24: 引擎模式走独立 exec 流通道；CLI 模式走 ssh 子进程
 			if (boundAlias) {
 				openExecStream(sshEngine, boundAlias, remoteCmd).then((stream) => {
@@ -846,7 +886,15 @@ function apply(ctx, config) {
 
 		// ── B22: 内嵌 SSH 引擎（复刻自 Apache-2.0 dsh-ssh，见 ssh-engine.js）──
 		// 引擎实例在 apply() 顶部创建（B24: runRemote 双通道需要）；此处仅注册清理。
-		postApplyCleanup = () => sshEngine.dispose();
+		postApplyCleanup = () => {
+			tailDisposed = true;
+			if (tailRestartTimer) {
+				clearTimeout(tailRestartTimer);
+				tailRestartTimer = undefined;
+			}
+			localTransport.dispose();
+			sshEngine.dispose();
+		};
 		/** Loopback-only fence: these endpoints execute remote commands. */
 		const loopbackOnly = (req, res) => {
 			const remote = req.socket?.remoteAddress ?? "";
