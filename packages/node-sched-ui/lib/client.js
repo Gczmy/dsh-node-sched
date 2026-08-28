@@ -6583,7 +6583,8 @@ function apply(cctx, config) {
       let closed = false;
       let timer;
       const connect = () => {
-        ws = new WebSocket(`ws://${location.host}/sched/ws/events`);
+        const proto = location.protocol === "https:" ? "wss://" : "ws://";
+        ws = new WebSocket(`${proto}${location.host}/sched/ws/events`);
         ws.onopen = () => setState((s) => ({ ...s, connected: true }));
         ws.onmessage = (e) => {
           const m = JSON.parse(e.data);
