@@ -16,6 +16,7 @@
     "lib/request-guard.js",
     "lib/upload-path.js",
     "lib/screen-result.js",
+    "lib/output-limit.js",
     "lib/entry-override.js"
   ],
   "license": "MIT",

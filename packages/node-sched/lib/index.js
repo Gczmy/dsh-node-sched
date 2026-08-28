@@ -31,7 +31,8 @@ import { LocalTransport } from "./transport.js";
 import { isLoopbackAddress, loopbackRequestAllowed, originHostAllowed } from "./request-guard.js";
 import { parseUploadedPath } from "./upload-path.js";
 import { mergeEntryOverride } from "./entry-override.js";
-import { parseScreenResult } from "./screen-result.js";
+import { parseScreenEnd, parseScreenResult } from "./screen-result.js";
+import { appendLimitedOutput, finalizeLimitedOutput, limitedOutputText } from "./output-limit.js";
 
 const name = "node-sched";
 
@@ -91,12 +92,30 @@ return function runRemote(args, {
 			{ timeout: timeoutMs },
 		);
 		return new Promise((resolve) => {
-			let stdout = "";
-			let stderr = "";
-			child.stdout.on("data", (d) => { stdout += d; });
-			child.stderr.on("data", (d) => { stderr += d; });
-			child.on("error", (err) => resolve({ ok: false, code: -1, stdout, stderr: `${stderr}${err.message}` }));
-			child.on("close", (code) => resolve({ ok: code === 0, code: code ?? -1, stdout, stderr }));
+			const stdout = { text: "", bytes: 0, droppedBytes: 0, truncated: false };
+			const stderr = { text: "", bytes: 0, droppedBytes: 0, truncated: false };
+			child.stdout.on("data", (d) => appendLimitedOutput(stdout, d, maxOutputBytes));
+			child.stderr.on("data", (d) => appendLimitedOutput(stderr, d, maxOutputBytes));
+			child.on("error", (err) => {
+				finalizeLimitedOutput(stdout);
+				finalizeLimitedOutput(stderr);
+				resolve({
+					ok: false,
+					code: -1,
+					stdout: limitedOutputText(stdout),
+					stderr: `${limitedOutputText(stderr)}${err.message}`,
+				});
+			});
+			child.on("close", (code) => {
+				finalizeLimitedOutput(stdout);
+				finalizeLimitedOutput(stderr);
+				resolve({
+					ok: code === 0,
+					code: code ?? -1,
+					stdout: limitedOutputText(stdout),
+					stderr: limitedOutputText(stderr),
+				});
+			});
 		});
 	};
 }

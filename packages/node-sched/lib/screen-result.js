@@ -14,3 +14,10 @@ export function parseScreenResult(output, id) {
 	const code = Number.parseInt(end[1], 10);
 	return { ok: code === 0, code, stdout, stderr: "" };
 }
+
+export function parseScreenEnd(output, id) {
+	const marker = escapeRegExp(id);
+	const end = new RegExp(`^--- end rc=(\\d+) id=${marker}\\r?$`, "m").exec(String(output ?? ""));
+	if (!end) return undefined;
+	return { code: Number.parseInt(end[1], 10) };
+}
