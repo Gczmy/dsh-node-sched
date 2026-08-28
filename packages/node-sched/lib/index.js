@@ -33,6 +33,7 @@ import { parseUploadedPath } from "./upload-path.js";
 import { mergeEntryOverride } from "./entry-override.js";
 import { parseScreenEnd, parseScreenResult } from "./screen-result.js";
 import { appendLimitedOutput, finalizeLimitedOutput, limitedOutputText } from "./output-limit.js";
+import { redactCommand } from "./redact.js";
 
 const name = "node-sched";
 
@@ -1284,7 +1285,11 @@ const targetKey = statusTargetKey();
 						const body = await readBodyJson(req);
 						const command = String(body.command ?? "").trim();
 						if (!command) return void json(res, { error: "command required" }, 400);
-						ctx.logger.warn("[node-sched] audit ssh-exec %s: %s", body.alias, command.slice(0, 120));
+						ctx.logger.warn(
+							"[node-sched] audit ssh-exec %s: %s",
+							redactCommand(body.alias, 80),
+							redactCommand(command),
+						);
 						// B24g: 引擎连接失败时回退 CLI 通道 (ControlMaster mux 可用时最可靠)
 						let result;
 						try {
