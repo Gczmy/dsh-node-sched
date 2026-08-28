@@ -6529,8 +6529,22 @@ function apply(cctx, config) {
   const barFill = (pct) => ({ height: "100%", width: `${Math.max(0, Math.min(100, pct))}%`, background: T.brand });
   const Badge = ({ s }) => j("span", { style: badge(s) }, s);
   async function post(action, body) {
-    const r = await fetch(`/sched/api/${action}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-    return r.json();
+    const r = await fetch(`/sched/api/${action}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    const text = await r.text();
+    let payload;
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      throw new Error(`HTTP ${r.status}: ${text.slice(0, 160) || "non-JSON response"}`);
+    }
+    if (!r.ok && payload && typeof payload === "object" && payload.ok === void 0) {
+      payload.ok = false;
+    }
+    return payload;
   }
   async function getText(action, params = "") {
     const r = await fetch(`/sched/api/${action}${params}`);
@@ -7605,6 +7619,8 @@ function apply(cctx, config) {
     const [snap, refreshSnap] = useSnapshot("/sched/api/status", 2e4);
     const [tab, setTab] = useState("batches");
     const [opMsg, setOpMsg] = useState("");
+    const pendingOps = useRef(/* @__PURE__ */ new Set());
+    const [, setPendingOpsVersion] = useState(0);
     const [logTask, setLogTask] = useState(null);
     const [projFilter, setProjFilter] = useState("");
     const raw = snap?.raw;
@@ -7612,9 +7628,21 @@ function apply(cctx, config) {
     const projects = [...new Set((raw?.batches ?? []).map((b) => b.project).filter(Boolean))];
     const jobsAll = raw?.jobs;
     const runOp = async (op, id) => {
-      const r = await post("op", { op, id });
-      setOpMsg(`${op} ${id ?? ""}: ${r.ok ? "ok" : `fail (${r.error ?? r.code})`} ${r.text ? "\u2014 " + String(r.text).slice(0, 120) : ""}`);
-      refreshSnap();
+      const key = `${op}:${id ?? ""}`;
+      if (pendingOps.current.has(key)) return;
+      pendingOps.current.add(key);
+      setPendingOpsVersion((version) => version + 1);
+      try {
+        const r = await post("op", { op, id });
+        if (!r || typeof r !== "object") throw new Error("invalid JSON response");
+        setOpMsg(`${op} ${id ?? ""}: ${r.ok ? "ok" : `fail (${r.error ?? r.code})`} ${r.text ? "\u2014 " + String(r.text).slice(0, 120) : ""}`);
+        refreshSnap();
+      } catch (error) {
+        setOpMsg(`${op} ${id ?? ""}: fail (${String(error?.message ?? error).slice(0, 160)})`);
+      } finally {
+        pendingOps.current.delete(key);
+        setPendingOpsVersion((version) => version + 1);
+      }
     };
     return jsxs2("div", { style: overlayStyle }, [
       jsxs2("div", { style: panelStyle }, [
