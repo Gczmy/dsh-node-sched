@@ -896,7 +896,7 @@ persistEntryOverride({ sshEntry: entry });
 						const { content } = await readBodyJson(req);
 						const remotePath = await uploadRemote(String(content), target);
 						try {
-							const r = await operate("submit", `${S} submit ${shellQuote(remotePath)}`, { target });
+const r = await operate("submit", `${S} submit ${shellQuote(remotePath)}`, { target });
 							await json(res, { ok: r.ok, code: r.code, text: clip((r.stdout || r.stderr || "").trim(), 2000) });
 						} finally {
 							await runOnTarget(target, `rm -f ${shellQuote(remotePath)}`).catch(() => {});
