@@ -1,32 +1,13 @@
 import cp from "node:child_process";
+import { appendLimitedOutput, finalizeLimitedOutput, limitedOutputText } from "./output-limit.js";
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 
-function appendOutput(target, chunk, maxBytes) {
-	if (target.truncated) return;
-	const text = chunk.toString("utf8");
-	const remaining = maxBytes - target.bytes;
-	if (remaining <= 0) {
-		target.text += "…[output truncated]";
-		target.truncated = true;
-		return;
-	}
-	if (Buffer.byteLength(text, "utf8") > remaining) {
-		let cut = text;
-		while (Buffer.byteLength(cut, "utf8") > remaining) cut = cut.slice(0, -1);
-		target.text += cut + "…[output truncated]";
-		target.bytes = maxBytes;
-		target.truncated = true;
-		return;
-	}
-	target.text += text;
-	target.bytes += Buffer.byteLength(text, "utf8");
-}
-
 function isBrokenPipe(error) {
 	return error?.code === "EPIPE";
 }
+
 function runChild(command, {
 	timeoutMs = DEFAULT_TIMEOUT_MS,
 	stdinData,
@@ -51,11 +32,13 @@ function runChild(command, {
 			if (settled) return;
 			settled = true;
 			clearTimeout(timer);
+			finalizeLimitedOutput(stdout);
+			finalizeLimitedOutput(stderr);
 			onClose?.(child);
 			resolve({
 				...result,
-				stdout: stdout.text,
-				stderr: stderr.text || result.error || "",
+				stdout: limitedOutputText(stdout),
+				stderr: limitedOutputText(stderr) || result.error || "",
 				timedOut,
 				durationMs: Date.now() - started,
 			});
@@ -65,8 +48,8 @@ function runChild(command, {
 			try { process.kill(-child.pid, "SIGKILL"); } catch { try { child.kill("SIGKILL"); } catch {} }
 			finish({ ok: false, code: -1, error: `command timed out after ${budget} ms` });
 		}, budget);
-		child.stdout.on("data", (chunk) => appendOutput(stdout, chunk, maxOutputBytes));
-		child.stderr.on("data", (chunk) => appendOutput(stderr, chunk, maxOutputBytes));
+		child.stdout.on("data", (chunk) => appendLimitedOutput(stdout, chunk, maxOutputBytes));
+		child.stderr.on("data", (chunk) => appendLimitedOutput(stderr, chunk, maxOutputBytes));
 		child.on("error", (error) => finish({ ok: false, code: -1, error: error.message }));
 		child.on("close", (code) => {
 			if (settled) return;

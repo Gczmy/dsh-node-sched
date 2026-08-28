@@ -261,6 +261,10 @@ export class SshEngine {
 		return execCommand(this, alias, command, timeoutMs);
 	}
 
+	async execOnce(alias, command, timeoutMs) {
+		return execCommand(this, alias, command, timeoutMs, undefined, 1);
+	}
+
 	/** 带 stdin 载荷的执行（远端临时文件写入等）。 */
 	async execStdin(alias, command, stdinData, timeoutMs) {
 		return execCommand(this, alias, command, timeoutMs, stdinData);
@@ -529,7 +533,7 @@ function appendOutput(target, chunk, maxBytes) {
 	target.text += chunk.toString("utf8");
 }
 
-export async function execCommand(engine, alias, command, timeoutMs, stdinData) {
+export async function execCommand(engine, alias, command, timeoutMs, stdinData, attempts = 3) {
 	const started = Date.now();
 	const budget = timeoutMs !== undefined && timeoutMs > 0 ? timeoutMs : engine.opts.defaultExecTimeoutMs;
 	return withClient(engine, alias, async (client) => {
@@ -584,7 +588,7 @@ export async function execCommand(engine, alias, command, timeoutMs, stdinData) 
 				});
 			});
 		});
-	});
+	}, attempts);
 }
 
 /**

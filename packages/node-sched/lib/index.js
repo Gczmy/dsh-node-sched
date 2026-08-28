@@ -75,12 +75,16 @@ class WriteGate {
 }
 
 function makeRunner(cp, cfg) {
-	return function runRemote(args, { timeoutMs = 120_000 } = {}) {
+return function runRemote(args, {
+		timeoutMs = 120_000,
+		maxOutputBytes = 2 * 1024 * 1024,
+		sshEntry = cfg.sshEntry,
+	} = {}) {
 		// spawn with an argv array: no local shell => no local $-expansion;
 		// the remote command reaches the remote bash verbatim ($HOME expands there).
 		const child = cp.spawn(
 			"ssh",
-			["-o", `ConnectTimeout=${cfg.connectTimeoutSec}`, "-o", "BatchMode=yes", cfg.sshEntry, args],
+			["-o", `ConnectTimeout=${cfg.connectTimeoutSec}`, "-o", "BatchMode=yes", sshEntry, args],
 			{ timeout: timeoutMs },
 		);
 		return new Promise((resolve) => {
@@ -219,10 +223,18 @@ function apply(ctx, config) {
 	 * 走内嵌引擎的 ssh2 持久连接池（复用 TCP、无进程 fork 开销）；未绑定时
 	 * 回落传统 ssh CLI 子进程 (config.sshEntry)。引擎故障诚实报错，不静默回退。
 	 */
-	function runRemote(args, opts = {}) {
-		if (useLocalTransport()) return localTransport.exec(args, opts);
-		if (boundAlias) {
-			return sshEngine.exec(boundAlias, args, opts.timeoutMs).then(
+	function captureTransportTarget() {
+		if (useLocalTransport()) return { mode: "local" };
+		if (boundAlias) return { mode: "engine", alias: boundAlias };
+		return { mode: "cli", sshEntry: config.sshEntry };
+	}
+
+	function runOnTarget(target, args, opts = {}) {
+		if (target.mode === "local") return localTransport.exec(args, opts);
+		if (target.mode === "engine") {
+			return (opts.retry === false
+				? sshEngine.execOnce(target.alias, args, opts.timeoutMs)
+				: sshEngine.exec(target.alias, args, opts.timeoutMs)).then(
 				(r) => ({
 					ok: r.success,
 					code: r.exitCode ?? -1,
@@ -231,11 +243,15 @@ function apply(ctx, config) {
 				}),
 				(e) => ({
 					ok: false, code: -1, stdout: "",
-					stderr: `[ssh-engine:${boundAlias}] ${String(e?.message ?? e)}`,
+stderr: `[ssh-engine:${target.alias}] ${formatSshError(e)}`,
 				}),
 			);
 		}
-		return runRemoteCli(args, opts);
+		return runRemoteCli(args, { ...opts, sshEntry: target.sshEntry });
+	}
+
+	function runRemote(args, opts = {}) {
+		return runOnTarget(captureTransportTarget(), args, opts);
 	}
 
 		// batch.json 上传：内容经 ssh stdin 写远端临时文件（本地不落盘），
@@ -247,43 +263,91 @@ function apply(ctx, config) {
 	// 输出重定向到共享盘结果文件, 轮询该文件取回 stdout/stderr。
 	const SCREEN_SESSION = "3323979.ambior1";
 	const INBOX = "$HOME/.sched/inbox";
+const SCREEN_RESULT_PREFIX_BYTES = 2 * 1024 * 1024;
+	const MAX_SCREEN_STUFF_BYTES = 640;
 	let screenExecSeq = 0;
-	async function screenExec(cmd, { timeoutMs = 60_000 } = {}) {
-		if (useLocalTransport()) return localTransport.exec(cmd, { timeoutMs });
+	async function screenExec(cmd, { timeoutMs = 60_000, target = captureTransportTarget() } = {}) {
+		if (target.mode === "local") return runOnTarget(target, cmd, { timeoutMs });
+		if (target.mode === "engine") {
+			return runOnTarget(target, cmd, { timeoutMs, retry: false });
+		}
 		const id = `se${Date.now().toString(36)}${++screenExecSeq}`;
 		const out = `${INBOX}/${id}.out`;
-		const wrapped = `{ echo "--- begin ${id}"; (${cmd}); echo "--- end rc=$?"; } > ${out} 2>&1`;
-		// 注入两行: 先确保 inbox 存在, 再执行
+		const markerOut = `${INBOX}/${id}.done`;
+		const remoteOpts = { timeoutMs: 15_000, sshEntry: target.sshEntry };
+		const cleanup = () => runRemoteCli(
+			`rm -f ${out} ${markerOut}`,
+			{ ...remoteOpts, maxOutputBytes: 128 },
+		).catch(() => {});
+		const wrapped = `{ echo "--- begin ${id}"; (${cmd}); rc=$?; printf "\\n--- end rc=%s id=${id}\\n" "$rc" > ${markerOut}; } > ${out} 2>&1`;
 		const stuff = `mkdir -p ${INBOX} && ${wrapped}\n`;
-		await new Promise((resolve, reject) => {
-			let errBuf = "";
-			const child = cp.spawn("ssh",
-				["-o", `ConnectTimeout=${config.connectTimeoutSec}`, "-o", "BatchMode=yes",
-					config.sshEntry,
-					`screen -S ${SCREEN_SESSION} -X stuff ${shellQuote(stuff)}`],
-				{ timeout: 15_000 });
-			child.stderr.on("data", (d) => { errBuf += d; });
-			child.on("close", (c) => c === 0 ? resolve() : reject(new Error(`screen stuff failed rc=${c}: ${errBuf.trim().slice(0, 200)}`)));
-		});
-		// 轮询结果文件 (NFS 延迟容忍)
-		const deadline = Date.now() + timeoutMs;
-		while (Date.now() < deadline) {
-			await new Promise((r) => setTimeout(r, 1500));
-			const pr = await runRemoteCli(`cat ${out} 2>/dev/null`, { timeoutMs: 15_000 });
-			if (pr.stdout.includes(`--- end rc=`)) {
-				const m = pr.stdout.match(/--- end rc=(\d+)/);
-				// 取 begin 标记与 end 标记之间的正文作为命令输出
-				const body = pr.stdout.split(/--- begin \S+\n?/)[1] || "";
-				const text = body.split("\n--- end rc=")[0].trim();
-				return {
-					ok: !!m && m[1] === "0",
-					code: m ? parseInt(m[1], 10) : -1,
-					stdout: text,
-					stderr: "",
-				};
-			}
+		if (Buffer.byteLength(stuff, "utf8") > MAX_SCREEN_STUFF_BYTES) {
+			throw new Error(`screenExec command too long (max ${MAX_SCREEN_STUFF_BYTES} bytes)`);
 		}
-		throw new Error(`screenExec 超时 (${timeoutMs}ms): ${cmd.slice(0, 80)}`);
+		try {
+			await new Promise((resolve, reject) => {
+				let errBuf = "";
+				const child = cp.spawn("ssh",
+					["-o", `ConnectTimeout=${config.connectTimeoutSec}`, "-o", "BatchMode=yes",
+						target.sshEntry,
+						`screen -S ${SCREEN_SESSION} -X stuff ${shellQuote(stuff)}`],
+					{ timeout: 15_000 });
+				child.stderr.on("data", (d) => { errBuf += d; });
+				child.on("close", (c) => c === 0 ? resolve() : reject(new Error(`screen stuff failed rc=${c}: ${errBuf.trim().slice(0, 200)}`)));
+			});
+			// 轮询结果文件 (NFS 延迟容忍). Completion lives in a separate
+			// marker file so descendants retaining stdout cannot hide the result.
+			const deadline = Date.now() + timeoutMs;
+			while (Date.now() < deadline) {
+				await new Promise((r) => setTimeout(r, 1500));
+				const markerResult = await runRemoteCli(
+					`cat ${markerOut} 2>/dev/null`,
+					{ ...remoteOpts, maxOutputBytes: 1024 },
+				);
+				const marker = parseScreenEnd(markerResult.stdout, id);
+				if (!marker) continue;
+				const prefix = await runRemoteCli(
+					`head -c ${SCREEN_RESULT_PREFIX_BYTES} ${out} 2>/dev/null`,
+					{ ...remoteOpts, maxOutputBytes: SCREEN_RESULT_PREFIX_BYTES + 1024 },
+				);
+				if (!prefix.ok) {
+					const detail = prefix.stderr || prefix.stdout || `exit ${prefix.code}`;
+					return {
+						ok: marker.code === 0,
+						code: marker.code,
+						stdout: `[screen output unavailable: ${detail}]`,
+						stderr: detail,
+					};
+				}
+				const sizeResult = await runRemoteCli(
+					`wc -c < ${out} 2>/dev/null`,
+					{ ...remoteOpts, maxOutputBytes: 128 },
+				);
+				const outputBytes = Number.parseInt(sizeResult.stdout.trim(), 10);
+				const result = parseScreenResult(
+					`${prefix.stdout}\n--- end rc=${marker.code} id=${id}\n`,
+					id,
+				);
+				if (!result) {
+					return {
+						ok: marker.code === 0,
+						code: marker.code,
+						stdout: `${prefix.stdout}\n[screen output framing invalid]`,
+						stderr: "screen output framing invalid",
+					};
+				}
+				if (Number.isFinite(outputBytes) && outputBytes > SCREEN_RESULT_PREFIX_BYTES) {
+					return {
+						...result,
+						stdout: `${result.stdout}\n…[screen output truncated after ${SCREEN_RESULT_PREFIX_BYTES} bytes]`,
+					};
+				}
+				return result;
+			}
+			throw new Error(`screenExec 超时 (${timeoutMs}ms): ${cmd.slice(0, 80)}`);
+		} finally {
+			await cleanup();
+		}
 	}
 	const gate = new WriteGate();
 	let auditSeq = 0;
@@ -308,9 +372,11 @@ function apply(ctx, config) {
 
 		/** Read-only remote query; one retry on transient ssh failure. */
 		async function query(args, opts = {}) {
-			let res = await runRemote(args);
-			if (!res.ok && /Connection timed out|Connection refused|kex_exchange/i.test(res.stderr)) {
-				res = await runRemote(args);
+			const target = opts.target ?? captureTransportTarget();
+			const runOpts = opts.timeoutMs === undefined ? {} : { timeoutMs: opts.timeoutMs };
+			let res = await runOnTarget(target, args, runOpts);
+			if (!res.ok && isTransientSshError(res.stderr)) {
+				res = await runOnTarget(target, args, runOpts);
 			}
 
 			return envelope(res, opts);
@@ -321,11 +387,11 @@ function apply(ctx, config) {
 			 * NEVER auto-retried (a timed-out killpg may still have taken effect;
 			 * unknown outcome => report and ask a human to check `sched status`).
 			 */
-			async function operate(key, args, { timeoutMs } = {}) {
+			async function operate(key, args, { timeoutMs, target = captureTransportTarget() } = {}) {
 				return gate.run(key, async () => {
 					ctx.logger.warn("[node-sched] audit #%d op=%s cmd=`%s`", ++auditSeq, key, args);
 					// B24e: 写操作走 ambiorix 本机通道 (NFS+WAL 跨主机写会丢数据)
-					const res = await screenExec(args, { timeoutMs });
+					const res = await screenExec(args, { timeoutMs, target });
 					return envelope(res, { json: false });
 				});
 			}
@@ -438,7 +504,8 @@ function apply(ctx, config) {
 	ctx.logger.warn("[node-sched] %d read tools registered", disposers.length);
 
 	// ── Dashboard plumbing (M2): HTTP snapshots + WS event stream over the shared webserver. ──
-		let _daemonCache = { ts: 0, body: null };
+		let _daemonCache = { ts: 0, targetKey: null, body: null };
+		let _targetEpoch = 0;
 		let _statusCache = null;
 		let _refreshTimer;
 
@@ -446,13 +513,75 @@ function apply(ctx, config) {
 		// 所有 API 路由即时返回缓存值, 网络抖动对浏览器完全透明。
 		const REFRESH_MS = config.pollFallbackSec * 1000;
 
+		function statusTargetKey() {
+			if (useLocalTransport()) return "local";
+			if (boundAlias) return `engine:${boundAlias}`;
+			return `cli:${config.sshEntry}`;
+		}
+
+		function invalidateTargetCaches() {
+			_targetEpoch += 1;
+			_statusInFlight = null;
+			_statusCache = null;
+			_daemonCache = { ts: 0, targetKey: statusTargetKey(), body: null };
+			stopTail();
+			if (clients.size > 0) scheduleTailRestart();
+		}
+
+		function hasStatusCache() {
+			return _statusCache?.targetKey === statusTargetKey()
+				&& _statusCache.body?.ok
+				&& _statusCache.body.raw;
+		}
+
+		function cacheStatus(raw, targetKey = statusTargetKey()) {
+			_statusCache = {
+				ts: Date.now(),
+				targetKey,
+				body: {
+					ok: true,
+					summary: summarizeStatus(raw),
+					raw,
+					daemon_health: raw.daemon_health ?? null,
+				},
+			};
+		}
+
+		function refreshStatusCache() {
+			const targetKey = statusTargetKey();
+			const epoch = _targetEpoch;
+			if (_statusInFlight?.targetKey === targetKey) return _statusInFlight.promise;
+			const request = query(`${S} status --json`).then((sr) => {
+				if (_targetEpoch === epoch && statusTargetKey() === targetKey && sr.ok && sr.raw) {
+					cacheStatus(sr.raw, targetKey);
+				}
+				return sr;
+			});
+			const current = { targetKey, promise: request };
+			_statusInFlight = current;
+			request.finally(() => {
+				if (_statusInFlight === current) _statusInFlight = null;
+			}).catch(() => {});
+			return request;
+		}
+
 		async function refreshCaches() {
 			try {
+				const targetKey = statusTargetKey();
+				const epoch = _targetEpoch;
 				const r = await query(`${S} daemon status`, { json: false });
-				_daemonCache = {
-					ts: Date.now(),
-					body: { ok: r.ok, text: r.text },
-				};
+				if (_targetEpoch === epoch && statusTargetKey() === targetKey) {
+					_daemonCache = {
+						ts: Date.now(),
+						targetKey,
+						body: { ok: r.ok, text: r.text },
+					};
+				}
+			} catch { /* keep old */ }
+			try {
+				await refreshStatusCache();
+			} catch { /* keep old */ }
+		}
 			} catch { /* keep old */ }
 			try {
 				const sr = await query(`${S} status --json`);
@@ -509,24 +638,24 @@ function apply(ctx, config) {
 		};
 
 
-		const uploadRemote = async (content) => {
+		const uploadRemote = async (content, target = captureTransportTarget()) => {
 			if (!/^\s*\{/.test(content)) throw new Error("content is not a JSON object");
 			JSON.parse(content);
 			const name = `nodesched-upload-${Date.now()}.json`;
 			// Transport-local mode writes directly beside the local daemon.
-			if (useLocalTransport()) {
+			if (target.mode === "local") {
 				const inboxDir = path.join(os.homedir(), ".sched", "inbox");
-				const target = path.join(inboxDir, name);
+				const localPath = path.join(inboxDir, name);
 				fs.mkdirSync(inboxDir, { recursive: true, mode: 0o700 });
-				fs.writeFileSync(target, content, { encoding: "utf8", mode: 0o600 });
-				return target;
+				fs.writeFileSync(localPath, content, { encoding: "utf8", mode: 0o600 });
+				return localPath;
 			}
 			// B24: 引擎模式走连接池 exec+stdin；CLI 模式走 ssh 子进程 stdin
-			if (boundAlias) {
-				const target = `~/.sched/inbox/${name}`;
+			if (target.mode === "engine") {
+				const remotePath = `~/.sched/inbox/${name}`;
 				const r = await sshEngine.execStdin(
-					boundAlias,
-					`mkdir -p ~/.sched/inbox && cat > ${target} && printf '%s\\n' "$HOME/.sched/inbox/${name}"`,
+					target.alias,
+					`mkdir -p ~/.sched/inbox && cat > ${remotePath} && printf '%s\\n' "$HOME/.sched/inbox/${name}"`,
 					content,
 					60_000,
 				);
@@ -537,7 +666,7 @@ function apply(ctx, config) {
 				const child = cp.spawn(
 					"ssh",
 					["-o", `ConnectTimeout=${config.connectTimeoutSec}`, "-o", "BatchMode=yes",
-						config.sshEntry, `mkdir -p ~/.sched/inbox && cat > ~/.sched/inbox/${name} && printf '%s\\n' "$HOME/.sched/inbox/${name}"`],
+						target.sshEntry, `mkdir -p ~/.sched/inbox && cat > ~/.sched/inbox/${name} && printf '%s\\n' "$HOME/.sched/inbox/${name}"`],
 				);
 				let output = "";
 				let err = "";
@@ -571,8 +700,18 @@ function apply(ctx, config) {
 				kind: "prefix",
 				path: "/sched/api/status",
 				handler: async (_req, res) => {
-					if (_statusCache) return void json(res, _statusCache.body);
-					const { raw, text } = await query(`${S} status --json`);
+					if (hasStatusCache()) {
+						return void json(res, _statusCache.body);
+					}
+					const targetKey = statusTargetKey();
+					const epoch = _targetEpoch;
+					const { raw, text } = await refreshStatusCache();
+					if (_targetEpoch !== epoch || statusTargetKey() !== targetKey) {
+						return void json(res, { ok: false, text: "status target changed; retry" }, 503);
+					}
+					if (hasStatusCache()) {
+						return void json(res, _statusCache.body);
+					}
 					// B26: daemon 健康透传 (CLI 已解析出 raw.daemon_health)
 					const parsedRaw = (() => {
 						if (!raw) return null;
@@ -607,7 +746,7 @@ function apply(ctx, config) {
 						return void json(res, {
 							ok: true,
 							alias: boundAlias ?? null,
-							mode: boundAlias ? "engine" : "cli",
+							mode: useLocalTransport() ? "local" : (boundAlias ? "engine" : "cli"),
 							sshEntry: config.sshEntry,
 						});
 						}
@@ -676,11 +815,12 @@ function apply(ctx, config) {
 							return;
 						}
 						if (!writeGuard(req, res)) return;
+						const target = captureTransportTarget();
 						const body = await readBodyJson(req);
 						if (!body.patch || typeof body.patch !== "object") {
 							return void json(res, { ok: false, text: "patch (object) required" }, 400);
 						}
-						const remotePath = await uploadRemote(JSON.stringify(body.patch));
+						const remotePath = await uploadRemote(JSON.stringify(body.patch), target);
 						try {
 							// 配置是双项目共享的 —— 写操作走 WriteGate 单飞 + 审计
 							const r = await gate.run("config-set", async () => {
@@ -688,7 +828,7 @@ function apply(ctx, config) {
 								// B24e: 配置写入必须在计算节点上落库 (NFS+WAL 守卫)
 								return screenExec(
 									`${S} config set -f ${shellQuote(remotePath)} --yes && rm -f ${shellQuote(remotePath)}`,
-									{ timeoutMs: 90_000 },
+									{ timeoutMs: 90_000, target },
 								);
 							});
 							await json(res, {
@@ -696,7 +836,7 @@ function apply(ctx, config) {
 								text: r.ok ? (r.text || "已写入并请求热重载") : (r.stderr || r.text || "set 失败"),
 							});
 						} finally {
-							await runRemote(`rm -f ${shellQuote(remotePath)}`).catch(() => {});
+							await runOnTarget(target, `rm -f ${shellQuote(remotePath)}`).catch(() => {});
 						}
 					} catch (e) {
 						await json(res, { ok: false, text: String(e.message ?? e) }, 400);
@@ -710,13 +850,14 @@ function apply(ctx, config) {
 				handler: async (req, res) => {
 					if (!writeGuard(req, res)) return;
 					try {
+						const target = captureTransportTarget();
 						const { content } = await readBodyJson(req);
-						const remotePath = await uploadRemote(String(content));
+						const remotePath = await uploadRemote(String(content), target);
 						try {
-							const r = await query(`${S} submit --dry-run ${shellQuote(remotePath)}`, { json: false });
+							const r = await query(`${S} submit --dry-run ${shellQuote(remotePath)}`, { json: false, target });
 							await json(res, { ok: r.ok && !r.text.startsWith("[error"), text: r.text });
 						} finally {
-							await runRemote(`rm -f ${shellQuote(remotePath)}`);
+							await runOnTarget(target, `rm -f ${shellQuote(remotePath)}`).catch(() => {});
 						}
 					} catch (e) {
 						await json(res, { ok: false, text: String(e.message ?? e) }, 400);
@@ -730,13 +871,14 @@ function apply(ctx, config) {
 				handler: async (req, res) => {
 					if (!writeGuard(req, res)) return;
 					try {
+						const target = captureTransportTarget();
 						const { content } = await readBodyJson(req);
-						const remotePath = await uploadRemote(String(content));
+						const remotePath = await uploadRemote(String(content), target);
 						try {
-							const r = await operate(`submit:${remotePath}`, `${S} submit ${shellQuote(remotePath)}`);
+							const r = await operate("submit", `${S} submit ${shellQuote(remotePath)}`, { target });
 							await json(res, { ok: r.ok, code: r.code, text: clip((r.stdout || r.stderr || "").trim(), 2000) });
 						} finally {
-							await runRemote(`rm -f ${shellQuote(remotePath)}`);
+							await runOnTarget(target, `rm -f ${shellQuote(remotePath)}`).catch(() => {});
 						}
 					} catch (e) {
 						await json(res, { ok: false, text: String(e.message ?? e) }, 400);
@@ -757,10 +899,19 @@ function apply(ctx, config) {
 				path: "/sched/api/op",
 				handler: async (req, res) => {
 					if (!writeGuard(req, res)) return;
-					let body = "";
-					for await (const chunk of req) body += chunk;
-					let op, id;
-					try { ({ op, id } = JSON.parse(body)); } catch { }
+					const target = captureTransportTarget();
+					let body;
+					try {
+						body = await readBodyJson(req);
+					} catch (error) {
+						const tooLarge = String(error?.message ?? "").includes("2 MiB");
+						return void json(
+							res,
+							{ ok: false, error: tooLarge ? "request body too large" : "bad request" },
+							tooLarge ? 413 : 400,
+						);
+					}
+					const { op, id } = body && typeof body === "object" ? body : {};
 					const spec = OPS[op];
 					if (!spec || typeof (id ?? "") !== "string") {
 						return void json(res, { ok: false, error: "bad op/id" }, 400);
@@ -768,7 +919,7 @@ function apply(ctx, config) {
 					if (spec.needsId && (!id || !(spec.pattern ?? /^[\w:.-]+$/).test(id))) {
 						return void json(res, { ok: false, error: "bad id for op" }, 400);
 					}
-					const r = await operate(`${op}:${id ?? ""}`, spec.cmd(id));
+					const r = await operate(`${op}:${id ?? ""}`, spec.cmd(id), { target });
 					await json(res, { ok: r.ok, code: r.code, text: (r.stdout || r.stderr || "").trim().slice(0, 2000) });
 				},
 			}),
@@ -916,8 +1067,20 @@ function apply(ctx, config) {
 		heartbeat = setInterval(async () => {
 			if (clients.size === 0) return;
 			try {
-				const { raw } = await query(`${S} status --json`);
-				broadcast({ type: "status", summary: raw ? summarizeStatus(raw) : null, ts: Date.now() });
+				if (hasStatusCache()) {
+					broadcast({
+						type: "status",
+						summary: _statusCache.body.summary ?? null,
+						ts: Date.now(),
+					});
+					return;
+				}
+				const targetKey = statusTargetKey();
+				const epoch = _targetEpoch;
+				const sr = await refreshStatusCache();
+				if (_targetEpoch !== epoch || statusTargetKey() !== targetKey) return;
+				const summary = sr.raw ? summarizeStatus(sr.raw) : null;
+				broadcast({ type: "status", summary, ts: Date.now() });
 			} catch { /* transient */ }
 		}, config.pollFallbackSec * 1000);
 
@@ -985,14 +1148,23 @@ function apply(ctx, config) {
 						}
 						const alias = aliasOf(req);
 						if (!alias) return void json(res, { error: "alias query param required" }, 400);
+						if ((method === "PATCH" || method === "DELETE") && alias === boundAlias) {
+							return void json(res, { error: "unbind the active target before editing or deleting it" }, 409);
+						}
 						if (method === "PATCH") {
 							const entry = sshStore.update(alias, await readBodyJson(req));
 							sshEngine.dropAlias(alias); // 凭据/地址变更绝不复用旧连接
+							if (alias === boundAlias) invalidateTargetCaches();
 							return void json(res, { host: sshStore.summarize(entry) });
 						}
 						if (method === "DELETE") {
 							const removed = sshStore.remove(alias);
 							sshEngine.dropAlias(alias);
+							if (removed && alias === boundAlias) {
+								boundAlias = null;
+								invalidateTargetCaches();
+								persistEntryOverride({ sshEntry: config.sshEntry, schedAlias: null });
+							}
 							return void json(res, { removed });
 						}
 						json(res, { error: `method not allowed: ${method}` }, 405);
@@ -1063,7 +1235,7 @@ function apply(ctx, config) {
 					if (!loopbackOnly(req, res)) return;
 					json(res, {
 						alias: boundAlias,
-						mode: boundAlias ? "engine" : "cli",
+						mode: useLocalTransport() ? "local" : (boundAlias ? "engine" : "cli"),
 						sshEntry: config.sshEntry,
 					});
 				},
@@ -1074,6 +1246,9 @@ function apply(ctx, config) {
 				path: "/sched/ssh/bind",
 				handler: async (req, res) => {
 					if (!loopbackOnly(req, res)) return;
+					if (useLocalTransport()) {
+						return void json(res, { ok: false, error: "SSH binding unavailable in local transport" }, 409);
+					}
 					try {
 						const body = await readBodyJson(req);
 						const alias = String(body.alias ?? "").trim();

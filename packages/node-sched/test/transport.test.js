@@ -15,6 +15,9 @@ test("LocalTransport executes commands and stdin locally", async () => {
 		assert.equal(withStdin.stdout, "stdin-ok");
 		const binary = await transport.execStdin("od -An -t x1", Buffer.from([0, 255, 1]));
 		assert.equal(binary.stdout.trim().replace(/\s+/g, " "), "00 ff 01");
+
+		const splitUtf8 = await transport.exec("printf '\\344\\275'; sleep 0.02; printf '\\240'");
+		assert.equal(splitUtf8.stdout, "你");
 	} finally {
 		transport.dispose();
 	}
