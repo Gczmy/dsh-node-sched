@@ -40,6 +40,10 @@
 - **dry-run 门控提交** — 粘贴 `batch.json`，先预览任务展开与 SKIP 判定再正式提交；高危操作（cancel / resubmit / GPU 释放 / daemon stop）需键入确认词。
 - **多项目感知** — 展示 sched B11c 多项目模式配置的每项目 GPU 配额、优先级与硬亲和隔离。
 
+### Screen 注入边界
+
+插件的 `screen -X stuff` 仅是 host 侧受控传输实现，不是要求运维人员手工 attach 或向基础设施 screen 输入命令。它只用于白名单 sched 操作，并受 loopback/写操作门与审计日志保护，每个命令都有独立结果标记。运维人员**禁止** attach、注入命令或退出 `3323979.ambior1`；应使用插件或 `sched` CLI。sched 与插件同机部署时，**应**配置 `transport: "local"`，完全绕开 screen 注入。
+
 ## 快速开始
 
 ### 前置条件

@@ -40,6 +40,10 @@ The design principle is **strict adapter architecture**: all scheduling intellig
 - **Dry-run-gated submit** — paste a `batch.json`, preview the expansion and SKIP verdicts before committing; destructive operations (cancel / resubmit / GPU free / daemon stop) require typed confirmation.
 - **Multi-project aware** — surfaces per-project GPU quotas, priorities, and hard-affinity isolation as configured by sched's B11c multi-project mode.
 
+### Screen injection boundary
+
+The plugin's `screen -X stuff` path is a controlled host-side transport, not an operator instruction to attach to or type into the infrastructure screen manually. It is used only for whitelisted scheduler operations, guarded by the loopback/write gate and audit logging, with a per-command result marker. Operators MUST NOT attach to, inject into, or exit `3323979.ambior1`; use the plugin or `sched` CLI instead. Deployments with the scheduler on the same host SHOULD set `transport: "local"` to avoid screen injection entirely.
+
 ## Getting Started
 
 ### Prerequisites
