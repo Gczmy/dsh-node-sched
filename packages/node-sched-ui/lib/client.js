@@ -7191,19 +7191,9 @@ function apply(cctx, config) {
       setList(incidents);
       INC_CACHE = { list: incidents };
     };
-    const applyDetail = (inc) => {
-      console.log(
-        "[inc-detail\u5199] tag=applyDetail id=" + inc.id,
-        new Error().stack.split("\n").slice(2, 5).join("\n    ")
-      );
-      setDetail(inc);
-      INC_OPEN_ID = inc.id;
-      INC_DETAIL = INC_DETAIL || {};
-      INC_DETAIL[inc.id] = inc;
-    };
     const openDetail = useCallback(async (id) => {
       const gen = ++INC_VIEW_GEN;
-      setDetailT({ id, loading: true }, "view-loading");
+      setDetailT({ id, loading: true });
       INC_OPEN_ID = id;
       try {
         const r = await fetch(`/sched/api/incidents?id=${id}`);
@@ -7211,9 +7201,9 @@ function apply(cctx, config) {
         const inc = JSON.parse(d.text).incident;
         INC_DETAIL = { ...INC_DETAIL || {}, [inc.id]: inc };
         if (gen !== INC_VIEW_GEN || INC_OPEN_ID !== inc.id) return;
-        setDetailT(inc, "applyDetail");
+        setDetailT(inc);
       } catch (e) {
-        setDetailT({ id, error: String(e) }, "view-catch");
+        setDetailT({ id, error: String(e) });
       }
     }, []);
     const load = useCallback(async () => {
@@ -7239,12 +7229,6 @@ function apply(cctx, config) {
       msg || (INC_CACHE ? "" : "loading\u2026")
     );
     const p = detail && !detail.loading && !detail.error ? detail.payload || {} : null;
-    if (p && (!INC_DETAIL || !INC_DETAIL[detail.id])) {
-      console.log(
-        "[inc] \u26A0\uFE0F \u6E32\u67D3\u4E86\u5C55\u5F00\u6001\u4F46\u6A21\u5757\u7F13\u5B58\u4E2D\u65E0\u6B64\u6761\u76EE id=" + detail.id,
-        "(\u6C34\u5408\u4E22\u5931\u6216\u5916\u90E8\u5199\u5165)"
-      );
-    }
     const failed = p ? p.failed || {} : {};
     const mem = p ? p.memory || {} : {};
     return jsxs2("div", { style: { fontSize: 13 } }, [
@@ -7277,7 +7261,7 @@ function apply(cctx, config) {
           onClick: () => {
             if (detail && detail.id === r.id) {
               INC_VIEW_GEN++;
-              setDetailT(null, "collapse");
+              setDetailT(null);
               INC_OPEN_ID = null;
             } else {
               openDetail(r.id);
@@ -7314,7 +7298,7 @@ function apply(cctx, config) {
               onClick: (e) => {
                 e.stopPropagation();
                 INC_VIEW_GEN++;
-                setDetailT(null, "collapse");
+                setDetailT(null);
                 INC_OPEN_ID = null;
               },
               style: { ...ghostBtn, marginLeft: 8 }
@@ -7899,16 +7883,6 @@ function apply(cctx, config) {
         col.appendChild(container);
         root = require("react-dom/client").createRoot(container);
         root.render(j(Dashboard, { onClose: () => panel.hide() }));
-        console.log("[node-sched-ui] \u2705 Dashboard mounted into container");
-        setTimeout(() => {
-          const html = container.innerHTML;
-          console.log(
-            "[node-sched-ui] container innerHTML length:",
-            html.length,
-            "| first 200:",
-            html.slice(0, 200)
-          );
-        }, 100);
         try {
           fetch("/sched/api/client-log", {
             method: "POST",

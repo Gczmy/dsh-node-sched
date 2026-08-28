@@ -1350,20 +1350,8 @@ function apply(cctx, config) {
 				? { ...INC_DETAIL[INC_OPEN_ID], id: INC_OPEN_ID } : null);
 
 		const [msg, setMsg] = useState("");
+		const setDetailT = (value) => setDetail(value);
 
-		// B19 调试: 追踪所有 detail 写入的调用栈 (临时)
-
-		const setDetailT = (v, tag) => {
-
-			console.log("[inc-detail写] tag=" + (tag || "?") + " val=" +
-
-				JSON.stringify(v && v.id ? { id: v.id, loading: !!v.loading } : v),
-
-				new Error().stack.split("\n").slice(2, 6).join("\n    "));
-
-			setDetail(v);
-
-		};
 
 
 
@@ -1375,21 +1363,6 @@ function apply(cctx, config) {
 
 		};
 
-		const applyDetail = (inc) => {
-
-			console.log("[inc-detail写] tag=applyDetail id=" + inc.id,
-
-				new Error().stack.split("\n").slice(2, 5).join("\n    "));
-
-			setDetail(inc);
-
-			INC_OPEN_ID = inc.id;
-
-			INC_DETAIL = INC_DETAIL || {};
-
-			INC_DETAIL[inc.id] = inc;
-
-		};
 
 
 
@@ -1397,7 +1370,7 @@ function apply(cctx, config) {
 
 			const gen = ++INC_VIEW_GEN;
 
-			setDetailT({ id, loading: true }, "view-loading");
+			setDetailT({ id, loading: true });
 
 			INC_OPEN_ID = id;
 
@@ -1417,9 +1390,9 @@ function apply(cctx, config) {
 
 				if (gen !== INC_VIEW_GEN || INC_OPEN_ID !== inc.id) return;
 
-				setDetailT(inc, "applyDetail");
+				setDetailT(inc);
 
-			} catch (e) { setDetailT({ id, error: String(e) }, "view-catch"); }
+			} catch (e) { setDetailT({ id, error: String(e) }); }
 
 		}, []);
 
@@ -1463,15 +1436,6 @@ function apply(cctx, config) {
 
 		const p = detail && !detail.loading && !detail.error ? detail.payload || {} : null;
 
-		// B19 调试: 展开态渲染打点 —— 若无写入日志却出现此行, 问题在渲染/水合层
-
-		if (p && (!INC_DETAIL || !(INC_DETAIL[detail.id]))) {
-
-			console.log("[inc] ⚠️ 渲染了展开态但模块缓存中无此条目 id=" + detail.id,
-
-				"(水合丢失或外部写入)");
-
-		}
 
 		const failed = p ? p.failed || {} : {};
 
@@ -1509,7 +1473,7 @@ function apply(cctx, config) {
 					onClick: () => {
 						if (detail && detail.id === r.id) {
 							INC_VIEW_GEN++;
-							setDetailT(null, "collapse");
+							setDetailT(null);
 							INC_OPEN_ID = null;
 						} else {
 							openDetail(r.id);
@@ -1534,7 +1498,7 @@ function apply(cctx, config) {
 					jsxs2("div", { style: { marginBottom: 4 } }, [
 						j("span", { style: { fontWeight: 600, color: T.brand } },
 							`#${detail.id} ${detail.kind} @ gpu${detail.gpu_idx ?? "-"}`),
-						j("button", { onClick: (e) => { e.stopPropagation(); INC_VIEW_GEN++; setDetailT(null, "collapse"); INC_OPEN_ID = null; },
+						j("button", { onClick: (e) => { e.stopPropagation(); INC_VIEW_GEN++; setDetailT(null); INC_OPEN_ID = null; },
 							style: { ...ghostBtn, marginLeft: 8 } }, "收起"),
 					]),
 					j("div", { style: { color: T.label2, fontSize: 12, marginBottom: 4 } },
@@ -2306,12 +2270,6 @@ function apply(cctx, config) {
 				col.appendChild(container);
 				root = require("react-dom/client").createRoot(container);
 				root.render(j(Dashboard, { onClose: () => panel.hide() }));
-				console.log("[node-sched-ui] ✅ Dashboard mounted into container");
-				setTimeout(() => {
-					const html = container.innerHTML;
-					console.log("[node-sched-ui] container innerHTML length:", html.length,
-						"| first 200:", html.slice(0, 200));
-				}, 100);
 				try {
 					fetch("/sched/api/client-log", {
 						method: "POST", headers: { "content-type": "application/json" },
