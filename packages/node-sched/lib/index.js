@@ -139,7 +139,7 @@ function clip(text, max = 20_000) {
 function safeError(error, maxChars = 300) {
 	const message = String(error?.message ?? error);
 	const withoutPaths = message.replace(
-		/(^|[\s:(])((?:\/(?:Users|home|private|tmp|var|opt|Volumes|usr|root|etc|workspace)\/|[A-Za-z]:[\\/])[^\s"'`)\]}]*)/g,
+		/(^|[\s:(\"'])((?:\/(?:Users|home|private|tmp|var|opt|Volumes|usr|root|etc|workspace)\/|[A-Za-z]:[\\/])[^\s"'`)\]}]*)/g,
 		(_, lead) => `${lead}[path]`,
 	);
 	return sanitizeLogText(withoutPaths, maxChars);
@@ -562,6 +562,7 @@ const target = opts.target ?? captureTransportTarget();
 		let _daemonCache = { ts: 0, targetKey: null, body: null };
 		let _targetEpoch = 0;
 		let _statusCache = null;
+		let _statusInFlight = null;
 		let _refreshTimer;
 
 		// B11c: 后台统一刷新器 -- 定时经 ssh 查询远程状态并缓存,
@@ -575,7 +576,7 @@ const target = opts.target ?? captureTransportTarget();
 		}
 
 		function invalidateTargetCaches() {
-			_targetEpoch += 1;
+		_targetEpoch += 1;
 			_statusInFlight = null;
 			_statusCache = null;
 			_daemonCache = { ts: 0, targetKey: statusTargetKey(), body: null };
@@ -605,7 +606,7 @@ const target = opts.target ?? captureTransportTarget();
 
 		function refreshStatusCache() {
 			const targetKey = statusTargetKey();
-			const epoch = _targetEpoch;
+const epoch = _targetEpoch;
 			if (_statusInFlight?.targetKey === targetKey) return _statusInFlight.promise;
 			const request = query(`${S} status --json`).then((sr) => {
 				if (_targetEpoch === epoch && statusTargetKey() === targetKey && sr.ok && sr.raw) {
@@ -636,22 +637,6 @@ const target = opts.target ?? captureTransportTarget();
 			} catch { /* keep old */ }
 			try {
 				await refreshStatusCache();
-			} catch { /* keep old */ }
-		}
-			} catch { /* keep old */ }
-			try {
-				const sr = await query(`${S} status --json`);
-				if (sr.ok && sr.raw) {
-					_statusCache = {
-						ts: Date.now(),
-						body: {
-							ok: true,
-							summary: summarizeStatus(sr.raw),
-							raw: sr.raw,
-							daemon_health: sr.raw.daemon_health ?? null,
-						},
-					};
-				}
 			} catch { /* keep old */ }
 		}
 
@@ -788,11 +773,12 @@ const target = opts.target ?? captureTransportTarget();
 						if (typeof raw === "object") return raw;
 						try { return JSON.parse(text); } catch (_) { return null; }
 					})();
-					const dhealth = parsedRaw?.daemon_health ?? null;
-					const body = parsedRaw
-						? { ok: true, summary: summarizeStatus(raw), raw: parsedRaw, daemon_health: dhealth }
-						: { ok: false, text };
-					_statusCache = { ts: Date.now(), body };
+					if (parsedRaw) {
+						cacheStatus(parsedRaw, targetKey);
+						return void json(res, _statusCache.body);
+					}
+					const body = { ok: false, text };
+					_statusCache = { ts: Date.now(), targetKey, body };
 					json(res, body);
 				},
 			}),
@@ -827,6 +813,7 @@ const target = opts.target ?? captureTransportTarget();
 							return void json(res, { ok: false, text: "非法入口名" }, 400);
 						}
 						const prev = config.sshEntry;
+
 						persistEntryOverride({ sshEntry: entry });
 						config.sshEntry = entry;   // runRemote 每次调用时读取, 即刻生效
 persistEntryOverride({ sshEntry: entry });
@@ -959,10 +946,14 @@ const r = await operate("submit", `${S} submit ${shellQuote(remotePath)}`, { tar
 			ctx.webServer.register({
 				kind: "prefix",
 				path: "/sched/api/daemon",
-					handler: async (_req, res) => {
-						json(res, _daemonCache.body || { ok: false, text: "尚未查询" });
-					},
-				}),
+				handler: async (_req, res) => {
+					const targetKey = statusTargetKey();
+					if (_daemonCache.targetKey === targetKey && _daemonCache.body) {
+						return void json(res, _daemonCache.body);
+					}
+					json(res, { ok: false, text: "尚未查询" });
+				},
+			}),
 
 			ctx.webServer.register({
 				kind: "prefix",
@@ -1142,8 +1133,6 @@ const target = captureTransportTarget();
 			child.on("close", onEnd);
 			child.on("error", onEnd);
 		}
-
-		// Periodic status heartbeat so quiet stretches still refresh dashboards.
 		heartbeat = setInterval(async () => {
 			if (clients.size === 0) return;
 			try {
