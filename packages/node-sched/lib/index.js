@@ -30,6 +30,7 @@ import { HostStore, SshEngine, openExecStream } from "./ssh-engine.js";
 import { LocalTransport } from "./transport.js";
 import { isLoopbackAddress, loopbackRequestAllowed, originHostAllowed } from "./request-guard.js";
 import { parseUploadedPath } from "./upload-path.js";
+import { mergeEntryOverride } from "./entry-override.js";
 
 const name = "node-sched";
 
@@ -192,6 +193,19 @@ function apply(ctx, config) {
 		ctx.logger.warn("[node-sched] 入口覆盖文件读取失败(忽略): %s", e);
 	}
 	const useLocalTransport = () => transportMode === "local";
+	const persistEntryOverride = (patch) => {
+		let existing = {};
+		try {
+			existing = JSON.parse(fs.readFileSync(entryFile, "utf-8"));
+		} catch {
+			// Missing or malformed overrides are replaced by the validated patch.
+		}
+		fs.mkdirSync(path.dirname(entryFile), { recursive: true });
+		fs.writeFileSync(
+			entryFile,
+			JSON.stringify(mergeEntryOverride(existing, patch), null, 2),
+		);
+	};
 
 	// ── B24c: 交互式 2FA 桥接 ──
 	// 质询 → WS 广播给看板 → 用户输入动态码 → POST /sched/ssh/2fa-answer 回来。
@@ -527,6 +541,7 @@ const SCREEN_RESULT_PREFIX_BYTES = 2 * 1024 * 1024;
 			_daemonCache = { ts: 0, targetKey: statusTargetKey(), body: null };
 			stopTail();
 			if (clients.size > 0) scheduleTailRestart();
+			if (_refreshTimer) refreshCaches().catch(() => {});
 		}
 
 		function hasStatusCache() {
@@ -758,10 +773,10 @@ const SCREEN_RESULT_PREFIX_BYTES = 2 * 1024 * 1024;
 							return void json(res, { ok: false, text: "非法入口名" }, 400);
 						}
 						const prev = config.sshEntry;
+						persistEntryOverride({ sshEntry: entry });
 						config.sshEntry = entry;   // runRemote 每次调用时读取, 即刻生效
-						fs.mkdirSync(path.dirname(entryFile), { recursive: true });
-						fs.writeFileSync(entryFile,
-							JSON.stringify({ sshEntry: entry }, null, 2));
+persistEntryOverride({ sshEntry: entry });
+						invalidateTargetCaches();
 						ctx.logger.warn("[node-sched] audit #%d ssh-entry %s -> %s",
 							++auditSeq, prev, entry);
 						// 用新入口立即探测 daemon 可达性 (诚实反馈, 不假装成功)
@@ -1135,6 +1150,11 @@ const SCREEN_RESULT_PREFIX_BYTES = 2 * 1024 * 1024;
 			const u = new URL(req.url, "http://x");
 			return u.searchParams.get("alias") ?? "";
 		};
+		const boundTargetUsesAlias = (alias) => {
+			if (alias === boundAlias) return true;
+			const active = boundAlias ? sshStore.find(boundAlias) : undefined;
+			return Array.isArray(active?.proxyJump) && active.proxyJump.includes(alias);
+		};
 
 		routeDisposers.push(
 			ctx.webServer.register({
@@ -1154,8 +1174,8 @@ const SCREEN_RESULT_PREFIX_BYTES = 2 * 1024 * 1024;
 						}
 						const alias = aliasOf(req);
 						if (!alias) return void json(res, { error: "alias query param required" }, 400);
-						if ((method === "PATCH" || method === "DELETE") && alias === boundAlias) {
-							return void json(res, { error: "unbind the active target before editing or deleting it" }, 409);
+						if ((method === "PATCH" || method === "DELETE") && boundTargetUsesAlias(alias)) {
+							return void json(res, { error: "unbind the active target before editing or deleting it or its proxy hop" }, 409);
 						}
 						if (method === "PATCH") {
 							const entry = sshStore.update(alias, await readBodyJson(req));
@@ -1276,11 +1296,11 @@ const SCREEN_RESULT_PREFIX_BYTES = 2 * 1024 * 1024;
 						} catch (e) {
 							probeText = "\u63a2\u6d4b\u5931\u8d25: " + String(e.message ?? e).slice(0, 80);
 						}
-
+						const previousAlias = boundAlias;
+						persistEntryOverride({ sshEntry: config.sshEntry, schedAlias: alias });
 						boundAlias = alias;
-						fs.mkdirSync(path.dirname(entryFile), { recursive: true });
-						fs.writeFileSync(entryFile,
-							JSON.stringify({ sshEntry: config.sshEntry, schedAlias: alias }, null, 2));
+						if (previousAlias && previousAlias !== alias) sshEngine.dropAlias(previousAlias);
+						invalidateTargetCaches();
 						ctx.logger.warn("[node-sched] audit #%d sched-bind -> %s (engine mode)", ++auditSeq, alias);
 						json(res, { ok: true, mode: "engine", alias, latencyMs: reach.latencyMs, probeText });
 					} catch (e) {
@@ -1296,9 +1316,10 @@ const SCREEN_RESULT_PREFIX_BYTES = 2 * 1024 * 1024;
 					if (!loopbackOnly(req, res)) return;
 					const prev = boundAlias;
 					boundAlias = null;
+					if (prev) sshEngine.dropAlias(prev);
+					invalidateTargetCaches();
 					try {
-						fs.writeFileSync(entryFile,
-							JSON.stringify({ sshEntry: config.sshEntry }, null, 2));
+						persistEntryOverride({ sshEntry: config.sshEntry, schedAlias: null });
 					} catch { /* \u6301\u4e45\u5316\u5931\u8d25\u4e0d\u963b\u585e\u89e3\u7ed1 */ }
 					ctx.logger.warn("[node-sched] audit #%d sched-unbind <- %s", ++auditSeq, prev);
 					json(res, { ok: true, prev, mode: "cli", sshEntry: config.sshEntry });

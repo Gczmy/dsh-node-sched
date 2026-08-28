@@ -14,7 +14,8 @@
     "lib/ssh-engine.js",
     "lib/transport.js",
     "lib/request-guard.js",
-    "lib/upload-path.js"
+    "lib/upload-path.js",
+    "lib/entry-override.js"
   ],
   "license": "MIT",
   "dependencies": {
