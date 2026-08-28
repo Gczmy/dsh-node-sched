@@ -7384,7 +7384,7 @@ function apply(cctx, config) {
       }).catch(() => {
       });
       load();
-    }, []);
+    }, [load]);
     if (!cfg) return j("div", { style: { color: T.label2, fontSize: 13 } }, msg || "loading config\u2026");
     const upd = (fn) => setCfg((c) => {
       const n = JSON.parse(JSON.stringify(c));
@@ -7407,8 +7407,13 @@ function apply(cctx, config) {
       }
     }
     const numInput = (value, onChange, style) => j("input", {
-      value: value ?? "",
-      onChange: (e) => onChange(e.target.value === "" ? null : Number(e.target.value)),
+      value: Number.isFinite(value) ? value : "",
+      onChange: (e) => {
+        const raw = e.target.value;
+        if (raw === "") return onChange(null);
+        const number = Number(raw);
+        if (Number.isFinite(number)) onChange(number);
+      },
       style: { ...style, width: 52, background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label, borderRadius: 4, padding: "2px 4px", fontSize: 13 }
     });
     const secTitle = (t) => j("div", { style: { fontSize: 13, color: T.brand, margin: "8px 0 4px", fontWeight: 600 } }, t);
@@ -7489,13 +7494,9 @@ function apply(cctx, config) {
           " \u542F\u7528\u5171\u4EAB\u88C5\u7BB1"
         ]),
         j("span", { style: { color: T.label2 } }, "safety"),
-        j("input", {
-          value: cfg.co_locate_safety ?? 0.7,
-          onChange: (e) => upd((n) => {
-            n.co_locate_safety = Number(e.target.value);
-          }),
-          style: { width: 50, background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label, borderRadius: 4, fontSize: 13 }
-        }),
+        numInput(cfg.co_locate_safety ?? 0.7, (v) => upd((n) => {
+          if (v !== null) n.co_locate_safety = v;
+        })),
         j("span", { style: { color: T.label2 } }, "\u6BCF\u5361\u4E0A\u9650"),
         numInput(cfg.co_locate_max_jobs ?? 3, (v) => upd((n) => {
           if (v !== null) n.co_locate_max_jobs = v;
