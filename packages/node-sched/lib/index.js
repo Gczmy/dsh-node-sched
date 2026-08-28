@@ -604,7 +604,12 @@ const SCREEN_RESULT_PREFIX_BYTES = 2 * 1024 * 1024;
 				if (sr.ok && sr.raw) {
 					_statusCache = {
 						ts: Date.now(),
-						body: { ok: true, summary: summarizeStatus(sr.raw), raw: sr.raw },
+						body: {
+							ok: true,
+							summary: summarizeStatus(sr.raw),
+							raw: sr.raw,
+							daemon_health: sr.raw.daemon_health ?? null,
+						},
 					};
 				}
 			} catch { /* keep old */ }
@@ -1093,7 +1098,7 @@ persistEntryOverride({ sshEntry: entry });
 		heartbeat = setInterval(async () => {
 			if (clients.size === 0) return;
 			try {
-				if (hasStatusCache()) {
+if (hasStatusCache()) {
 					broadcast({
 						type: "status",
 						summary: _statusCache.body.summary ?? null,
@@ -1101,7 +1106,7 @@ persistEntryOverride({ sshEntry: entry });
 					});
 					return;
 				}
-				const targetKey = statusTargetKey();
+const targetKey = statusTargetKey();
 				const epoch = _targetEpoch;
 				const sr = await refreshStatusCache();
 				if (_targetEpoch !== epoch || statusTargetKey() !== targetKey) return;
