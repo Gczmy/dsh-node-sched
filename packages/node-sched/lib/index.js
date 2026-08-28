@@ -28,6 +28,7 @@ import { WebSocketServer } from "ws";
 import { HostStore, SshEngine, openExecStream } from "./ssh-engine.js";
 import { LocalTransport } from "./transport.js";
 import { isLoopbackAddress, originHostAllowed } from "./request-guard.js";
+import { parseUploadedPath } from "./upload-path.js";
 
 const name = "node-sched";
 
@@ -518,9 +519,15 @@ function apply(ctx, config) {
 			}
 			// B24: 引擎模式走连接池 exec+stdin；CLI 模式走 ssh 子进程 stdin
 			if (boundAlias) {
-				const r = await sshEngine.execStdin(boundAlias, `mkdir -p ~/.sched/inbox && cat > ~/.sched/inbox/${name}`, content, 60_000);
+				const target = `~/.sched/inbox/${name}`;
+				const r = await sshEngine.execStdin(
+					boundAlias,
+					`mkdir -p ~/.sched/inbox && cat > ${target} && printf '%s\\n' "$HOME/.sched/inbox/${name}"`,
+					content,
+					60_000,
+				);
 				if (!r.success) throw new Error(r.stderr || r.error || "upload failed");
-				return `/tmp/${name}`;
+				return parseUploadedPath(r.stdout, name);
 			}
 			return await new Promise((resolve, reject) => {
 				const child = cp.spawn(

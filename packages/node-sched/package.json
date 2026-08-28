@@ -13,7 +13,8 @@
     "lib/index.js",
     "lib/ssh-engine.js",
     "lib/transport.js",
-    "lib/request-guard.js"
+    "lib/request-guard.js",
+    "lib/upload-path.js"
   ],
   "license": "MIT",
   "dependencies": {
