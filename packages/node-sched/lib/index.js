@@ -33,7 +33,7 @@ import { parseUploadedPath } from "./upload-path.js";
 import { mergeEntryOverride } from "./entry-override.js";
 import { parseScreenEnd, parseScreenResult } from "./screen-result.js";
 import { appendLimitedOutput, finalizeLimitedOutput, limitedOutputText } from "./output-limit.js";
-import { redactCommand } from "./redact.js";
+import { redactCommand, sanitizeLogText } from "./redact.js";
 import { isTransientSshError } from "./retry-policy.js";
 
 const name = "node-sched";
@@ -1389,7 +1389,7 @@ const targetKey = statusTargetKey();
 					try {
 						const body = await readBodyJson(req);
 						// ctx.logger 只进内存缓冲不落盘 —— 直接追加共享盘文件供远程排查读取
-						const line = `[${body.ts}] ${body.kind} ${String(body.detail ?? "").slice(0, 500)}\n`;
+						const line = `[${sanitizeLogText(body.ts, 80)}] ${sanitizeLogText(body.kind, 80)} ${sanitizeLogText(body.detail, 500)}\n`;
 						fs.appendFileSync(path.join(os.homedir(), ".sched", "client-exceptions.log"), line);
 						json(res, { ok: true });
 					} catch (e) {

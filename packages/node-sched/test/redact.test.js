@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { redactCommand } from "../lib/redact.js";
+import { redactCommand, sanitizeLogText } from "../lib/redact.js";
 
 test("redactCommand masks flag, environment, and JSON secret values", () => {
 	const command = "sched submit --token abc API_KEY=xyz {\"password\":\"pw\"}";
