@@ -7075,7 +7075,7 @@ function apply(cctx, config) {
       ]),
       open && jsxs2("div", { style: { marginTop: 6, marginLeft: 76, paddingLeft: 10, borderLeft: `2px solid ${T.border}` } }, [
         b.depends_on?.length > 0 && j("div", { style: { fontSize: 12, color: T.label2 } }, `\u4F9D\u8D56: ${b.depends_on.join(", ")}`),
-        ...tasks.filter((t) => ["failed", "timed_out", "cancelled"].includes(t.status)).map((t) => jsxs2("div", { style: { fontSize: 13, marginLeft: 14, marginTop: 2, display: "flex", alignItems: "center" } }, [
+        ...tasks.filter((t) => ["failed", "timed_out", "cancelled"].includes(t.status)).map((t) => jsxs2("div", { key: `${t.batch}:${t.task}`, style: { fontSize: 13, marginLeft: 14, marginTop: 2, display: "flex", alignItems: "center" } }, [
           j("span", { style: { fontFamily: "monospace", cursor: "pointer", textDecoration: "underline", marginRight: 6 }, onClick: () => setLogTask(`${t.batch}:${t.task}`), title: "\u67E5\u770B\u65E5\u5FD7" }, t.task),
           Badge({ s: t.status }),
           t.retries != null && j("span", { style: { color: T.label2, marginRight: 4 } }, `retries=${t.retries}`),

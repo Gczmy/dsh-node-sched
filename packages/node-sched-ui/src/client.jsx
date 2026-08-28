@@ -1189,7 +1189,7 @@ function apply(cctx, config) {
 
 				...tasks.filter((t) => ["failed", "timed_out", "cancelled"].includes(t.status)).map((t) =>
 
-					jsxs2("div", { style: { fontSize: 13, marginLeft: 14, marginTop: 2, display: "flex", alignItems: "center" } }, [
+					jsxs2("div", { key: `${t.batch}:${t.task}`, style: { fontSize: 13, marginLeft: 14, marginTop: 2, display: "flex", alignItems: "center" } }, [
 
 						j("span", { style: { fontFamily: "monospace", cursor: "pointer", textDecoration: "underline", marginRight: 6 }, onClick: () => setLogTask(`${t.batch}:${t.task}`), title: "查看日志" }, t.task),
 
