@@ -126,7 +126,9 @@ function shellQuote(s) {
 }
 
 function clamp(n, lo, hi) {
-	return Math.min(Math.max(Math.trunc(n), lo), hi);
+	const value = Number(n);
+	if (!Number.isFinite(value)) return lo;
+	return Math.min(Math.max(Math.trunc(value), lo), hi);
 }
 
 function clip(text, max = 20_000) {
