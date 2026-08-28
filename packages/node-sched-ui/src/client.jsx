@@ -400,32 +400,30 @@ function apply(cctx, config) {
 		const [state, setState] = useState({ lines: [], connected: false });
 
 		useEffect(() => {
+			let ws; let closed = false; let timer;
 
 			let ws; let closed = false; let timer;
 
 			const connect = () => {
-
+				if (closed) return;
 				const proto = location.protocol === "https:" ? "wss://" : "ws://";
 				ws = new WebSocket(`${proto}${location.host}/sched/ws/events`);
-
-				ws.onopen = () => setState((s) => ({ ...s, connected: true }));
-
-				ws.onmessage = (e) => {
-
-					const m = JSON.parse(e.data);
-
-					if (m.type === "log") setState((s) => ({ ...s, lines: [...s.lines.slice(-400), m.line] }));
-
-			
-
-					// B24c: SSH 2FA 质询 → 弹窗交给用户应答
-
-					else if (m.type === "kbdint") setState((s) => ({ ...s, kbdint: m }));
-
+				ws.onopen = () => {
+					if (!closed) setState((s) => ({ ...s, connected: true }));
 				};
-
-				ws.onclose = () => { if (!closed) timer = setTimeout(connect, 3000); setState((s) => ({ ...s, connected: false })); };
-
+				ws.onmessage = (e) => {
+					if (closed) return;
+					let m;
+					try { m = JSON.parse(e.data); } catch { return; }
+					if (!m || typeof m !== "object") return;
+					if (m.type === "log") setState((s) => ({ ...s, lines: [...s.lines.slice(-400), m.line] }));
+					else if (m.type === "kbdint") setState((s) => ({ ...s, kbdint: m }));
+				};
+				ws.onclose = () => {
+					if (closed) return;
+					setState((s) => ({ ...s, connected: false }));
+					timer = setTimeout(connect, 3000);
+				};
 			};
 
 			connect();

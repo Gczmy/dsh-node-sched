@@ -6583,17 +6583,28 @@ function apply(cctx, config) {
       let closed = false;
       let timer;
       const connect = () => {
+        if (closed) return;
         const proto = location.protocol === "https:" ? "wss://" : "ws://";
         ws = new WebSocket(`${proto}${location.host}/sched/ws/events`);
-        ws.onopen = () => setState((s) => ({ ...s, connected: true }));
+        ws.onopen = () => {
+          if (!closed) setState((s) => ({ ...s, connected: true }));
+        };
         ws.onmessage = (e) => {
-          const m = JSON.parse(e.data);
+          if (closed) return;
+          let m;
+          try {
+            m = JSON.parse(e.data);
+          } catch {
+            return;
+          }
+          if (!m || typeof m !== "object") return;
           if (m.type === "log") setState((s) => ({ ...s, lines: [...s.lines.slice(-400), m.line] }));
           else if (m.type === "kbdint") setState((s) => ({ ...s, kbdint: m }));
         };
         ws.onclose = () => {
-          if (!closed) timer = setTimeout(connect, 3e3);
+          if (closed) return;
           setState((s) => ({ ...s, connected: false }));
+          timer = setTimeout(connect, 3e3);
         };
       };
       connect();
@@ -7174,14 +7185,9 @@ function apply(cctx, config) {
       INC_OPEN_ID && INC_DETAIL && INC_DETAIL[INC_OPEN_ID] ? { ...INC_DETAIL[INC_OPEN_ID], id: INC_OPEN_ID } : null
     );
     const [msg, setMsg] = useState("");
-    const setDetailT = (v, tag) => {
-      console.log(
-        "[inc-detail\u5199] tag=" + (tag || "?") + " val=" + JSON.stringify(v && v.id ? { id: v.id, loading: !!v.loading } : v),
-        new Error().stack.split("\n").slice(2, 6).join("\n    ")
-      );
-      setDetail(v);
-    };
-    const applyList = (incidents) => {
+    const setDetailT = (value) => setDetail(value);
+    const applyList = (incidents, snapshotTime) => {
+      const frozenAt2 = snapshotTime || (/* @__PURE__ */ new Date()).toLocaleTimeString("zh-CN", { hour12: false });
       setList(incidents);
       INC_CACHE = { list: incidents };
     };
