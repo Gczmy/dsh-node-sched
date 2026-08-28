@@ -992,6 +992,14 @@ persistEntryOverride({ sshEntry: entry });
 			clients.delete(ws);
 			if (clients.size === 0) stopTail();
 		};
+
+		function scheduleTailRestart() {
+			if (tailDisposed || clients.size === 0 || tailRestartTimer) return;
+			tailRestartTimer = setTimeout(() => {
+				tailRestartTimer = undefined;
+				startTail().catch(() => {});
+			}, 5_000);
+		}
 		// B24c: 引擎 prompter 复用同一条事件通道
 		broadcastFn = broadcast;
 
@@ -1020,6 +1028,7 @@ persistEntryOverride({ sshEntry: entry });
 			if (tailDisposed || generation !== tailGeneration || clients.size === 0) return;
 			if (!nodeName) {
 				ctx.logger.error("[node-sched] cannot resolve sched node from remote ~/.sched/config.json");
+				scheduleTailRestart();
 				return;
 			}
 			const safeNode = String(nodeName).replace(/[^a-zA-Z0-9.-]/g, "");
@@ -1043,12 +1052,7 @@ persistEntryOverride({ sshEntry: entry });
 				if (generation !== tailGeneration) return;
 				tailChild = undefined; tailStream = undefined;
 				if (tailDisposed) return;
-				if (clients.size > 0 && !tailRestartTimer) {
-					tailRestartTimer = setTimeout(() => {
-						tailRestartTimer = undefined;
-						startTail().catch(() => {});
-					}, 5_000);
-				}
+				scheduleTailRestart();
 			};
 			if (useLocalTransport()) {
 				localTransport.openStream(remoteCmd).then((stream) => {
@@ -1082,6 +1086,7 @@ persistEntryOverride({ sshEntry: entry });
 			tailChild = child;
 			child.stdout.on("data", (d) => onLine(d.toString()));
 			child.on("close", onEnd);
+			child.on("error", onEnd);
 		}
 
 		// Periodic status heartbeat so quiet stretches still refresh dashboards.
