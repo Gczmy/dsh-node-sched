@@ -533,12 +533,24 @@ function apply(ctx, config) {
 				const child = cp.spawn(
 					"ssh",
 					["-o", `ConnectTimeout=${config.connectTimeoutSec}`, "-o", "BatchMode=yes",
-						config.sshEntry, `mkdir -p ~/.sched/inbox && cat > ~/.sched/inbox/${name}`],
+						config.sshEntry, `mkdir -p ~/.sched/inbox && cat > ~/.sched/inbox/${name} && printf '%s\\n' "$HOME/.sched/inbox/${name}"`],
 				);
+				let output = "";
 				let err = "";
+				child.stdout.on("data", (d) => { output += d; });
 				child.stderr.on("data", (d) => { err += d; });
 				child.on("error", reject);
-				child.on("close", (code) => code === 0 ? resolve(`$HOME/.sched/inbox/${name}`) : reject(new Error(err || "upload failed")));
+				child.on("close", (code) => {
+					if (code !== 0) {
+						reject(new Error(err || "upload failed"));
+						return;
+					}
+					try {
+						resolve(parseUploadedPath(output, name));
+					} catch (error) {
+						reject(error);
+					}
+				});
 				child.stdin.end(content);
 			});
 		};
