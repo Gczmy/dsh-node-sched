@@ -79,6 +79,9 @@ export class HostStore {
 
 	create(payload) {
 		const entry = normalizePayload(payload, true);
+		if (this.find(entry.alias)) {
+			throw new Error(`alias '${entry.alias}' already exists`);
+		}
 		this.data.hosts.push(entry);
 		this.#save();
 		return entry;
