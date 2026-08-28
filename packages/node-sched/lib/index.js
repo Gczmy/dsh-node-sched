@@ -794,7 +794,7 @@ stderr: `[ssh-engine:${target.alias}] ${formatSshError(e)}`,
 				path: "/sched/api/gpus",
 				handler: async (_req, res) => {
 					const r = await query(`${S} list-gpus`, { json: false });
-					await json(res, { ok: r.text.startsWith("[error") ? false : true, text: r.text });
+					await json(res, { ok: r.ok, text: r.text });
 				},
 			}),
 
