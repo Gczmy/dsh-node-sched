@@ -718,10 +718,19 @@ stderr: `[ssh-engine:${target.alias}] ${formatSshError(e)}`,
 				child.stdin.end(content);
 			});
 		};
+		const MAX_JSON_BODY_BYTES = 2 * 1024 * 1024;
 		const readBodyJson = async (req) => {
-			let body = "";
-			for await (const chunk of req) body += chunk;
-			return JSON.parse(body);
+			const chunks = [];
+			let bytes = 0;
+			for await (const chunk of req) {
+				const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+				bytes += buffer.length;
+				if (bytes > MAX_JSON_BODY_BYTES) {
+					throw new Error("request body exceeds 2 MiB limit");
+				}
+				chunks.push(buffer);
+			}
+			return JSON.parse(Buffer.concat(chunks, bytes).toString("utf8"));
 		};
 
 		startRefresher();
@@ -930,7 +939,7 @@ const r = await operate("submit", `${S} submit ${shellQuote(remotePath)}`, { tar
 				path: "/sched/api/op",
 				handler: async (req, res) => {
 					if (!writeGuard(req, res)) return;
-					const target = captureTransportTarget();
+const target = captureTransportTarget();
 					let body;
 					try {
 						body = await readBodyJson(req);
