@@ -18,6 +18,7 @@
     "lib/screen-result.js",
     "lib/output-limit.js",
     "lib/redact.js",
+    "lib/retry-policy.js",
     "lib/entry-override.js"
   ],
   "license": "MIT",

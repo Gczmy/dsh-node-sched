@@ -26,7 +26,7 @@ import { randomUUID } from "node:crypto";
 import z from "@deepseek-ai/schemastery";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { WebSocketServer } from "ws";
-import { HostStore, SshEngine, openExecStream } from "./ssh-engine.js";
+import { HostStore, SshEngine, formatSshError, openExecStream } from "./ssh-engine.js";
 import { LocalTransport } from "./transport.js";
 import { isLoopbackAddress, loopbackRequestAllowed, originHostAllowed } from "./request-guard.js";
 import { parseUploadedPath } from "./upload-path.js";
@@ -34,6 +34,7 @@ import { mergeEntryOverride } from "./entry-override.js";
 import { parseScreenEnd, parseScreenResult } from "./screen-result.js";
 import { appendLimitedOutput, finalizeLimitedOutput, limitedOutputText } from "./output-limit.js";
 import { redactCommand } from "./redact.js";
+import { isTransientSshError } from "./retry-policy.js";
 
 const name = "node-sched";
 
@@ -419,13 +420,12 @@ stderr: `[ssh-engine:${target.alias}] ${formatSshError(e)}`,
 
 		/** Read-only remote query; one retry on transient ssh failure. */
 		async function query(args, opts = {}) {
-			const target = opts.target ?? captureTransportTarget();
+const target = opts.target ?? captureTransportTarget();
 			const runOpts = opts.timeoutMs === undefined ? {} : { timeoutMs: opts.timeoutMs };
 			let res = await runOnTarget(target, args, runOpts);
 			if (!res.ok && isTransientSshError(res.stderr)) {
 				res = await runOnTarget(target, args, runOpts);
 			}
-
 			return envelope(res, opts);
 		}
 

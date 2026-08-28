@@ -309,6 +309,10 @@ function msg(error) {
 	return m || (error && error.constructor && error.constructor.name) || String(error);
 }
 
+export function formatSshError(error) {
+	return msg(error);
+}
+
 export function buildConnectConfig(entry, sock, opts) {
 	if (!entry.host) throw new Error(`alias '${entry.alias}': host is empty — fix the entry`);
 	if (!entry.user) throw new Error(`alias '${entry.alias}': user is empty — fix the entry`);
