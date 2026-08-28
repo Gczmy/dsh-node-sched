@@ -364,15 +364,26 @@ function apply(cctx, config) {
 
 
 	function ArmButton({ label, confirmLabel, color, onConfirm, stopProp }) {
-
 		const [armed, setArmed] = useState(false);
-
+		const [busy, setBusy] = useState(false);
 		const guard = (e) => { if (stopProp) e.stopPropagation(); };
-
 		if (!armed) return j("button", { onClick: (e) => { guard(e); setArmed(true); }, style: btn(color) }, label);
-
-		return j("button", { onClick: async (e) => { guard(e); setArmed(false); await onConfirm(); }, style: btn(color) }, confirmLabel ?? `${label}?`);
-
+		const confirm = async (e) => {
+			guard(e);
+			if (busy) return;
+			setBusy(true);
+			try {
+				await onConfirm();
+			} finally {
+				setBusy(false);
+				setArmed(false);
+			}
+		};
+		return j("button", {
+			disabled: busy,
+			onClick: confirm,
+			style: btn(color, busy),
+		}, busy ? "处理中…" : confirmLabel ?? `${label}?`);
 	}
 
 

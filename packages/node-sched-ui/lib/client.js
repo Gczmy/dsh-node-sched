@@ -6552,6 +6552,7 @@ function apply(cctx, config) {
   }
   function ArmButton({ label, confirmLabel, color, onConfirm, stopProp }) {
     const [armed, setArmed] = useState(false);
+    const [busy, setBusy] = useState(false);
     const guard = (e) => {
       if (stopProp) e.stopPropagation();
     };
@@ -6559,11 +6560,22 @@ function apply(cctx, config) {
       guard(e);
       setArmed(true);
     }, style: btn(color) }, label);
-    return j("button", { onClick: async (e) => {
+    const confirm2 = async (e) => {
       guard(e);
-      setArmed(false);
-      await onConfirm();
-    }, style: btn(color) }, confirmLabel ?? `${label}?`);
+      if (busy) return;
+      setBusy(true);
+      try {
+        await onConfirm();
+      } finally {
+        setBusy(false);
+        setArmed(false);
+      }
+    };
+    return j("button", {
+      disabled: busy,
+      onClick: confirm2,
+      style: btn(color, busy)
+    }, busy ? "\u5904\u7406\u4E2D\u2026" : confirmLabel ?? `${label}?`);
   }
   function TypedConfirm({ placeholder, color, onConfirm, children }) {
     const [typed, setTyped] = useState("");
