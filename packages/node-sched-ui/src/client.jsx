@@ -1388,8 +1388,17 @@ function apply(cctx, config) {
 				const r = await fetch(`/sched/api/incidents?id=${id}`);
 
 				const d = await r.json();
-
-				const inc = JSON.parse(d.text).incident;
+				if (!r.ok || !d?.ok) {
+					throw new Error(String(d?.text || `HTTP ${r.status}`).slice(0, 240));
+				}
+				let payload;
+				try {
+					payload = JSON.parse(d.text);
+				} catch {
+					throw new Error("详情响应不是有效 JSON");
+				}
+				const inc = payload?.incident;
+				if (!inc || typeof inc !== "object") throw new Error("详情响应缺少 incident");
 
 				// 先写模块缓存 (跨重挂载存活 —— 水合时可原样恢复展开态)
 
@@ -1401,7 +1410,11 @@ function apply(cctx, config) {
 
 				setDetailT(inc);
 
-			} catch (e) { setDetailT({ id, error: String(e) }); }
+			} catch (e) {
+				if (gen === INC_VIEW_GEN && INC_OPEN_ID === id) {
+					setDetailT({ id, error: String(e) });
+				}
+			}
 
 		}, []);
 

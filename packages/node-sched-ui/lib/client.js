@@ -7210,12 +7210,24 @@ function apply(cctx, config) {
       try {
         const r = await fetch(`/sched/api/incidents?id=${id}`);
         const d = await r.json();
-        const inc = JSON.parse(d.text).incident;
+        if (!r.ok || !d?.ok) {
+          throw new Error(String(d?.text || `HTTP ${r.status}`).slice(0, 240));
+        }
+        let payload;
+        try {
+          payload = JSON.parse(d.text);
+        } catch {
+          throw new Error("\u8BE6\u60C5\u54CD\u5E94\u4E0D\u662F\u6709\u6548 JSON");
+        }
+        const inc = payload?.incident;
+        if (!inc || typeof inc !== "object") throw new Error("\u8BE6\u60C5\u54CD\u5E94\u7F3A\u5C11 incident");
         INC_DETAIL = { ...INC_DETAIL || {}, [inc.id]: inc };
         if (gen !== INC_VIEW_GEN || INC_OPEN_ID !== inc.id) return;
         setDetailT(inc);
       } catch (e) {
-        setDetailT({ id, error: String(e) });
+        if (gen === INC_VIEW_GEN && INC_OPEN_ID === id) {
+          setDetailT({ id, error: String(e) });
+        }
       }
     }, []);
     const load = useCallback(async () => {
