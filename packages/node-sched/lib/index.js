@@ -136,6 +136,14 @@ function clip(text, max = 20_000) {
 	text = String(text ?? "");
 	return text.length <= max ? text : `${text.slice(0, max)}\n…[truncated ${text.length - max} bytes]`;
 }
+function safeError(error, maxChars = 300) {
+	const message = String(error?.message ?? error);
+	const withoutPaths = message.replace(
+		/(^|[\s:(])((?:\/(?:Users|home|private|tmp|var|opt|Volumes|usr|root|etc|workspace)\/|[A-Za-z]:[\\/])[^\s"'`)\]}]*)/g,
+		(_, lead) => `${lead}[path]`,
+	);
+	return sanitizeLogText(withoutPaths, maxChars);
+}
 
 /** Uniform tool result envelope: human-readable text + optional parsed JSON. */
 function envelope(res, { json = true } = {}) {
@@ -832,11 +840,11 @@ persistEntryOverride({ sshEntry: entry });
 							const body = (pr.text || pr.stdout || "").trim();
 							probeText = (pr.ok ? "" : "[不可达] ") + body.split("\n")[0].slice(0, 80);
 						} catch (e) {
-							probeText = "探测失败: " + String(e.message ?? e).slice(0, 60);
+							probeText = "探测失败: " + safeError(e, 60);
 						}
 						await json(res, { ok: true, entry, prev, probeText });
 					} catch (e) {
-						await json(res, { ok: false, text: String(e.message ?? e) }, 400);
+						await json(res, { ok: false, text: safeError(e) }, 400);
 					}
 				},
 			}),
@@ -861,7 +869,7 @@ persistEntryOverride({ sshEntry: entry });
 						const r = await query(cmd);
 						await json(res, { ok: r.ok, text: r.text });
 					} catch (e) {
-						await json(res, { ok: false, text: String(e.message ?? e) }, 400);
+						await json(res, { ok: false, text: safeError(e) }, 400);
 					}
 				},
 			}),
@@ -901,7 +909,7 @@ persistEntryOverride({ sshEntry: entry });
 							await runOnTarget(target, `rm -f ${shellQuote(remotePath)}`).catch(() => {});
 						}
 					} catch (e) {
-						await json(res, { ok: false, text: String(e.message ?? e) }, 400);
+						await json(res, { ok: false, text: safeError(e) }, 400);
 					}
 				},
 			}),
@@ -922,7 +930,7 @@ persistEntryOverride({ sshEntry: entry });
 							await runOnTarget(target, `rm -f ${shellQuote(remotePath)}`).catch(() => {});
 						}
 					} catch (e) {
-						await json(res, { ok: false, text: String(e.message ?? e) }, 400);
+						await json(res, { ok: false, text: safeError(e) }, 400);
 					}
 				},
 			}),
@@ -943,7 +951,7 @@ const r = await operate("submit", `${S} submit ${shellQuote(remotePath)}`, { tar
 							await runOnTarget(target, `rm -f ${shellQuote(remotePath)}`).catch(() => {});
 						}
 					} catch (e) {
-						await json(res, { ok: false, text: String(e.message ?? e) }, 400);
+						await json(res, { ok: false, text: safeError(e) }, 400);
 					}
 				},
 			}),
@@ -1107,7 +1115,7 @@ const target = captureTransportTarget();
 					stream.onData = (chunk) => onLine(chunk.toString("utf8"));
 					stream.onClose = onEnd;
 				}).catch((e) => {
-					ctx.logger.warn("[node-sched] local tail failed: %s", String(e.message ?? e));
+					ctx.logger.warn("[node-sched] local tail failed: %s", safeError(e));
 					onEnd();
 				});
 				return;
@@ -1120,7 +1128,7 @@ const target = captureTransportTarget();
 					stream.onData = (chunk) => onLine(chunk.toString("utf8"));
 					stream.onClose = onEnd;
 				}).catch((e) => {
-					ctx.logger.warn("[node-sched] engine tail failed (%s): %s", boundAlias, String(e.message ?? e));
+					ctx.logger.warn("[node-sched] engine tail failed (%s): %s", boundAlias, safeError(e));
 					onEnd();
 				});
 				return;
@@ -1246,7 +1254,7 @@ const targetKey = statusTargetKey();
 						}
 						json(res, { error: `method not allowed: ${method}` }, 405);
 					} catch (e) {
-						json(res, { error: String(e.message ?? e) }, 400);
+						json(res, { error: safeError(e) }, 400);
 					}
 				},
 			}),
@@ -1259,7 +1267,7 @@ const targetKey = statusTargetKey();
 					try {
 						json(res, { result: sshStore.importSshConfig() });
 					} catch (e) {
-						json(res, { error: String(e.message ?? e) }, 400);
+						json(res, { error: safeError(e) }, 400);
 					}
 				},
 			}),
@@ -1271,9 +1279,11 @@ const targetKey = statusTargetKey();
 					if (!loopbackOnly(req, res)) return;
 					try {
 						const body = await readBodyJson(req);
-						json(res, await sshEngine.test(String(body.alias ?? "")));
+						const result = await sshEngine.test(String(body.alias ?? ""));
+						if (!result.ok && result.error) result.error = safeError(result.error);
+						json(res, result);
 					} catch (e) {
-						json(res, { ok: false, error: String(e.message ?? e) });
+						json(res, { ok: false, error: safeError(e) });
 					}
 				},
 			}),
@@ -1304,7 +1314,7 @@ const targetKey = statusTargetKey();
 						}
 						json(res, result);
 					} catch (e) {
-						json(res, { success: false, exitCode: null, timedOut: false, stdout: "", stderr: "", durationMs: 0, error: String(e.message ?? e) });
+						json(res, { success: false, exitCode: null, timedOut: false, stdout: "", stderr: "", durationMs: 0, error: safeError(e) });
 					}
 				},
 			}),
@@ -1342,14 +1352,14 @@ const targetKey = statusTargetKey();
 						// 诚实反馈：主机必须可达才允许绑定；daemon 状态只提示不强阻
 						const reach = await sshEngine.test(alias);
 						if (!reach.ok) {
-							return void json(res, { ok: false, error: `\u4e3b\u673a\u4e0d\u53ef\u8fbe: ${reach.error ?? "?"}`, reachable: false });
+							return void json(res, { ok: false, error: `主机不可达: ${safeError(reach.error ?? "?")}`, reachable: false });
 						}
 						let probeText = "";
 						try {
 							const pr = await sshEngine.exec(alias, `${S} daemon status`, 25_000);
-							probeText = (pr.stdout || pr.stderr || "").split("\n")[0].slice(0, 100);
+							probeText = sanitizeLogText((pr.stdout || pr.stderr || "").split("\n")[0], 100);
 						} catch (e) {
-							probeText = "\u63a2\u6d4b\u5931\u8d25: " + String(e.message ?? e).slice(0, 80);
+							probeText = "\u63a2\u6d4b\u5931\u8d25: " + safeError(e, 80);
 						}
 						const previousAlias = boundAlias;
 						persistEntryOverride({ sshEntry: config.sshEntry, schedAlias: alias });
@@ -1359,7 +1369,7 @@ const targetKey = statusTargetKey();
 						ctx.logger.warn("[node-sched] audit #%d sched-bind -> %s (engine mode)", ++auditSeq, alias);
 						json(res, { ok: true, mode: "engine", alias, latencyMs: reach.latencyMs, probeText });
 					} catch (e) {
-						json(res, { ok: false, error: String(e.message ?? e) }, 400);
+						json(res, { ok: false, error: safeError(e) }, 400);
 					}
 				},
 			}),
@@ -1460,7 +1470,7 @@ const targetKey = statusTargetKey();
 							try {
 								session = await sshEngine.openShell(alias, { cols, rows });
 							} catch (e) {
-								ws.send(JSON.stringify({ type: "exit", code: null, error: String(e.message ?? e) }));
+								ws.send(JSON.stringify({ type: "exit", code: null, error: safeError(e) }));
 								ws.close();
 								return;
 							}
@@ -1478,7 +1488,7 @@ const targetKey = statusTargetKey();
 								}
 							};
 							session.onExit = (code, error) => {
-								try { ws.send(JSON.stringify({ type: "exit", code, error })); } catch { /* gone */ }
+								try { ws.send(JSON.stringify({ type: "exit", code, error: error ? safeError(error) : undefined })); } catch { /* gone */ }
 								try { ws.close(); } catch { /* gone */ }
 							};
 							ws.send(JSON.stringify({ type: "ready", alias }));
