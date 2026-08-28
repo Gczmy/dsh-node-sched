@@ -801,6 +801,7 @@ function apply(ctx, config) {
 		let tailStream;
 		let tailRestartTimer;
 		let tailDisposed = false;
+		let tailGeneration = 0;
 
 		function broadcast(obj) {
 			const msg = JSON.stringify(obj);
@@ -808,6 +809,22 @@ function apply(ctx, config) {
 				try { ws.send(msg); } catch { /* socket closing */ }
 			}
 		}
+		function stopTail() {
+			tailGeneration++;
+			clearTimeout(tailRestartTimer);
+			tailRestartTimer = undefined;
+			const stream = tailStream;
+			tailStream = undefined;
+			try { stream?.close(); } catch { /* already closed */ }
+			const child = tailChild;
+			tailChild = undefined;
+			try { child?.kill("SIGTERM"); } catch { /* already closed */ }
+		}
+
+		const removeClient = (ws) => {
+			clients.delete(ws);
+			if (clients.size === 0) stopTail();
+		};
 		// B24c: 引擎 prompter 复用同一条事件通道
 		broadcastFn = broadcast;
 
@@ -831,8 +848,9 @@ function apply(ctx, config) {
 
 		async function startTail() {
 			if (tailDisposed || tailChild || tailStream || clients.size === 0) return;
+			const generation = ++tailGeneration;
 			const nodeName = await resolveNode();
-			if (tailDisposed || clients.size === 0) return;
+			if (tailDisposed || generation !== tailGeneration || clients.size === 0) return;
 			if (!nodeName) {
 				ctx.logger.error("[node-sched] cannot resolve sched node from remote ~/.sched/config.json");
 				return;
@@ -850,6 +868,7 @@ function apply(ctx, config) {
 				}
 			};
 			const onEnd = () => {
+				if (generation !== tailGeneration) return;
 				tailChild = undefined; tailStream = undefined;
 				if (tailDisposed) return;
 				if (clients.size > 0 && !tailRestartTimer) {
@@ -861,7 +880,7 @@ function apply(ctx, config) {
 			};
 			if (useLocalTransport()) {
 				localTransport.openStream(remoteCmd).then((stream) => {
-					if (tailDisposed || tailChild || tailStream || clients.size === 0) { stream.close(); return; }
+					if (tailDisposed || generation !== tailGeneration || tailChild || tailStream || clients.size === 0) { stream.close(); return; }
 					tailStream = stream;
 					stream.onData = (chunk) => onLine(chunk.toString("utf8"));
 					stream.onClose = onEnd;
@@ -874,7 +893,7 @@ function apply(ctx, config) {
 			// B24: 引擎模式走独立 exec 流通道；CLI 模式走 ssh 子进程
 			if (boundAlias) {
 				openExecStream(sshEngine, boundAlias, remoteCmd).then((stream) => {
-					if (tailChild || tailStream) { try { stream.close(); } catch {} return; }
+					if (tailDisposed || generation !== tailGeneration || tailChild || tailStream || clients.size === 0) { try { stream.close(); } catch {} return; }
 					tailStream = stream;
 					stream.onData = (chunk) => onLine(chunk.toString("utf8"));
 					stream.onClose = onEnd;
@@ -913,8 +932,8 @@ function apply(ctx, config) {
 					}
 					wss.handleUpgrade(req, socket, head, (ws) => {
 						clients.add(ws);
-						ws.on("close", () => clients.delete(ws));
-						ws.on("error", () => clients.delete(ws));
+						ws.on("close", () => removeClient(ws));
+						ws.on("error", () => removeClient(ws));
 						startTail().catch(() => {});
 					});
 				},
@@ -925,10 +944,7 @@ function apply(ctx, config) {
 		// 引擎实例在 apply() 顶部创建（B24: runRemote 双通道需要）；此处仅注册清理。
 		postApplyCleanup = () => {
 			tailDisposed = true;
-			if (tailRestartTimer) {
-				clearTimeout(tailRestartTimer);
-				tailRestartTimer = undefined;
-			}
+			stopTail();
 			localTransport.dispose();
 			sshEngine.dispose();
 		};
