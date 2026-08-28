@@ -27,7 +27,7 @@ import { defineTool } from "@deepseek-ai/dsh-tools";
 import { WebSocketServer } from "ws";
 import { HostStore, SshEngine, openExecStream } from "./ssh-engine.js";
 import { LocalTransport } from "./transport.js";
-import { isLoopbackAddress, originHostAllowed } from "./request-guard.js";
+import { isLoopbackAddress, loopbackRequestAllowed, originHostAllowed } from "./request-guard.js";
 import { parseUploadedPath } from "./upload-path.js";
 
 const name = "node-sched";
@@ -485,9 +485,13 @@ function apply(ctx, config) {
 			res.writeHead(code, { "content-type": "application/json; charset=utf-8" });
 			res.end(JSON.stringify(body));
 		};
-		const originHostGuard = (req, res) => {
-			if (originHostAllowed(req)) return true;
-			json(res, { ok: false, error: "forbidden: Origin/Host must be loopback" }, 403);
+		const writeGuard = (req, res) => {
+			if (req?.method !== "POST") {
+				json(res, { ok: false, error: "method not allowed: POST" }, 405);
+				return false;
+			}
+			if (loopbackRequestAllowed(req)) return true;
+			json(res, { ok: false, error: "forbidden: loopback Origin/Host required" }, 403);
 			return false;
 		};
 
@@ -607,7 +611,7 @@ function apply(ctx, config) {
 							sshEntry: config.sshEntry,
 						});
 						}
-						if (!originHostGuard(req, res)) return;
+						if (!writeGuard(req, res)) return;
 						const body = await readBodyJson(req);
 						const entry = String(body.entry || "").trim();
 						if (!/^[A-Za-z0-9_.-]+$/.test(entry)) {
@@ -671,7 +675,7 @@ function apply(ctx, config) {
 							await json(res, { ok: r.ok, text: r.text });
 							return;
 						}
-						if (!originHostGuard(req, res)) return;
+						if (!writeGuard(req, res)) return;
 						const body = await readBodyJson(req);
 						if (!body.patch || typeof body.patch !== "object") {
 							return void json(res, { ok: false, text: "patch (object) required" }, 400);
@@ -704,7 +708,7 @@ function apply(ctx, config) {
 				kind: "prefix",
 				path: "/sched/api/dryrun",
 				handler: async (req, res) => {
-					if (!originHostGuard(req, res)) return;
+					if (!writeGuard(req, res)) return;
 					try {
 						const { content } = await readBodyJson(req);
 						const remotePath = await uploadRemote(String(content));
@@ -724,7 +728,7 @@ function apply(ctx, config) {
 				kind: "prefix",
 				path: "/sched/api/submit",
 				handler: async (req, res) => {
-					if (!originHostGuard(req, res)) return;
+					if (!writeGuard(req, res)) return;
 					try {
 						const { content } = await readBodyJson(req);
 						const remotePath = await uploadRemote(String(content));
@@ -752,7 +756,7 @@ function apply(ctx, config) {
 				kind: "prefix",
 				path: "/sched/api/op",
 				handler: async (req, res) => {
-					if (!originHostGuard(req, res)) return;
+					if (!writeGuard(req, res)) return;
 					let body = "";
 					for await (const chunk of req) body += chunk;
 					let op, id;
@@ -1075,6 +1079,7 @@ function apply(ctx, config) {
 						} catch (e) {
 							probeText = "\u63a2\u6d4b\u5931\u8d25: " + String(e.message ?? e).slice(0, 80);
 						}
+
 						boundAlias = alias;
 						fs.mkdirSync(path.dirname(entryFile), { recursive: true });
 						fs.writeFileSync(entryFile,
