@@ -24,9 +24,9 @@ var __copyProps = (to, from, except, desc) => {
 };
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-// ../../node_modules/.pnpm/@xterm+xterm@5.5.0/node_modules/@xterm/xterm/lib/xterm.js
+// node_modules/.pnpm/@xterm+xterm@5.5.0/node_modules/@xterm/xterm/lib/xterm.js
 var require_xterm = __commonJS({
-  "../../node_modules/.pnpm/@xterm+xterm@5.5.0/node_modules/@xterm/xterm/lib/xterm.js"(exports, module2) {
+  "node_modules/.pnpm/@xterm+xterm@5.5.0/node_modules/@xterm/xterm/lib/xterm.js"(exports, module2) {
     !function(e, t) {
       if ("object" == typeof exports && "object" == typeof module2) module2.exports = t();
       else if ("function" == typeof define && define.amd) define([], t);
@@ -6083,9 +6083,9 @@ WARNING: This link could potentially be dangerous`)) {
   }
 });
 
-// ../../node_modules/.pnpm/@xterm+addon-fit@0.10.0_@xterm+xterm@5.5.0/node_modules/@xterm/addon-fit/lib/addon-fit.js
+// node_modules/.pnpm/@xterm+addon-fit@0.10.0_@xterm+xterm@5.5.0/node_modules/@xterm/addon-fit/lib/addon-fit.js
 var require_addon_fit = __commonJS({
-  "../../node_modules/.pnpm/@xterm+addon-fit@0.10.0_@xterm+xterm@5.5.0/node_modules/@xterm/addon-fit/lib/addon-fit.js"(exports, module2) {
+  "node_modules/.pnpm/@xterm+addon-fit@0.10.0_@xterm+xterm@5.5.0/node_modules/@xterm/addon-fit/lib/addon-fit.js"(exports, module2) {
     !function(e, t) {
       "object" == typeof exports && "object" == typeof module2 ? module2.exports = t() : "function" == typeof define && define.amd ? define([], t) : "object" == typeof exports ? exports.FitAddon = t() : e.FitAddon = t();
     }(self, () => (() => {
@@ -6119,9 +6119,9 @@ var require_addon_fit = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/@xterm+xterm@5.5.0/node_modules/@xterm/xterm/css/xterm.css
+// node_modules/.pnpm/@xterm+xterm@5.5.0/node_modules/@xterm/xterm/css/xterm.css
 var require_xterm2 = __commonJS({
-  "../../node_modules/.pnpm/@xterm+xterm@5.5.0/node_modules/@xterm/xterm/css/xterm.css"(exports, module2) {
+  "node_modules/.pnpm/@xterm+xterm@5.5.0/node_modules/@xterm/xterm/css/xterm.css"(exports, module2) {
     module2.exports = `/**
  * Copyright (c) 2014 The xterm.js authors. All rights reserved.
  * Copyright (c) 2012-2013, Christopher Jeffrey (MIT License)
@@ -6344,7 +6344,7 @@ var require_xterm2 = __commonJS({
   }
 });
 
-// src/client.jsx
+// packages/node-sched-ui/src/client.jsx
 var client_exports = {};
 __export(client_exports, {
   apply: () => apply,
@@ -7250,83 +7250,93 @@ function apply(cctx, config) {
         { style: { color: T.label2 } },
         "\u6682\u65E0\u4E8B\u6545\u5FEB\u7167 (OOM/gpu_fault \u53D1\u751F\u65F6\u81EA\u52A8\u91C7\u96C6)"
       ),
-      list.map((r) => jsxs2("div", {
-        key: r.id,
-        onClick: () => openDetail(r.id),
-        style: {
-          display: "flex",
-          gap: 8,
-          padding: "4px 6px",
-          cursor: "pointer",
-          borderRadius: 4,
-          background: detail && detail.id === r.id ? T.bgLayer : "transparent"
-        }
-      }, [
-        j("span", { style: { width: 30, flexShrink: 0, color: T.label2 } }, "#" + r.id),
-        j("span", { style: { width: 130, flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: T.label } }, r.ts),
-        j("span", { style: { width: 70, flexShrink: 0, color: r.kind === "oom" ? T.err : T.warn } }, r.kind),
-        j("span", { style: { width: 36, flexShrink: 0 } }, "gpu" + (r.gpu_idx ?? "-")),
-        j(
-          "span",
-          { style: { flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
-          r.job_id
-        )
-      ])),
-      detail && !detail.loading && !detail.error && jsxs2("div", {
-        style: { border: `1px solid ${T.border}`, borderRadius: 6, padding: 8, marginTop: 8 }
-      }, [
-        jsxs2("div", { style: { marginBottom: 4 } }, [
-          j(
-            "span",
-            { style: { fontWeight: 600, color: T.brand } },
-            `#${detail.id} ${detail.kind} @ gpu${detail.gpu_idx ?? "-"}`
-          ),
-          j("button", {
-            onClick: () => {
+      list.map((r) => jsxs2("div", { key: r.id }, [
+        jsxs2("div", {
+          key: "row",
+          onClick: () => {
+            if (detail && detail.id === r.id) {
               INC_VIEW_GEN++;
               setDetailT(null, "collapse");
               INC_OPEN_ID = null;
-            },
-            style: { ...ghostBtn, marginLeft: 8 }
-          }, "\u6536\u8D77")
+            } else {
+              openDetail(r.id);
+            }
+          },
+          style: {
+            display: "flex",
+            gap: 8,
+            padding: "4px 6px",
+            cursor: "pointer",
+            borderRadius: 4,
+            background: detail && detail.id === r.id ? T.bgLayer : "transparent"
+          }
+        }, [
+          j("span", { style: { width: 30, flexShrink: 0, color: T.label2 } }, "#" + r.id),
+          j("span", { style: { width: 130, flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: T.label } }, r.ts),
+          j("span", { style: { width: 70, flexShrink: 0, color: r.kind === "oom" ? T.err : T.warn } }, r.kind),
+          j("span", { style: { width: 36, flexShrink: 0 } }, "gpu" + (r.gpu_idx ?? "-")),
+          j("span", { style: { flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, r.job_id)
         ]),
-        j(
-          "div",
-          { style: { color: T.label2, fontSize: 12, marginBottom: 4 } },
-          `${detail.ts} \xB7 job ${detail.job_id} \xB7 batch ${detail.batch_id}`
-        ),
-        failed.dispatch_mode && j(
-          "div",
-          { style: { wordBreak: "break-word", lineHeight: 1.5 } },
-          `\u6D3E\u53D1\u65B9\u5F0F: ${failed.dispatch_mode} \xB7 \u58F0\u660E ${failed.declared_vram_gib ?? "-"} GiB \xB7 \u5386\u53F2\u5CF0\u503C ${failed.profile_peak_gib ?? "-"}`
-        ),
-        mem.packed_sum_gib !== void 0 && j(
-          "div",
-          { style: { wordBreak: "break-word", lineHeight: 1.5 } },
-          `\u663E\u5B58: cap=${mem.cap_gib ?? "?"} packed=${mem.packed_sum_gib} actual=${mem.actual_used_gib ?? "?"}${mem.degraded ? " [\u964D\u7EA7]" : ""}`
-        ),
-        (mem.external_pids || []).length > 0 && jsxs2(
-          "div",
-          { style: { color: T.warn } },
-          ["\u5916\u90E8\u8FDB\u7A0B: ", ...(mem.external_pids || []).map((e) => j("span", { key: e.pid }, `pid${e.pid}(${e.mem_mib ?? "?"}MiB) `))]
-        ),
-        (p.co_runners || []).length > 0 && jsxs2("div", {}, [
-          j("div", { style: { color: T.label2, marginTop: 4 } }, "\u540C\u5361\u90BB\u5C45:"),
-          ...p.co_runners.map((c) => j(
+        detail && detail.id === r.id && detail.loading && j("div", { key: "detail-loading", style: { color: T.label2, padding: 8, margin: "2px 0 6px 38px" } }, "\u52A0\u8F7D\u4E8B\u6545\u8BE6\u60C5\u2026"),
+        detail && detail.id === r.id && detail.error && j("div", { key: "detail-error", style: { color: T.err, padding: 8, margin: "2px 0 6px 38px" } }, `\u8BE6\u60C5\u52A0\u8F7D\u5931\u8D25: ${detail.error}`),
+        detail && detail.id === r.id && !detail.loading && !detail.error && jsxs2("div", {
+          key: "detail",
+          style: { border: `1px solid ${T.border}`, borderRadius: 6, padding: 8, margin: "2px 0 6px 38px" }
+        }, [
+          jsxs2("div", { style: { marginBottom: 4 } }, [
+            j(
+              "span",
+              { style: { fontWeight: 600, color: T.brand } },
+              `#${detail.id} ${detail.kind} @ gpu${detail.gpu_idx ?? "-"}`
+            ),
+            j("button", {
+              onClick: (e) => {
+                e.stopPropagation();
+                INC_VIEW_GEN++;
+                setDetailT(null, "collapse");
+                INC_OPEN_ID = null;
+              },
+              style: { ...ghostBtn, marginLeft: 8 }
+            }, "\u6536\u8D77")
+          ]),
+          j(
             "div",
-            { key: c.job_id, style: { paddingLeft: 10 } },
-            `${c.task} [${c.status}] declared=${c.declared_vram_gib} peak=${c.profile_peak_gib} runtime=${c.runtime_sec}s`
-          ))
-        ]),
-        (detail.verdicts || []).length > 0 && jsxs2("div", { style: { marginTop: 6 } }, [
-          j("div", { style: { color: T.warn, fontWeight: 600 } }, "\u5224\u8BFB\u5047\u8BBE:"),
-          ...detail.verdicts.map((v, i2) => j("div", { key: i2, style: { color: T.warn, paddingLeft: 10 } }, "? " + v))
-        ]),
-        p.log_excerpt && jsxs2("div", {}, [
-          j("div", { style: { color: T.label2, marginTop: 6 } }, "\u65E5\u5FD7\u6458\u5F55:"),
-          j("pre", { style: { ...pre, maxHeight: 120, margin: "2px 0" } }, p.log_excerpt)
+            { style: { color: T.label2, fontSize: 12, marginBottom: 4 } },
+            `${detail.ts} \xB7 job ${detail.job_id} \xB7 batch ${detail.batch_id}`
+          ),
+          failed.dispatch_mode && j(
+            "div",
+            { style: { wordBreak: "break-word", lineHeight: 1.5 } },
+            `\u6D3E\u53D1\u65B9\u5F0F: ${failed.dispatch_mode} \xB7 \u58F0\u660E ${failed.declared_vram_gib ?? "-"} GiB \xB7 \u5386\u53F2\u5CF0\u503C ${failed.profile_peak_gib ?? "-"}`
+          ),
+          mem.packed_sum_gib !== void 0 && j(
+            "div",
+            { style: { wordBreak: "break-word", lineHeight: 1.5 } },
+            `\u663E\u5B58: cap=${mem.cap_gib ?? "?"} packed=${mem.packed_sum_gib} actual=${mem.actual_used_gib ?? "?"}${mem.degraded ? " [\u964D\u7EA7]" : ""}`
+          ),
+          (mem.external_pids || []).length > 0 && jsxs2(
+            "div",
+            { style: { color: T.warn } },
+            ["\u5916\u90E8\u8FDB\u7A0B: ", ...(mem.external_pids || []).map((e) => j("span", { key: e.pid }, `pid${e.pid}(${e.mem_mib ?? "?"}MiB) `))]
+          ),
+          (p.co_runners || []).length > 0 && jsxs2("div", {}, [
+            j("div", { style: { color: T.label2, marginTop: 4 } }, "\u540C\u5361\u90BB\u5C45:"),
+            ...p.co_runners.map((c) => j(
+              "div",
+              { key: c.job_id, style: { paddingLeft: 10 } },
+              `${c.task} [${c.status}] declared=${c.declared_vram_gib} peak=${c.profile_peak_gib} runtime=${c.runtime_sec}s`
+            ))
+          ]),
+          (detail.verdicts || []).length > 0 && jsxs2("div", { style: { marginTop: 6 } }, [
+            j("div", { style: { color: T.warn, fontWeight: 600 } }, "\u5224\u8BFB\u5047\u8BBE:"),
+            ...detail.verdicts.map((v, i2) => j("div", { key: i2, style: { color: T.warn, paddingLeft: 10 } }, "? " + v))
+          ]),
+          p.log_excerpt && jsxs2("div", {}, [
+            j("div", { style: { color: T.label2, marginTop: 6 } }, "\u65E5\u5FD7\u6458\u5F55:"),
+            j("pre", { style: { ...pre, maxHeight: 120, overflow: "auto", margin: "2px 0" } }, p.log_excerpt)
+          ])
         ])
-      ]),
+      ])),
       msg && j("div", { style: { color: T.err, fontSize: 13 } }, msg)
     ]);
   });

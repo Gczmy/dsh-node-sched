@@ -1492,93 +1492,65 @@ function apply(cctx, config) {
 
 				"暂无事故快照 (OOM/gpu_fault 发生时自动采集)"),
 
-			list.map((r) => jsxs2("div", {
+			list.map((r) => jsxs2("div", { key: r.id }, [
 
-				key: r.id,
-
-				onClick: () => openDetail(r.id),
-
-				style: { display: "flex", gap: 8, padding: "4px 6px", cursor: "pointer",
-
-					borderRadius: 4, background: detail && detail.id === r.id ? T.bgLayer : "transparent" },
-
-			}, [
-
-				j("span", { style: { width: 30, flexShrink: 0, color: T.label2 } }, "#" + r.id),
-
-				j("span", { style: { width: 130, flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: T.label } }, r.ts),
-
-				j("span", { style: { width: 70, flexShrink: 0, color: r.kind === "oom" ? T.err : T.warn } }, r.kind),
-
-				j("span", { style: { width: 36, flexShrink: 0 } }, "gpu" + (r.gpu_idx ?? "-")),
-
-				j("span", { style: { flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
-
-					r.job_id),
-
+				jsxs2("div", {
+					key: "row",
+					onClick: () => {
+						if (detail && detail.id === r.id) {
+							INC_VIEW_GEN++;
+							setDetailT(null, "collapse");
+							INC_OPEN_ID = null;
+						} else {
+							openDetail(r.id);
+						}
+					},
+					style: { display: "flex", gap: 8, padding: "4px 6px", cursor: "pointer",
+						borderRadius: 4, background: detail && detail.id === r.id ? T.bgLayer : "transparent" },
+				}, [
+					j("span", { style: { width: 30, flexShrink: 0, color: T.label2 } }, "#" + r.id),
+					j("span", { style: { width: 130, flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: T.label } }, r.ts),
+					j("span", { style: { width: 70, flexShrink: 0, color: r.kind === "oom" ? T.err : T.warn } }, r.kind),
+					j("span", { style: { width: 36, flexShrink: 0 } }, "gpu" + (r.gpu_idx ?? "-")),
+					j("span", { style: { flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, r.job_id),
+				]),
+				detail && detail.id === r.id && detail.loading &&
+					j("div", { key: "detail-loading", style: { color: T.label2, padding: 8, margin: "2px 0 6px 38px" } }, "加载事故详情…"),
+				detail && detail.id === r.id && detail.error &&
+					j("div", { key: "detail-error", style: { color: T.err, padding: 8, margin: "2px 0 6px 38px" } }, `详情加载失败: ${detail.error}`),
+				detail && detail.id === r.id && !detail.loading && !detail.error && jsxs2("div", {
+					key: "detail",
+					style: { border: `1px solid ${T.border}`, borderRadius: 6, padding: 8, margin: "2px 0 6px 38px" } }, [
+					jsxs2("div", { style: { marginBottom: 4 } }, [
+						j("span", { style: { fontWeight: 600, color: T.brand } },
+							`#${detail.id} ${detail.kind} @ gpu${detail.gpu_idx ?? "-"}`),
+						j("button", { onClick: (e) => { e.stopPropagation(); INC_VIEW_GEN++; setDetailT(null, "collapse"); INC_OPEN_ID = null; },
+							style: { ...ghostBtn, marginLeft: 8 } }, "收起"),
+					]),
+					j("div", { style: { color: T.label2, fontSize: 12, marginBottom: 4 } },
+						`${detail.ts} · job ${detail.job_id} · batch ${detail.batch_id}`),
+					failed.dispatch_mode && j("div", { style: { wordBreak: "break-word", lineHeight: 1.5 } },
+						`派发方式: ${failed.dispatch_mode} · 声明 ${failed.declared_vram_gib ?? "-"} GiB · 历史峰值 ${failed.profile_peak_gib ?? "-"}`),
+					mem.packed_sum_gib !== undefined && j("div", { style: { wordBreak: "break-word", lineHeight: 1.5 } },
+						`显存: cap=${mem.cap_gib ?? "?"} packed=${mem.packed_sum_gib} actual=${mem.actual_used_gib ?? "?"}${mem.degraded ? " [降级]" : ""}`),
+					(mem.external_pids || []).length > 0 && jsxs2("div", { style: { color: T.warn } },
+						["外部进程: ", ...(mem.external_pids || []).map((e) =>
+							j("span", { key: e.pid }, `pid${e.pid}(${e.mem_mib ?? "?"}MiB) `))]),
+					(p.co_runners || []).length > 0 && jsxs2("div", {}, [
+						j("div", { style: { color: T.label2, marginTop: 4 } }, "同卡邻居:"),
+						...p.co_runners.map((c) => j("div", { key: c.job_id, style: { paddingLeft: 10 } },
+							`${c.task} [${c.status}] declared=${c.declared_vram_gib} peak=${c.profile_peak_gib} runtime=${c.runtime_sec}s`)),
+					]),
+					(detail.verdicts || []).length > 0 && jsxs2("div", { style: { marginTop: 6 } }, [
+						j("div", { style: { color: T.warn, fontWeight: 600 } }, "判读假设:"),
+						...detail.verdicts.map((v, i2) => j("div", { key: i2, style: { color: T.warn, paddingLeft: 10 } }, "? " + v)),
+					]),
+					p.log_excerpt && jsxs2("div", {}, [
+						j("div", { style: { color: T.label2, marginTop: 6 } }, "日志摘录:"),
+						j("pre", { style: { ...pre, maxHeight: 120, overflow: "auto", margin: "2px 0" } }, p.log_excerpt),
+					]),
+				]),
 			])),
-
-			detail && !detail.loading && !detail.error && jsxs2("div", {
-
-				style: { border: `1px solid ${T.border}`, borderRadius: 6, padding: 8, marginTop: 8 } }, [
-
-				jsxs2("div", { style: { marginBottom: 4 } }, [
-
-					j("span", { style: { fontWeight: 600, color: T.brand } },
-
-						`#${detail.id} ${detail.kind} @ gpu${detail.gpu_idx ?? "-"}`),
-
-					j("button", { onClick: () => { INC_VIEW_GEN++; setDetailT(null, "collapse"); INC_OPEN_ID = null; },
-
-						style: { ...ghostBtn, marginLeft: 8 } }, "收起"),
-
-				]),
-
-				j("div", { style: { color: T.label2, fontSize: 12, marginBottom: 4 } },
-
-					`${detail.ts} · job ${detail.job_id} · batch ${detail.batch_id}`),
-
-				failed.dispatch_mode && j("div", { style: { wordBreak: "break-word", lineHeight: 1.5 } },
-
-					`派发方式: ${failed.dispatch_mode} · 声明 ${failed.declared_vram_gib ?? "-"} GiB · 历史峰值 ${failed.profile_peak_gib ?? "-"}`),
-
-				mem.packed_sum_gib !== undefined && j("div", { style: { wordBreak: "break-word", lineHeight: 1.5 } },
-
-					`显存: cap=${mem.cap_gib ?? "?"} packed=${mem.packed_sum_gib} actual=${mem.actual_used_gib ?? "?"}${mem.degraded ? " [降级]" : ""}`),
-
-				(mem.external_pids || []).length > 0 && jsxs2("div", { style: { color: T.warn } },
-
-					["外部进程: ", ...(mem.external_pids || []).map((e) =>
-
-						j("span", { key: e.pid }, `pid${e.pid}(${e.mem_mib ?? "?"}MiB) `))]),
-
-				(p.co_runners || []).length > 0 && jsxs2("div", {}, [
-
-					j("div", { style: { color: T.label2, marginTop: 4 } }, "同卡邻居:"),
-
-					...p.co_runners.map((c) => j("div", { key: c.job_id, style: { paddingLeft: 10 } },
-
-						`${c.task} [${c.status}] declared=${c.declared_vram_gib} peak=${c.profile_peak_gib} runtime=${c.runtime_sec}s`)),
-
-				]),
-
-				(detail.verdicts || []).length > 0 && jsxs2("div", { style: { marginTop: 6 } }, [
-
-					j("div", { style: { color: T.warn, fontWeight: 600 } }, "判读假设:"),
-
-					...detail.verdicts.map((v, i2) => j("div", { key: i2, style: { color: T.warn, paddingLeft: 10 } }, "? " + v)),
-
-				]),
-
-				p.log_excerpt && jsxs2("div", {}, [
-
-					j("div", { style: { color: T.label2, marginTop: 6 } }, "日志摘录:"),
-
-					j("pre", { style: { ...pre, maxHeight: 120, margin: "2px 0" } }, p.log_excerpt),
-
-				]),
-
-			]),
 
 			msg && j("div", { style: { color: T.err, fontSize: 13 } }, msg),
 
