@@ -27,6 +27,7 @@ import { defineTool } from "@deepseek-ai/dsh-tools";
 import { WebSocketServer } from "ws";
 import { HostStore, SshEngine, openExecStream } from "./ssh-engine.js";
 import { LocalTransport } from "./transport.js";
+import { isLoopbackAddress, originHostAllowed } from "./request-guard.js";
 
 const name = "node-sched";
 
@@ -483,6 +484,11 @@ function apply(ctx, config) {
 			res.writeHead(code, { "content-type": "application/json; charset=utf-8" });
 			res.end(JSON.stringify(body));
 		};
+		const originHostGuard = (req, res) => {
+			if (originHostAllowed(req)) return true;
+			json(res, { ok: false, error: "forbidden: Origin/Host must be loopback" }, 403);
+			return false;
+		};
 
 		// Write operations: whitelisted, gated, audited (see operate()). The UI
 		// owns the two-step confirm; the host refuses unknown ops outright.
@@ -582,6 +588,7 @@ function apply(ctx, config) {
 							sshEntry: config.sshEntry,
 						});
 						}
+						if (!originHostGuard(req, res)) return;
 						const body = await readBodyJson(req);
 						const entry = String(body.entry || "").trim();
 						if (!/^[A-Za-z0-9_.-]+$/.test(entry)) {
@@ -645,7 +652,7 @@ function apply(ctx, config) {
 							await json(res, { ok: r.ok, text: r.text });
 							return;
 						}
-						// POST {patch} -> 上传补丁文件 + WriteGate 串行执行 set --yes
+						if (!originHostGuard(req, res)) return;
 						const body = await readBodyJson(req);
 						if (!body.patch || typeof body.patch !== "object") {
 							return void json(res, { ok: false, text: "patch (object) required" }, 400);
@@ -678,6 +685,7 @@ function apply(ctx, config) {
 				kind: "prefix",
 				path: "/sched/api/dryrun",
 				handler: async (req, res) => {
+					if (!originHostGuard(req, res)) return;
 					try {
 						const { content } = await readBodyJson(req);
 						const remotePath = await uploadRemote(String(content));
@@ -697,6 +705,7 @@ function apply(ctx, config) {
 				kind: "prefix",
 				path: "/sched/api/submit",
 				handler: async (req, res) => {
+					if (!originHostGuard(req, res)) return;
 					try {
 						const { content } = await readBodyJson(req);
 						const remotePath = await uploadRemote(String(content));
@@ -724,7 +733,7 @@ function apply(ctx, config) {
 				kind: "prefix",
 				path: "/sched/api/op",
 				handler: async (req, res) => {
-					if (req.method !== "POST") return void ((res.writeHead(405), res.end()));
+					if (!originHostGuard(req, res)) return;
 					let body = "";
 					for await (const chunk of req) body += chunk;
 					let op, id;
@@ -874,6 +883,11 @@ function apply(ctx, config) {
 			ctx.webServer.registerUpgrade({
 				path: "/sched/ws/events",
 				handler: (req, socket, head) => {
+					const remote = req.socket?.remoteAddress ?? "";
+					if (!isLoopbackAddress(remote) || !originHostAllowed(req)) {
+						socket.destroy();
+						return;
+					}
 					wss.handleUpgrade(req, socket, head, (ws) => {
 						clients.add(ws);
 						ws.on("close", () => clients.delete(ws));
@@ -898,9 +912,16 @@ function apply(ctx, config) {
 		/** Loopback-only fence: these endpoints execute remote commands. */
 		const loopbackOnly = (req, res) => {
 			const remote = req.socket?.remoteAddress ?? "";
-			const isLo = remote === "127.0.0.1" || remote === "::1" || remote === "::ffff:127.0.0.1";
-			if (!isLo) json(res, { error: "forbidden: loopback-only" }, 403);
-			return isLo;
+			const isLo = isLoopbackAddress(remote);
+			if (!isLo) {
+				json(res, { error: "forbidden: loopback-only" }, 403);
+				return false;
+			}
+			if (!originHostAllowed(req)) {
+				json(res, { error: "forbidden: Origin/Host must be loopback" }, 403);
+				return false;
+			}
+			return true;
 		};
 		const aliasOf = (req) => {
 			const u = new URL(req.url, "http://x");
@@ -1129,7 +1150,7 @@ function apply(ctx, config) {
 					path: "/sched/ws/ssh-terminal",
 					handler: (req, socket, head) => {
 						const remote = req.socket?.remoteAddress ?? "";
-						if (!(remote === "127.0.0.1" || remote === "::1" || remote === "::ffff:127.0.0.1")) {
+						if (!isLoopbackAddress(remote) || !originHostAllowed(req)) {
 							socket.destroy();
 							return;
 						}

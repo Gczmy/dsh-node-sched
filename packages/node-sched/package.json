@@ -12,7 +12,8 @@
   "files": [
     "lib/index.js",
     "lib/ssh-engine.js",
-    "lib/transport.js"
+    "lib/transport.js",
+    "lib/request-guard.js"
   ],
   "license": "MIT",
   "dependencies": {
