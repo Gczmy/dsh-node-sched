@@ -1364,12 +1364,11 @@ function apply(cctx, config) {
 
 
 
-		const applyList = (incidents) => {
-
+		const applyList = (incidents, snapshotTime) => {
+			const frozenAt = snapshotTime || new Date().toLocaleTimeString("zh-CN", { hour12: false });
 			setList(incidents);
-
-			INC_CACHE = { list: incidents };
-
+			setFrozenAt(frozenAt);
+			INC_CACHE = { list: incidents, frozenAt };
 		};
 
 
@@ -1421,21 +1420,12 @@ function apply(cctx, config) {
 
 
 		const load = useCallback(async () => {
-
 			try {
-
 				const r = await fetch("/sched/api/incidents?limit=30");
-
 				const d = await r.json();
-
 				if (!d.ok) { setMsg("❌ " + (d.text || "").slice(0, 120)); return; }
-
 				applyList(JSON.parse(d.text).incidents || []);
-
-				setFrozenAt(new Date().toLocaleTimeString("zh-CN", { hour12: false }));
-
 			} catch (e) { setMsg("❌ " + String(e)); }
-
 		}, []);
 
 

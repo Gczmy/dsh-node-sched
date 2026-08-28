@@ -7201,7 +7201,8 @@ function apply(cctx, config) {
     const applyList = (incidents, snapshotTime) => {
       const frozenAt2 = snapshotTime || (/* @__PURE__ */ new Date()).toLocaleTimeString("zh-CN", { hour12: false });
       setList(incidents);
-      INC_CACHE = { list: incidents };
+      setFrozenAt(frozenAt2);
+      INC_CACHE = { list: incidents, frozenAt: frozenAt2 };
     };
     const openDetail = useCallback(async (id) => {
       const gen = ++INC_VIEW_GEN;
@@ -7239,7 +7240,6 @@ function apply(cctx, config) {
           return;
         }
         applyList(JSON.parse(d.text).incidents || []);
-        setFrozenAt((/* @__PURE__ */ new Date()).toLocaleTimeString("zh-CN", { hour12: false }));
       } catch (e) {
         setMsg("\u274C " + String(e));
       }
