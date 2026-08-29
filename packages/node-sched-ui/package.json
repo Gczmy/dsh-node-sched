@@ -11,7 +11,9 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "lib/index.js"
+    "lib/index.js",
+    "lib/client.js",
+    "lib/client.js.map"
   ],
   "dsh": {
     "client": {
