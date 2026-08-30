@@ -22,15 +22,15 @@ import cp from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import z from "@deepseek-ai/schemastery";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { WebSocketServer } from "ws";
-import { HostStore, SshEngine, formatSshError, openExecStream } from "./ssh-engine.js";
+import { HostStore, KEYBOARD_INTERACTIVE_PROMPT_CAP, SshEngine, formatSshError, normalizeKeyboardInteractivePrompts, openExecStream } from "./ssh-engine.js";
 import { LocalTransport } from "./transport.js";
-import { isLoopbackAddress, loopbackRequestAllowed, originHostAllowed } from "./request-guard.js";
+import { isLoopbackAddress, loopbackRequestAllowed, originHostAllowed, sameOriginPostAllowed } from "./request-guard.js";
 import { parseUploadedPath } from "./upload-path.js";
-import { mergeEntryOverride } from "./entry-override.js";
+import { persistEntryOverride as writeEntryOverride } from "./entry-override.js";
 import { parseScreenEnd, parseScreenResult } from "./screen-result.js";
 import { appendLimitedOutput, finalizeLimitedOutput, limitedOutputText } from "./output-limit.js";
 import { redactCommand, sanitizeLogText } from "./redact.js";
@@ -55,71 +55,1115 @@ const Config = z.object({
 	connectTimeoutSec: z.number().min(5).max(120).default(20),
 	/** Fallback polling interval (seconds) when the events tail is unavailable. */
 	pollFallbackSec: z.number().min(10).max(600).default(30),
-	/** Transport for sched commands: auto keeps SSH compatibility, local runs on this host. */
-	transport: z.union([z.const("auto"), z.const("local")]).default("auto")
+	/** Transport for read-only sched commands. */
+	transport: z.union([z.const("auto"), z.const("local")]).default("auto"),
+	/** Mutations fail closed unless a writer is explicitly selected. */
+	mutationMode: z.union([
+		z.const("disabled"),
+		z.const("local"),
+		z.const("engine"),
+		z.const("ssh"),
+		z.const("screen"),
+	]).default("disabled"),
+	/** Engine alias or ssh entry for the mutation writer. */
+	mutationTarget: z.string().default(""),
+	/** Required screen session when mutationMode is screen. */
+	mutationSession: z.string().default(""),
+	/** Expected sched config.node and writer hostname. */
+	mutationExpectedNode: z.string().default(""),
 });
 
 const inject = ["tools", "systemPrompt", "webServer"];
 
-/** One in-flight write operation per target, so double-clicks cannot double-kill. */
+/** One in-flight mutation for the configured writer; preflight stays adjacent to write. */
 class WriteGate {
 	constructor() {
-		/** @type {Map<string, Promise<unknown>>} */
-		this.inflight = new Map();
+		/** @type {Promise<unknown> | null} */
+		this.inflight = null;
+		this.activeKey = "";
 	}
 
 	run(key, fn) {
-		if (this.inflight.has(key)) {
+		if (this.inflight !== null) {
 			return Promise.reject(
-				new Error(`node-sched: operation already in flight: ${key} (refusing concurrent write)`),
+				new Error(
+					`node-sched: operation already in flight: ${this.activeKey} (refusing concurrent write)`,
+				),
 			);
 		}
-		const p = fn().finally(() => this.inflight.delete(key));
-		this.inflight.set(key, p);
+		const p = Promise.resolve()
+			.then(fn)
+			.finally(() => {
+				if (this.inflight === p) {
+					this.inflight = null;
+					this.activeKey = "";
+				}
+			});
+		this.activeKey = key;
+		this.inflight = p;
 		return p;
 	}
 }
 
-function makeRunner(cp, cfg) {
-return function runRemote(args, {
+function terminateProcessTree(child, signal = "SIGTERM", groupPid) {
+	if (process.platform !== "win32" && Number.isInteger(groupPid)) {
+		try {
+			process.kill(-groupPid, signal);
+			return;
+		} catch {
+			// The tracked process group is already gone; never target an untracked PID.
+		}
+	}
+	try { child?.kill(signal); } catch { /* already exited */ }
+}
+
+function stopProcessTreeWithGrace(child, groupPid, graceMs = 1_000) {
+	let trackedGroupPid = groupPid;
+	let escalationTimer;
+	let leaderExited = false;
+	const clearIdentity = () => {
+		leaderExited = true;
+		clearTimeout(escalationTimer);
+		escalationTimer = undefined;
+		trackedGroupPid = undefined;
+	};
+	child?.once?.("exit", clearIdentity);
+	child?.once?.("close", clearIdentity);
+	terminateProcessTree(child, "SIGTERM", trackedGroupPid);
+	if (!leaderExited) {
+		escalationTimer = setTimeout(() => {
+			escalationTimer = undefined;
+			const targetGroupPid = trackedGroupPid;
+			trackedGroupPid = undefined;
+			terminateProcessTree(child, "SIGKILL", targetGroupPid);
+		}, graceMs);
+		escalationTimer.unref?.();
+	}
+}
+
+function sshOpenDeadlineAt(engine) {
+	const configured = typeof engine.interactivePrompter === "function"
+		? engine.opts?.interactiveAuthTimeoutMs
+		: engine.opts?.connectTimeoutMs;
+	const timeoutMs = Number.isFinite(configured) && configured > 0 ? configured : 15_000;
+	return Date.now() + timeoutMs;
+}
+
+function beginPendingOpen(pending, limit) {
+	if (pending.size >= limit) return undefined;
+	const controller = new AbortController();
+	pending.add(controller);
+	let settled = false;
+	return {
+		controller,
+		settle() {
+			if (settled) return;
+			settled = true;
+			pending.delete(controller);
+		},
+	};
+}
+
+function abortPendingOpens(pending, reason) {
+	for (const controller of pending) controller.abort(reason);
+}
+
+function makeRunner(childProcess, cfg) {
+	return function runRemote(args, {
 		timeoutMs = 120_000,
 		maxOutputBytes = 2 * 1024 * 1024,
 		sshEntry = cfg.sshEntry,
+		stdinData,
+		signal,
 	} = {}) {
-		// spawn with an argv array: no local shell => no local $-expansion;
-		// the remote command reaches the remote bash verbatim ($HOME expands there).
-		const child = cp.spawn(
-			"ssh",
-			["-o", `ConnectTimeout=${cfg.connectTimeoutSec}`, "-o", "BatchMode=yes", sshEntry, args],
-			{ timeout: timeoutMs },
-		);
 		return new Promise((resolve) => {
 			const stdout = { text: "", bytes: 0, droppedBytes: 0, truncated: false };
 			const stderr = { text: "", bytes: 0, droppedBytes: 0, truncated: false };
-			child.stdout.on("data", (d) => appendLimitedOutput(stdout, d, maxOutputBytes));
-			child.stderr.on("data", (d) => appendLimitedOutput(stderr, d, maxOutputBytes));
-			child.on("error", (err) => {
+			const detached = process.platform !== "win32";
+			const termGraceMs = Number.isFinite(cfg.termGraceMs) && cfg.termGraceMs >= 0
+				? cfg.termGraceMs
+				: 1_000;
+			let child;
+			let groupPid;
+			let settled = false;
+			let timedOut = false;
+			let terminalError;
+			let graceTimer;
+			let leaderExited = false;
+			let leaderCode = -1;
+			const finish = (code, error = terminalError) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				clearTimeout(graceTimer);
+				groupPid = undefined;
+				signal?.removeEventListener?.("abort", abort);
+				if (error) {
+					appendLimitedOutput(
+						stderr,
+						Buffer.from(`${stderr.bytes ? "\n" : ""}${error.message}`, "utf8"),
+						maxOutputBytes,
+					);
+				}
+				if (timedOut) {
+					appendLimitedOutput(stderr, Buffer.from("\nprocess timed out", "utf8"), maxOutputBytes);
+				}
 				finalizeLimitedOutput(stdout);
 				finalizeLimitedOutput(stderr);
 				resolve({
-					ok: false,
-					code: -1,
-					stdout: limitedOutputText(stdout),
-					stderr: `${limitedOutputText(stderr)}${err.message}`,
-				});
-			});
-			child.on("close", (code) => {
-				finalizeLimitedOutput(stdout);
-				finalizeLimitedOutput(stderr);
-				resolve({
-					ok: code === 0,
+					ok: !error && !timedOut && code === 0,
 					code: code ?? -1,
 					stdout: limitedOutputText(stdout),
-					stderr: limitedOutputText(stderr),
+					stderr: limitedOutputText(stderr).trim(),
 				});
+			};
+			const terminate = (error) => {
+				if (settled || graceTimer !== undefined) return;
+				terminalError = error;
+				if (leaderExited) {
+					finish(leaderCode);
+					return;
+				}
+				terminateProcessTree(child, "SIGTERM", groupPid);
+				graceTimer = setTimeout(() => {
+					graceTimer = undefined;
+					if (!leaderExited) {
+						terminateProcessTree(child, "SIGKILL", groupPid);
+					}
+					finish(leaderCode);
+				}, termGraceMs);
+			};
+			const abort = () => terminate(new Error("operation aborted"));
+			const timer = setTimeout(() => {
+				timedOut = true;
+				terminate();
+			}, timeoutMs);
+			try {
+				child = childProcess.spawn(
+					"ssh",
+					["-o", `ConnectTimeout=${cfg.connectTimeoutSec}`, "-o", "BatchMode=yes", sshEntry, args],
+					{
+						timeout: timeoutMs,
+						signal,
+						detached,
+						killSignal: "SIGTERM",
+					},
+				);
+				if (detached && Number.isInteger(child.pid)) groupPid = child.pid;
+			} catch (error) {
+				finish(-1, error);
+				return;
+			}
+			child.stdout.on("data", (data) => appendLimitedOutput(stdout, data, maxOutputBytes));
+			child.stderr.on("data", (data) => appendLimitedOutput(stderr, data, maxOutputBytes));
+			child.on("exit", (code) => {
+				leaderExited = true;
+				leaderCode = code ?? -1;
+				// Keep the operation deadline (and any active grace period) until
+				// close or bounded settlement; the stdio descriptors may outlive
+				// the leader. Never reuse the exited leader's process-group ID.
+				groupPid = undefined;
 			});
+			child.on("error", (error) => {
+				if (error?.name === "AbortError" && terminalError) return;
+				terminalError ??= error;
+			});
+			child.on("close", (code) => finish(code));
+			signal?.addEventListener?.("abort", abort, { once: true });
+			if (signal?.aborted) abort();
+			child.stdin?.end(stdinData);
 		});
 	};
+}
+
+function boundedLimit(value, fallback, max) {
+	if (value === undefined || value === null) return fallback;
+	const numeric = Number(value);
+	if (!Number.isFinite(numeric) || numeric < 1) throw new Error("limit must be a positive integer");
+	return Math.min(Math.trunc(numeric), max);
+}
+
+function commandCursor(value, label) {
+	if (value === undefined || value === null) return "";
+	if (typeof value !== "string" || !value || value.length > 1024 || /[\0-\x1f\x7f]/.test(value)) {
+		throw new Error(`${label} is invalid`);
+	}
+	return shellQuote(value);
+}
+
+function buildStatusCommand({ schedBin, limit, cursor, jobCursor } = {}) {
+	if (!schedBin) throw new Error("schedBin is required");
+	const batchCursor = commandCursor(cursor, "status cursor");
+	const jobsCursor = commandCursor(jobCursor, "status job cursor");
+	return `${schedBin} status --json --limit ${boundedLimit(limit, 200, 1000)}`
+		+ (batchCursor ? ` --cursor ${batchCursor}` : "")
+		+ (jobsCursor ? ` --job-cursor ${jobsCursor}` : "");
+}
+
+function buildHistoryCommand({ schedBin, batch, limit, cursor } = {}) {
+	if (!schedBin) throw new Error("schedBin is required");
+	const batchArg = batch ? ` ${shellQuote(batch)}` : "";
+	const historyCursor = commandCursor(cursor, "history cursor");
+	return `${schedBin} history${batchArg} --json --limit ${boundedLimit(limit, 50, 200)}`
+		+ (historyCursor ? ` --cursor ${historyCursor}` : "");
+}
+
+function taskReference(reference) {
+	if (typeof reference === "string") return reference;
+	if (!reference || typeof reference !== "object" || !reference.batch_id || !reference.task) {
+		throw new Error("task reference requires batch_id and task");
+	}
+	return `${reference.batch_id}:${reference.task}`;
+}
+
+function buildTaskCommand(operation, reference, { schedBin, lines = 100 } = {}) {
+	if (!schedBin) throw new Error("schedBin is required");
+	const ref = shellQuote(taskReference(reference));
+	if (operation === "log") return `${schedBin} log ${ref} -n ${boundedLimit(lines, 100, 5000)}`;
+	if (operation === "task") return `${schedBin} task ${ref} --json`;
+	if (operation === "diag") return `${schedBin} diag ${ref}`;
+	if (operation === "retry") return `${schedBin} retry ${ref}`;
+	if (operation === "resubmit") return `${schedBin} resubmit ${ref}`;
+	throw new Error(`unsupported task operation: ${operation}`);
+}
+
+function buildOperationCommand(operation, id, schedBin) {
+	if (!schedBin) throw new Error("schedBin is required");
+	const commands = {
+		cancel: () => `${schedBin} cancel ${shellQuote(id)} --yes`,
+		retry: () => `${schedBin} retry ${shellQuote(id)}`,
+		resubmit: () => `${schedBin} resubmit ${shellQuote(id)}`,
+		"gpu-free": () => `${schedBin} gpu-free ${id} --yes`,
+		"gpu-ignore": () => `${schedBin} gpu-ignore ${id}`,
+		"gpu-ok": () => `${schedBin} gpu-ok ${id}`,
+		"daemon-start": () => `${schedBin} daemon start`,
+		"daemon-stop": () => `${schedBin} daemon stop`,
+	};
+	if (!commands[operation]) throw new Error(`unsupported operation: ${operation}`);
+	return commands[operation]();
+}
+function canonicalGpuAssignments(assignments) {
+	if (!Array.isArray(assignments)) throw new Error("GPU assignments precondition is required");
+	const result = assignments.map((assignment, index) => {
+		if (
+			!assignment
+			|| typeof assignment !== "object"
+			|| Array.isArray(assignment)
+			|| Object.keys(assignment).some((key) => key !== "job_id" && key !== "vram_gib")
+			|| typeof assignment.job_id !== "string"
+			|| !assignment.job_id
+			|| (
+				assignment.vram_gib !== null
+				&& (
+					typeof assignment.vram_gib !== "number"
+					|| !Number.isFinite(assignment.vram_gib)
+					|| assignment.vram_gib < 0
+				)
+			)
+		) {
+			throw new Error(`GPU assignment ${index} is invalid`);
+		}
+		return { job_id: assignment.job_id, vram_gib: assignment.vram_gib };
+	});
+	for (let index = 1; index < result.length; index += 1) {
+		if (result[index - 1].job_id >= result[index].job_id) {
+			throw new Error("GPU assignments must be uniquely sorted by job_id");
+		}
+	}
+	return result;
+}
+
+function buildIdempotentMutationCommand(
+	command,
+	schedBin,
+	requestId,
+	precondition = { kind: "none" },
+) {
+	if (typeof schedBin !== "string" || !schedBin) throw new Error("schedBin is required");
+	if (typeof requestId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(requestId)) {
+		throw new Error("mutation request id is invalid");
+	}
+	const prefix = `${schedBin} `;
+	if (typeof command !== "string" || !command.startsWith(prefix) || command.length === prefix.length) {
+		throw new Error("mutation command must use the configured sched binary");
+	}
+	const kind = String(precondition?.kind ?? "none");
+	const expectation = [];
+	if (kind !== "none") {
+		const id = precondition?.id;
+		const status = precondition?.expectedStatus;
+		if (
+			!["batch", "task", "gpu"].includes(kind)
+			|| typeof id !== "string"
+			|| !id
+			|| typeof status !== "string"
+			|| !status
+			|| !Number.isInteger(precondition.expectedRevision)
+			|| precondition.expectedRevision < 0
+		) {
+			throw new Error("mutation precondition is invalid");
+		}
+		expectation.push(
+			"--expect-kind", shellQuote(kind),
+			"--expect-id", shellQuote(id),
+			"--expect-status", shellQuote(status),
+			"--expect-revision", String(precondition.expectedRevision),
+		);
+		if (kind === "task") {
+			if (!Number.isInteger(precondition.expectedVersion) || precondition.expectedVersion < 1) {
+				throw new Error("task mutation precondition version is invalid");
+			}
+			expectation.push("--expect-version", String(precondition.expectedVersion));
+		}
+		if (kind === "gpu") {
+			if (precondition.expectedQuarantined !== undefined) {
+				if (![0, 1].includes(precondition.expectedQuarantined)) {
+					throw new Error("GPU mutation quarantine precondition is invalid");
+				}
+				expectation.push("--expect-quarantined", String(precondition.expectedQuarantined));
+			}
+			expectation.push(
+				"--expect-assignments-json",
+				shellQuote(JSON.stringify(canonicalGpuAssignments(precondition.expectedAssignments))),
+			);
+		}
+	} else if (precondition && precondition.kind !== undefined && precondition.kind !== "none") {
+		throw new Error("mutation precondition is invalid");
+	} else {
+		expectation.push("--expect-revision", "0");
+	}
+	const expectationText = ` ${expectation.join(" ")}`;
+	return `${schedBin} request ${shellQuote(requestId)}${expectationText} -- ${command.slice(prefix.length)}`;
+}
+function durableUploadName(requestId, content) {
+	if (typeof requestId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(requestId)) {
+		throw new Error("durable upload request id is invalid");
+	}
+	const digest = createHash("sha256").update(String(content), "utf8").digest("hex").slice(0, 32);
+	return `nodesched-upload-${requestId}-${digest}.json`;
+}
+
+function operationHttpResult(result) {
+	return { ok: Boolean(result?.ok), code: result?.code ?? -1, text: String(result?.text ?? "") };
+}
+
+function hostMatches(left, right) {
+	const normalize = (value) => String(value ?? "")
+		.trim()
+		.toLowerCase()
+		.replace(/\.+$/, "");
+	const a = normalize(left);
+	const b = normalize(right);
+	return Boolean(a && b && a === b);
+}
+
+function resolveMutationWriter({
+	configuredWriter,
+	schedConfigNode,
+	writerHostname,
+	expectedNode = configuredWriter?.expectedNode,
+} = {}) {
+	if (!configuredWriter || configuredWriter.mode === "disabled") {
+		throw new Error("explicit mutation writer is missing or disabled");
+	}
+	if (!schedConfigNode || !writerHostname) {
+		throw new Error("mutation writer hostname and sched config node must be verified");
+	}
+	if (expectedNode && !hostMatches(expectedNode, schedConfigNode)) {
+		throw new Error("configured mutation writer expected node does not match sched config node");
+	}
+	if (!hostMatches(writerHostname, schedConfigNode)) {
+		throw new Error("mutation writer hostname does not match sched config node");
+	}
+	return configuredWriter;
+}
+
+function parseWriterVerification(configuredWriter, result) {
+	if (!result?.ok) {
+		const detail = result?.stderr || result?.stdout || `exit ${result?.code ?? -1}`;
+		throw new Error(`mutation writer verification failed: ${String(detail).trim()}`);
+	}
+	const output = String(result.stdout ?? "");
+	const newline = output.indexOf("\n");
+	if (newline < 1) throw new Error("mutation writer verification returned no hostname/config");
+	const writerHostname = output.slice(0, newline).trim();
+	let schedConfig;
+	try {
+		schedConfig = JSON.parse(output.slice(newline + 1));
+	} catch {
+		throw new Error("mutation writer verification returned invalid sched config JSON");
+	}
+	return resolveMutationWriter({
+		configuredWriter,
+		expectedNode: configuredWriter.expectedNode,
+		schedConfigNode: schedConfig?.node,
+		writerHostname,
+	});
+}
+
+async function verifyAndExecuteMutation({
+	configuredWriter,
+	command,
+	timeoutMs,
+	executeRead,
+	executeMutation,
+	preflight,
+	prepare,
+	schedBin = configuredWriter?.schedBin,
+} = {}) {
+	if (typeof executeRead !== "function" || typeof executeMutation !== "function") {
+		throw new Error("mutation executors are required");
+	}
+	if (preflight !== undefined && typeof preflight !== "function") {
+		throw new Error("mutation preflight must be a function");
+	}
+	if (prepare !== undefined && typeof prepare !== "function") {
+		throw new Error("mutation preparation must be a function");
+	}
+	if (!schedBin) throw new Error("schedBin is required for mutation writer verification");
+	const verification = await executeRead(
+		configuredWriter,
+		`hostname && ${schedBin} config get`,
+		timeoutMs,
+	);
+	const writer = parseWriterVerification(configuredWriter, verification);
+	if (preflight) await preflight(writer, timeoutMs);
+	const prepared = prepare ? await prepare(writer, timeoutMs) : { command };
+	if (!prepared || typeof prepared.command !== "string" || !prepared.command) {
+		throw new Error("mutation preparation returned no command");
+	}
+	const result = await executeMutation(writer, prepared.command, timeoutMs);
+	const definitive = result?.ok === true
+		|| (Number.isInteger(result?.code) && result.code !== -1 && result.code !== 75);
+	if (definitive) {
+		try { await prepared.cleanup?.(); } catch { /* age GC removes retained cleanup failures */ }
+	}
+	return result;
+}
+class ByteLineFramer {
+	constructor({ maxLineBytes = 3_000, onLine } = {}) {
+		if (!Number.isInteger(maxLineBytes) || maxLineBytes < 1 || typeof onLine !== "function") {
+			throw new Error("line framer requires a positive byte limit and callback");
+		}
+		this.maxLineBytes = maxLineBytes;
+		this.onLine = onLine;
+		this.parts = [];
+		this.bufferedBytes = 0;
+		this.droppedBytes = 0;
+	}
+
+	#append(bytes) {
+		const available = this.maxLineBytes - this.bufferedBytes;
+		const retained = Math.min(available, bytes.length);
+		if (retained > 0) {
+			const copy = Buffer.allocUnsafe(retained);
+			bytes.copy(copy, 0, 0, retained);
+			this.parts.push(copy);
+			this.bufferedBytes += retained;
+		}
+		this.droppedBytes += bytes.length - retained;
+	}
+
+	#emit() {
+		let bytes = this.bufferedBytes > 0
+			? Buffer.concat(this.parts, this.bufferedBytes)
+			: Buffer.alloc(0);
+		if (bytes.at(-1) === 0x0d) bytes = bytes.subarray(0, bytes.length - 1);
+		let text;
+		let invalidTail = 0;
+		for (; invalidTail <= Math.min(3, bytes.length); invalidTail += 1) {
+			try {
+				text = new TextDecoder("utf-8", { fatal: true }).decode(
+					invalidTail === 0 ? bytes : bytes.subarray(0, bytes.length - invalidTail),
+				);
+				break;
+			} catch {
+				// A byte cap may bisect one trailing code point; account for it as dropped.
+			}
+		}
+		if (text === undefined) text = bytes.toString("utf8");
+		const dropped = this.droppedBytes + invalidTail;
+		const line = `${text.trimEnd()}${dropped > 0 ? `…[truncated ${dropped} bytes]` : ""}`;
+		this.parts = [];
+		this.bufferedBytes = 0;
+		this.droppedBytes = 0;
+		if (line) this.onLine(line);
+	}
+
+	push(chunk) {
+		const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+		let offset = 0;
+		while (offset < bytes.length) {
+			const newline = bytes.indexOf(0x0a, offset);
+			if (newline < 0) {
+				this.#append(bytes.subarray(offset));
+				return;
+			}
+			this.#append(bytes.subarray(offset, newline));
+			this.#emit();
+			offset = newline + 1;
+		}
+	}
+
+	flush() {
+		if (this.bufferedBytes > 0 || this.droppedBytes > 0) this.#emit();
+	}
+}
+
+
+class FreshStatusCache {
+	constructor({ ttlMs = 30_000, now = Date.now } = {}) {
+		if (!Number.isFinite(ttlMs) || ttlMs <= 0) throw new Error("status cache ttlMs must be positive");
+		if (typeof now !== "function") throw new Error("status cache now must be a function");
+		this.ttlMs = ttlMs;
+		this.now = now;
+		this.entries = new Map();
+	}
+
+	recordSuccess(key, body) {
+		this.entries.set(String(key), {
+			body,
+			successAt: this.now(),
+			lastError: null,
+		});
+		return body;
+	}
+
+	recordFailure(key, error) {
+		const cacheKey = String(key);
+		const entry = this.entries.get(cacheKey) ?? {
+			body: null,
+			successAt: null,
+			lastError: null,
+		};
+		entry.lastError = error;
+		this.entries.set(cacheKey, entry);
+	}
+
+	delete(key) {
+		this.entries.delete(String(key));
+	}
+
+	clear() {
+		this.entries.clear();
+	}
+
+	read(key, { requireFresh = false } = {}) {
+		const entry = this.entries.get(String(key));
+		if (!entry) {
+			return { body: null, fresh: false, stale: false, ageMs: null, lastError: null };
+		}
+		const ageMs = entry.successAt == null ? null : Math.max(0, this.now() - entry.successAt);
+		const fresh = entry.body != null && ageMs < this.ttlMs;
+		const stale = entry.body != null && !fresh;
+		return {
+			body: requireFresh && !fresh ? null : entry.body,
+			fresh,
+			stale,
+			ageMs,
+			lastError: entry.lastError,
+		};
+	}
+}
+
+function loadOrCreateAccessToken(
+	file = path.join(os.homedir(), ".dsh", "node-sched-access-token"),
+) {
+	const directory = path.dirname(file);
+	fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+	const directoryStat = fs.lstatSync(directory);
+	if (
+		!directoryStat.isDirectory()
+		|| directoryStat.isSymbolicLink()
+		|| (typeof process.getuid === "function" && directoryStat.uid !== process.getuid())
+	) {
+		throw new Error("node-sched token directory must be an owned real directory");
+	}
+	fs.chmodSync(directory, 0o700);
+
+	const readExisting = () => {
+		const fd = fs.openSync(
+			file,
+			fs.constants.O_RDONLY
+				| (fs.constants.O_CLOEXEC ?? 0)
+				| (fs.constants.O_NOFOLLOW ?? 0),
+		);
+		try {
+			const info = fs.fstatSync(fd);
+			if (
+				!info.isFile()
+				|| info.size > 512
+				|| (typeof process.getuid === "function" && info.uid !== process.getuid())
+				|| (info.mode & 0o077) !== 0
+			) {
+				throw new Error("node-sched token file must be owned, regular, and mode 0600");
+			}
+			const token = fs.readFileSync(fd, "utf8").trim();
+			if (!/^[A-Za-z0-9_-]{40,128}$/.test(token)) {
+				throw new Error("node-sched token file is invalid");
+			}
+			return token;
+		} finally {
+			fs.closeSync(fd);
+		}
+	};
+
+	try {
+		return readExisting();
+	} catch (error) {
+		if (error?.code !== "ENOENT") throw error;
+	}
+	const token = randomBytes(32).toString("base64url");
+	const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
+	let linked = false;
+	try {
+		const fd = fs.openSync(
+			temporary,
+			fs.constants.O_WRONLY
+				| fs.constants.O_CREAT
+				| fs.constants.O_EXCL
+				| (fs.constants.O_CLOEXEC ?? 0)
+				| (fs.constants.O_NOFOLLOW ?? 0),
+			0o600,
+		);
+		try {
+			fs.writeFileSync(fd, `${token}\n`, "utf8");
+			fs.fchmodSync(fd, 0o600);
+			fs.fsyncSync(fd);
+		} finally {
+			fs.closeSync(fd);
+		}
+		try {
+			fs.linkSync(temporary, file);
+			linked = true;
+		} catch (error) {
+			if (error?.code !== "EEXIST") throw error;
+		}
+	} finally {
+		try { fs.unlinkSync(temporary); } catch { /* absent */ }
+	}
+	return linked ? token : readExisting();
+}
+function parseBoundedJson(text, { maxDepth = 32, maxNodes = 10_000 } = {}) {
+	const value = JSON.parse(String(text));
+	const stack = [[value, 0]];
+	let nodes = 0;
+	while (stack.length > 0) {
+		const [current, depth] = stack.pop();
+		nodes += 1;
+		if (nodes > maxNodes) throw new Error("JSON node limit exceeded");
+		if (depth > maxDepth) throw new Error("JSON depth limit exceeded");
+		if (current === null || typeof current !== "object") continue;
+		const children = Array.isArray(current) ? current : Object.values(current);
+		for (const child of children) stack.push([child, depth + 1]);
+	}
+	return value;
+}
+
+function appendPrivateClientLog(home, line) {
+	const directory = path.join(home, ".sched");
+	fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+	const directoryStat = fs.lstatSync(directory);
+	if (
+		!directoryStat.isDirectory()
+		|| directoryStat.isSymbolicLink()
+		|| (typeof process.getuid === "function" && directoryStat.uid !== process.getuid())
+	) {
+		throw new Error("client log directory must be an owned real directory");
+	}
+	fs.chmodSync(directory, 0o700);
+	const file = path.join(directory, "client-exceptions.log");
+	const fd = fs.openSync(
+		file,
+		fs.constants.O_WRONLY
+			| fs.constants.O_APPEND
+			| fs.constants.O_CREAT
+			| (fs.constants.O_CLOEXEC ?? 0)
+			| (fs.constants.O_NOFOLLOW ?? 0),
+		0o600,
+	);
+	try {
+		const info = fs.fstatSync(fd);
+		if (
+			!info.isFile()
+			|| info.nlink !== 1
+			|| (typeof process.getuid === "function" && info.uid !== process.getuid())
+		) {
+			throw new Error("client log must be an owned regular file without hard links");
+		}
+		fs.fchmodSync(fd, 0o600);
+		fs.writeFileSync(fd, String(line), "utf8");
+	} finally {
+		fs.closeSync(fd);
+	}
+}
+
+const PRIVATE_UPLOAD_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+function fsyncDirectory(directory) {
+	const fd = fs.openSync(
+		directory,
+		fs.constants.O_RDONLY
+			| (fs.constants.O_DIRECTORY ?? 0)
+			| (fs.constants.O_CLOEXEC ?? 0)
+			| (fs.constants.O_NOFOLLOW ?? 0),
+	);
+	try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+}
+
+function gcPrivateUploads(
+	directory,
+	{ now = Date.now(), maxAgeMs = PRIVATE_UPLOAD_MAX_AGE_MS, exclude } = {},
+) {
+	let removed = 0;
+	for (const name of fs.readdirSync(directory)) {
+		if (
+			!/^nodesched-upload-[A-Za-z0-9_.:-]{1,180}\.json$/.test(name)
+			|| name === exclude
+		) continue;
+		const candidate = path.join(directory, name);
+		let info;
+		try { info = fs.lstatSync(candidate); } catch { continue; }
+		if (
+			!info.isFile()
+			|| info.isSymbolicLink()
+			|| now - info.mtimeMs < maxAgeMs
+		) continue;
+		try {
+			fs.unlinkSync(candidate);
+			removed += 1;
+		} catch { /* raced with a definitive cleanup */ }
+	}
+	if (removed > 0) fsyncDirectory(directory);
+	return removed;
+}
+
+function writePrivateUpload(directory, name, content) {
+	if (
+		typeof name !== "string"
+		|| !/^nodesched-upload-[A-Za-z0-9_.:-]{1,180}\.json$/.test(name)
+		|| path.basename(name) !== name
+	) {
+		throw new Error("private upload name is invalid");
+	}
+	fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+	const directoryStat = fs.lstatSync(directory);
+	if (
+		!directoryStat.isDirectory()
+		|| directoryStat.isSymbolicLink()
+		|| (typeof process.getuid === "function" && directoryStat.uid !== process.getuid())
+	) {
+		throw new Error("private upload directory must be an owned real directory");
+	}
+	fs.chmodSync(directory, 0o700);
+	const target = path.join(directory, name);
+	const temporary = path.join(
+		directory,
+		`.${name}.${process.pid}.${randomUUID()}.tmp`,
+	);
+	let fd;
+	try {
+		fd = fs.openSync(
+			temporary,
+			fs.constants.O_WRONLY
+				| fs.constants.O_CREAT
+				| fs.constants.O_EXCL
+				| (fs.constants.O_CLOEXEC ?? 0)
+				| (fs.constants.O_NOFOLLOW ?? 0),
+			0o600,
+		);
+		fs.writeFileSync(fd, String(content), "utf8");
+		fs.fchmodSync(fd, 0o600);
+		fs.fsyncSync(fd);
+		fs.closeSync(fd);
+		fd = undefined;
+		fs.renameSync(temporary, target);
+		fsyncDirectory(directory);
+		gcPrivateUploads(directory, { exclude: name });
+		return target;
+	} finally {
+		if (fd !== undefined) fs.closeSync(fd);
+		try { fs.unlinkSync(temporary); } catch { /* moved or absent */ }
+	}
+}
+
+function bearerRequestAllowed(req, expectedToken) {
+	if (typeof expectedToken !== "string" || !expectedToken) return false;
+	const header = req?.headers?.authorization;
+	if (typeof header !== "string" || !header.startsWith("Bearer ")) return false;
+	const supplied = Buffer.from(header.slice(7), "utf8");
+	const expected = Buffer.from(expectedToken, "utf8");
+	return supplied.length === expected.length && timingSafeEqual(supplied, expected);
+}
+
+function websocketRequestAllowed(req, expectedToken) {
+	const remote = req?.socket?.remoteAddress ?? "";
+	if (!isLoopbackAddress(remote) || !originHostAllowed(req)) return false;
+	const header = req?.headers?.["sec-websocket-protocol"];
+	if (typeof header !== "string") return false;
+	const protocols = header.split(",").map((value) => value.trim()).filter(Boolean);
+	if (!protocols.includes("sched-auth")) return false;
+	const suppliedToken = protocols.find((value) => value !== "sched-auth");
+	if (!suppliedToken || protocols.length !== 2) return false;
+	const supplied = Buffer.from(suppliedToken, "utf8");
+	const expected = Buffer.from(String(expectedToken ?? ""), "utf8");
+	return expected.length > 0
+		&& supplied.length === expected.length
+		&& timingSafeEqual(supplied, expected);
+}
+
+function selectAuthenticatedWebSocketProtocol(protocols) {
+	return protocols.has("sched-auth") ? "sched-auth" : false;
+}
+
+
+function rejectUnauthorized(res) {
+	res.writeHead(401, {
+		"content-type": "application/json; charset=utf-8",
+		"www-authenticate": "Bearer",
+	});
+	res.end(JSON.stringify({ ok: false, error: "unauthorized: local bearer token required" }));
+}
+
+
+function guardMutationRequest(req, res, accessToken) {
+	if (req?.method !== "POST") {
+		res.writeHead(405, { "content-type": "application/json; charset=utf-8" });
+		res.end(JSON.stringify({ ok: false, error: "method not allowed: POST" }));
+		return false;
+	}
+	if (!sameOriginPostAllowed(req)) {
+		res.writeHead(403, { "content-type": "application/json; charset=utf-8" });
+		res.end(JSON.stringify({ ok: false, error: "forbidden: exact same-origin loopback request required" }));
+		return false;
+	}
+	if (!bearerRequestAllowed(req, accessToken)) {
+		rejectUnauthorized(res);
+		return false;
+	}
+	return true;
+}
+
+function remoteShellPath(value) {
+	const remotePath = String(value ?? "");
+	if (!remotePath || remotePath.includes("\0") || remotePath.includes("\n")) {
+		throw new Error("remote inbox path is invalid");
+	}
+	if (remotePath.startsWith("$HOME/")) return `"$HOME"/${shellQuote(remotePath.slice(6))}`;
+	if (remotePath.startsWith("~/")) return `"$HOME"/${shellQuote(remotePath.slice(2))}`;
+	return shellQuote(remotePath);
+}
+
+function buildRemoteInboxWriteCommand(remotePath) {
+	const fileArg = remoteShellPath(remotePath);
+	const script = [
+		"import os,stat,sys,tempfile,time",
+		"target=os.path.abspath(sys.argv[1])",
+		"directory=os.path.dirname(target)",
+		"os.makedirs(directory,mode=0o700,exist_ok=True)",
+		"os.chmod(directory,0o700)",
+		"fd,tmp=tempfile.mkstemp(prefix='.'+os.path.basename(target)+'.',suffix='.tmp',dir=directory)",
+		"try:",
+		" f=os.fdopen(fd,'wb')",
+		" try:",
+		"  while True:",
+		"   chunk=sys.stdin.buffer.read(65536)",
+		"   if not chunk: break",
+		"   f.write(chunk)",
+		"  os.fchmod(f.fileno(),0o600); f.flush(); os.fsync(f.fileno())",
+		" finally: f.close()",
+		" os.replace(tmp,target)",
+		" dirfd=os.open(directory,os.O_RDONLY|getattr(os,'O_DIRECTORY',0))",
+		" try: os.fsync(dirfd)",
+		" finally: os.close(dirfd)",
+		" cutoff=time.time()-7*24*60*60",
+		" for entry in os.scandir(directory):",
+		"  if entry.path==target or not entry.name.startswith('nodesched-upload-') or not entry.name.endswith('.json'): continue",
+		"  try: info=entry.stat(follow_symlinks=False)",
+		"  except OSError: continue",
+		"  if stat.S_ISREG(info.st_mode) and info.st_mtime<cutoff:",
+		"   try: os.unlink(entry.path)",
+		"   except OSError: pass",
+		" sys.stdout.write(target+'\\n')",
+		"finally:",
+		" try: os.unlink(tmp)",
+		" except FileNotFoundError: pass",
+	].join("\n");
+	return `umask 077; python3 -c ${shellQuote(script)} ${fileArg}`;
+}
+
+function guardReadRequest(req, res, accessToken) {
+	if (req?.method !== "GET" || !loopbackRequestAllowed(req)) {
+		res.writeHead(403, { "content-type": "application/json; charset=utf-8" });
+		res.end(JSON.stringify({ ok: false, error: "forbidden: loopback Origin/Host required" }));
+		return false;
+	}
+	if (!bearerRequestAllowed(req, accessToken)) {
+		rejectUnauthorized(res);
+		return false;
+	}
+	return true;
+}
+
+function executeGenericSsh(engine, alias, command, { timeoutMs } = {}) {
+	return engine.execOnce(alias, command, timeoutMs);
+}
+
+const AUTH_PENDING_CAP = 32;
+const AUTH_PROMPT_COUNT_CAP = KEYBOARD_INTERACTIVE_PROMPT_CAP;
+const AUTH_EVENT_TEXT_BYTES_CAP = 32 * 1024;
+
+function authEventTextBytes(event) {
+	let bytes = 0;
+	for (const value of [
+		event.alias,
+		event.method,
+		event.name,
+		event.instructions,
+		event.lang,
+	]) {
+		bytes += Buffer.byteLength(String(value ?? ""), "utf8");
+	}
+	for (const prompt of event.prompts) {
+		bytes += Buffer.byteLength(String(prompt.prompt ?? ""), "utf8");
+	}
+	return bytes;
+}
+
+class AuthChallengeBroker {
+	constructor({
+		timeoutMs = 180_000,
+		clock = globalThis,
+		hasVisibleAudience = () => false,
+		broadcast = () => {},
+	} = {}) {
+		this.timeoutMs = timeoutMs;
+		this.clock = clock;
+		this.hasVisibleAudience = hasVisibleAudience;
+		this.broadcast = broadcast;
+		this.pending = new Map();
+		this.sequence = 0;
+	}
+
+	request(request = {}) {
+		if (!this.hasVisibleAudience()) {
+			return Promise.reject(new Error("SSH authentication requires a visible dashboard audience"));
+		}
+		const now = typeof this.clock.now === "function" ? this.clock.now() : Date.now();
+		const requestedDeadline = Number(request.deadlineAt);
+		const deadlineAt = Number.isFinite(requestedDeadline)
+			? Math.min(now + this.timeoutMs, requestedDeadline)
+			: now + this.timeoutMs;
+		if (request.signal?.aborted) {
+			return Promise.resolve({
+				state: request.signal.reason?.code === "SSH_INTERACTIVE_AUTH_DEADLINE"
+					? "expired"
+					: "cancelled",
+			});
+		}
+		if (deadlineAt <= now) return Promise.resolve({ state: "expired" });
+		if (this.pending.size >= AUTH_PENDING_CAP) {
+			return Promise.reject(new Error(`SSH authentication pending challenge cap (${AUTH_PENDING_CAP}) reached`));
+		}
+		if (Array.isArray(request.prompts) && request.prompts.length > AUTH_PROMPT_COUNT_CAP) {
+			return Promise.reject(new Error(`SSH authentication prompt count cap (${AUTH_PROMPT_COUNT_CAP}) exceeded`));
+		}
+		const prompts = normalizeKeyboardInteractivePrompts(request.prompts);
+		const event = {
+			type: "auth",
+			alias: String(request.alias ?? ""),
+			method: String(request.method ?? "keyboard-interactive").slice(0, 80),
+			name: sanitizeLogText(request.name, 200),
+			instructions: sanitizeLogText(request.instr, 500),
+			lang: sanitizeLogText(request.lang, 80),
+			prompts,
+		};
+		if (authEventTextBytes(event) > AUTH_EVENT_TEXT_BYTES_CAP) {
+			return Promise.reject(new Error(`SSH authentication event text cap (${AUTH_EVENT_TEXT_BYTES_CAP} bytes) exceeded`));
+		}
+		const id = `a${now.toString(36)}${(++this.sequence).toString(36)}`;
+		event.id = id;
+		return new Promise((resolve, reject) => {
+			const timer = this.clock.setTimeout(
+				() => this.finish(id, "expired"),
+				Math.max(0, deadlineAt - now),
+			);
+			const onAbort = () => {
+				const state = request.signal?.reason?.code === "SSH_INTERACTIVE_AUTH_DEADLINE"
+					? "expired"
+					: "cancelled";
+				this.finish(id, state);
+			};
+			this.pending.set(id, {
+				resolve,
+				timer,
+				promptCount: prompts.length,
+				event,
+				signal: request.signal,
+				onAbort,
+			});
+			request.signal?.addEventListener("abort", onAbort, { once: true });
+			try {
+				this.broadcast(event);
+			} catch (error) {
+				this.clock.clearTimeout(timer);
+				request.signal?.removeEventListener("abort", onAbort);
+				this.pending.delete(id);
+				reject(error);
+			}
+		});
+	}
+
+	finish(id, state, answers) {
+		const pending = this.pending.get(id);
+		if (!pending) return false;
+		this.pending.delete(id);
+		this.clock.clearTimeout(pending.timer);
+		pending.signal?.removeEventListener("abort", pending.onAbort);
+		const terminalState = state === "answered" ? "resolved" : state;
+		const outcome = state === "answered"
+			? { state: "answered", answers }
+			: { state };
+		try {
+			this.broadcast({ type: "auth", id, state: terminalState });
+		} catch {
+			// The SSH waiter must settle even if every dashboard disappeared.
+		} finally {
+			pending.resolve(outcome);
+		}
+		return true;
+	}
+
+	answer(id, answers) {
+		const pending = this.pending.get(id);
+		if (!pending) throw new Error("authentication challenge does not exist or has expired");
+		if (!Array.isArray(answers) || answers.length !== pending.promptCount) {
+			throw new Error("authentication answer count mismatch");
+		}
+		return this.finish(id, "answered", answers.map((value) => String(value ?? "").slice(0, 4096)));
+	}
+
+	cancel(id) {
+		if (!this.finish(id, "cancelled")) {
+			throw new Error("authentication challenge does not exist or has expired");
+		}
+	}
+
+	cancelAll() {
+		for (const id of [...this.pending.keys()]) this.finish(id, "cancelled");
+	}
+
+	pendingIds() {
+		return [...this.pending.keys()];
+	}
+
+	replay(send) {
+		for (const pending of this.pending.values()) send(pending.event);
+	}
+
+	audienceDisconnected() {
+		// Pending challenges live until their absolute deadline and can be replayed.
+	}
 }
 
 function shellQuote(s) {
@@ -133,8 +1177,10 @@ function clamp(n, lo, hi) {
 }
 
 function clip(text, max = 20_000) {
-	text = String(text ?? "");
-	return text.length <= max ? text : `${text.slice(0, max)}\n…[truncated ${text.length - max} bytes]`;
+	const output = { text: "", bytes: 0, droppedBytes: 0, truncated: false };
+	appendLimitedOutput(output, Buffer.from(String(text ?? ""), "utf8"), max);
+	finalizeLimitedOutput(output);
+	return limitedOutputText(output);
 }
 function safeError(error, maxChars = 300) {
 	const message = String(error?.message ?? error);
@@ -161,31 +1207,652 @@ function envelope(res, { json = true } = {}) {
 	};
 }
 
-/**
- * Condensed status summary — raw `status --json` is ~1MB (thousands of
- * historical jobs), far beyond what a tool result should carry. Active rows
- * in full, history as counts.
- */
-function summarizeStatus(d) {
-	const lines = [];
-	const active = (d.batches ?? []).filter((b) => !["done", "skip"].includes(b.status));
-	const doneBatches = (d.batches ?? []).length - active.length;
-	lines.push(`batches: ${d.batches?.length ?? 0} total (${doneBatches} terminal, ${active.length} active/blocked)`);
-	for (const b of active) {
-		lines.push(`  batch ${b.name} [${b.status}] ${b.progress ?? ""}${b.depends_on?.length ? ` dep=[${b.depends_on.join(",")}]` : ""}`);
+const STATUS_TOP_LEVEL_KEYS = new Set([
+	"schema_version",
+	"limit",
+	"truncated",
+	"next_cursor",
+	"next_job_cursor",
+	"daemon_health",
+	"batches",
+	"jobs",
+	"gpus",
+	"cpu",
+]);
+const STATUS_BATCH_KEYS = new Set([
+	"id",
+	"name",
+	"batch_id",
+	"batch_name",
+	"mode",
+	"status",
+	"depends_on",
+	"progress",
+	"project",
+	"revision",
+]);
+const STATUS_JOB_KEYS = new Set([
+	"id",
+	"batch_id",
+	"batch_name",
+	"task",
+	"status",
+	"wait_reason",
+	"gpu",
+	"version",
+	"resources",
+	"retries",
+	"failure",
+	"started_at",
+	"finished_at",
+	"progress",
+]);
+const STATUS_GPU_KEYS = new Set(["idx", "status", "job", "quarantined", "revision", "assignments"]);
+const STATUS_BATCH_STATES = new Set(["queued", "active", "blocked", "done", "cancelled", "discarded"]);
+const STATUS_JOB_STATES = new Set([
+	"pending",
+	"running",
+	"done",
+	"skip",
+	"failed",
+	"blocked",
+	"cancelled",
+	"timed_out",
+	"interrupted",
+]);
+const STATUS_GPU_STATES = new Set(["free", "assigned", "releasing", "unmanaged"]);
+
+function statusRecord(value, label) {
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		throw new TypeError(`${label} is not a canonical object`);
 	}
-	const live = (d.jobs ?? []).filter((j) => ["running", "pending", "waiting_dep"].includes(j.status));
+	return value;
+}
+
+function statusText(value, label, { nullable = false, max = 256 } = {}) {
+	if (nullable && value === null) return null;
+	if (typeof value !== "string" || value.length < 1 || value.length > max || /[\0-\x1f\x7f]/.test(value)) {
+		throw new TypeError(`${label} is not canonical text`);
+	}
+	return value;
+}
+
+function statusKnownKeys(value, allowed, label) {
+	for (const key of Object.keys(value)) {
+		if (!allowed.has(key)) throw new TypeError(`${label} contains unsupported field ${key}`);
+	}
+}
+
+function canonicalStatusDocument(document) {
+	statusRecord(document, "status");
+	statusKnownKeys(document, STATUS_TOP_LEVEL_KEYS, "status");
+	if (document.schema_version !== 1) throw new TypeError("status schema_version must be 1");
+	if (!Number.isInteger(document.limit) || document.limit < 1 || document.limit > 1000) {
+		throw new TypeError("status limit is invalid");
+	}
+	const truncated = statusRecord(document.truncated, "status.truncated");
+	statusKnownKeys(truncated, new Set(["batches", "jobs"]), "status.truncated");
+	if (typeof truncated.batches !== "boolean" || typeof truncated.jobs !== "boolean") {
+		throw new TypeError("status truncation flags are invalid");
+	}
+	for (const [field, isTruncated] of [
+		["next_cursor", truncated.batches],
+		["next_job_cursor", truncated.jobs],
+	]) {
+		if (isTruncated) {
+			statusText(document[field], `status.${field}`, { max: 1024 });
+		} else if (document[field] !== null) {
+			throw new TypeError(`status.${field} must be null when its page is complete`);
+		}
+	}
+	for (const field of ["batches", "jobs"]) {
+		if (!Array.isArray(document[field]) || document[field].length > document.limit) {
+			throw new TypeError(`status ${field} is invalid`);
+		}
+	}
+	if (!Array.isArray(document.gpus) || document.gpus.length > 1024) {
+		throw new TypeError("status gpus is invalid");
+	}
+
+	const batchNames = new Map();
+	for (const [index, batch] of document.batches.entries()) {
+		statusRecord(batch, `status.batches[${index}]`);
+		statusKnownKeys(batch, STATUS_BATCH_KEYS, `status.batches[${index}]`);
+		const id = statusText(batch.id, `status.batches[${index}].id`);
+		const name = statusText(batch.name, `status.batches[${index}].name`);
+		if (batch.batch_id !== id || batch.batch_name !== name) {
+			throw new TypeError(`status.batches[${index}] identity is inconsistent`);
+		}
+		if (batchNames.has(id)) throw new TypeError(`status has duplicate batch id ${id}`);
+		if (!STATUS_BATCH_STATES.has(batch.status)) throw new TypeError(`status batch state ${batch.status} is unknown`);
+		if (!Number.isInteger(batch.revision) || batch.revision < 0) {
+			throw new TypeError(`status.batches[${index}].revision is invalid`);
+		}
+		if (!Array.isArray(batch.depends_on) || batch.depends_on.length > document.limit) {
+			throw new TypeError(`status.batches[${index}].depends_on is invalid`);
+		}
+		for (const dependency of batch.depends_on) statusText(dependency, `status.batches[${index}].depends_on`);
+		statusText(batch.progress, `status.batches[${index}].progress`, { max: 64 });
+		batchNames.set(id, name);
+	}
+
+	const jobIds = new Set();
+	for (const [index, job] of document.jobs.entries()) {
+		statusRecord(job, `status.jobs[${index}]`);
+		statusKnownKeys(job, STATUS_JOB_KEYS, `status.jobs[${index}]`);
+		const id = statusText(job.id, `status.jobs[${index}].id`);
+		const batchId = statusText(job.batch_id, `status.jobs[${index}].batch_id`);
+		const batchName = statusText(job.batch_name, `status.jobs[${index}].batch_name`);
+		statusText(job.task, `status.jobs[${index}].task`);
+		if (jobIds.has(id)) throw new TypeError(`status has duplicate job id ${id}`);
+		if (batchNames.get(batchId) !== batchName) {
+			throw new TypeError(`status.jobs[${index}] refers to an absent or mismatched batch`);
+		}
+		if (!Number.isInteger(job.version) || job.version < 1) {
+			throw new TypeError(`status.jobs[${index}].version is invalid`);
+		}
+		if (!STATUS_JOB_STATES.has(job.status)) throw new TypeError(`status job state ${job.status} is unknown`);
+		if (job.wait_reason !== null && job.wait_reason !== "quota" && job.wait_reason !== "dependency") {
+			throw new TypeError(`status.jobs[${index}].wait_reason is invalid`);
+		}
+		jobIds.add(id);
+	}
+
+	const gpuIds = new Set();
+	for (const [index, gpu] of document.gpus.entries()) {
+		statusRecord(gpu, `status.gpus[${index}]`);
+		statusKnownKeys(gpu, STATUS_GPU_KEYS, `status.gpus[${index}]`);
+		if (!Number.isInteger(gpu.idx) || gpu.idx < 0 || gpuIds.has(gpu.idx)) {
+			throw new TypeError(`status.gpus[${index}].idx is invalid`);
+		}
+		if (
+			!STATUS_GPU_STATES.has(gpu.status)
+			|| ![0, 1].includes(gpu.quarantined)
+			|| !Number.isInteger(gpu.revision)
+			|| gpu.revision < 0
+		) {
+			throw new TypeError(`status.gpus[${index}] state is invalid`);
+		}
+		if (gpu.job !== null) statusText(gpu.job, `status.gpus[${index}].job`);
+		try {
+			canonicalGpuAssignments(gpu.assignments);
+		} catch (error) {
+			throw new TypeError(`status.gpus[${index}].assignments is invalid: ${error.message}`);
+		}
+		gpuIds.add(gpu.idx);
+	}
+	if (document.cpu !== undefined) {
+		const cpu = statusRecord(document.cpu, "status.cpu");
+		statusKnownKeys(cpu, new Set(["used", "total"]), "status.cpu");
+		if (![cpu.used, cpu.total].every((value) => Number.isInteger(value) && value >= 0)) {
+			throw new TypeError("status.cpu is invalid");
+		}
+	}
+	if (document.daemon_health !== undefined) {
+		const health = statusRecord(document.daemon_health, "status.daemon_health");
+		if (Object.keys(health).length > 32) throw new TypeError("status.daemon_health is too large");
+		for (const value of Object.values(health)) {
+			if (value !== null && !["string", "number", "boolean"].includes(typeof value)) {
+				throw new TypeError("status.daemon_health contains a non-scalar field");
+			}
+		}
+	}
+	return document;
+}
+function mutationPreconditionError(message, httpStatus = 409) {
+	const error = new Error(message);
+	error.httpStatus = httpStatus;
+	return error;
+}
+
+function assertMutationPreconditions(document, precondition = { kind: "none" }) {
+	const canonical = canonicalStatusDocument(document);
+	const kind = String(precondition?.kind ?? "none");
+	if (kind === "none") return canonical;
+	const id = String(precondition?.id ?? "");
+	const expectedStatus = precondition?.expectedStatus;
+	if (
+		!id
+		|| typeof expectedStatus !== "string"
+		|| !expectedStatus
+		|| !Number.isInteger(precondition.expectedRevision)
+		|| precondition.expectedRevision < 0
+	) {
+		throw mutationPreconditionError("mutation requires an exact id, status, and revision", 400);
+	}
+	if (kind === "batch") {
+		const batch = canonical.batches.find((candidate) => candidate.id === id);
+		if (!batch) {
+			const detail = canonical.truncated.batches ? "status page is truncated" : "batch is absent";
+			throw mutationPreconditionError(`batch precondition failed: ${detail}`);
+		}
+		if (batch.status !== expectedStatus || batch.revision !== precondition.expectedRevision) {
+			throw mutationPreconditionError(
+				`batch precondition changed: expected ${expectedStatus} revision ${precondition.expectedRevision},`
+				+ ` found ${batch.status} revision ${batch.revision}`,
+			);
+		}
+		return canonical;
+	}
+	if (kind === "task") {
+		if (!Number.isInteger(precondition.expectedVersion) || precondition.expectedVersion < 1) {
+			throw mutationPreconditionError("task mutation requires an exact expected version", 400);
+		}
+		const task = canonical.jobs.find(
+			(candidate) => `${candidate.batch_id}:${candidate.task}` === id,
+		);
+		if (!task) {
+			const detail = canonical.truncated.jobs ? "status page is truncated" : "task is absent";
+			throw mutationPreconditionError(`task precondition failed: ${detail}`);
+		}
+		const batch = canonical.batches.find((candidate) => candidate.id === task.batch_id);
+		if (
+			task.status !== expectedStatus
+			|| task.version !== precondition.expectedVersion
+			|| batch?.revision !== precondition.expectedRevision
+		) {
+			throw mutationPreconditionError(
+				`task precondition changed: expected ${expectedStatus} v${precondition.expectedVersion}`
+				+ ` revision ${precondition.expectedRevision}, found ${task.status} v${task.version}`
+				+ ` revision ${batch?.revision ?? "absent"}`,
+			);
+		}
+		return canonical;
+	}
+	if (kind === "gpu") {
+		const gpu = canonical.gpus.find((candidate) => String(candidate.idx) === id);
+		if (!gpu) throw mutationPreconditionError("GPU precondition failed: GPU is absent");
+		let expectedAssignments;
+		try {
+			expectedAssignments = canonicalGpuAssignments(precondition.expectedAssignments);
+		} catch (error) {
+			throw mutationPreconditionError(error.message, 400);
+		}
+		if (
+			gpu.status !== expectedStatus
+			|| gpu.revision !== precondition.expectedRevision
+			|| JSON.stringify(gpu.assignments) !== JSON.stringify(expectedAssignments)
+			|| (
+				precondition.expectedQuarantined !== undefined
+				&& gpu.quarantined !== precondition.expectedQuarantined
+			)
+		) {
+			throw mutationPreconditionError(
+				`GPU precondition changed: expected status ${expectedStatus}`
+				+ ` revision ${precondition.expectedRevision}`
+				+ (
+					precondition.expectedQuarantined === undefined
+						? ""
+						: ` quarantine ${precondition.expectedQuarantined}`
+				)
+				+ ` assignments ${JSON.stringify(expectedAssignments)}, found ${gpu.status}`
+				+ ` revision ${gpu.revision} quarantine ${gpu.quarantined}`
+				+ ` assignments ${JSON.stringify(gpu.assignments)}`,
+			);
+		}
+		return canonical;
+	}
+	throw mutationPreconditionError(`unsupported mutation precondition kind: ${kind}`, 400);
+}
+
+function isCanonicalStatusDocument(document) {
+	try {
+		canonicalStatusDocument(document);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+async function collectWriterStatusPages(fetchPage, {
+	target,
+	maxPages = 100,
+} = {}) {
+	if (typeof fetchPage !== "function") throw new Error("status page loader is required");
+	if (!Number.isInteger(maxPages) || maxPages < 1 || maxPages > 100) {
+		throw new Error("status paging limit must be between 1 and 100");
+	}
+	const batches = new Map();
+	const jobs = new Map();
+	const taskRefs = new Map();
+	const seenBatchCursors = new Set();
+	let first;
+	let gpuSnapshot;
+	let targetPage;
+	let batchCursor = null;
+	let calls = 0;
+	do {
+		const batchCursorKey = batchCursor ?? "";
+		if (seenBatchCursors.has(batchCursorKey)) throw new Error("status batch cursor loop");
+		seenBatchCursors.add(batchCursorKey);
+		const seenJobCursors = new Set();
+		let jobCursor = null;
+		let batchPage;
+		let batchSnapshot;
+		do {
+			const jobCursorKey = jobCursor ?? "";
+			if (seenJobCursors.has(jobCursorKey)) throw new Error("status job cursor loop");
+			seenJobCursors.add(jobCursorKey);
+			if (++calls > maxPages) throw new Error("status paging limit exceeded");
+			const page = canonicalStatusDocument(await fetchPage({
+				cursor: batchCursor,
+				jobCursor,
+			}));
+			if (first === undefined) {
+				first = page;
+				gpuSnapshot = JSON.stringify(page.gpus);
+			} else if (JSON.stringify(page.gpus) !== gpuSnapshot) {
+				throw new Error("status GPUs changed during paging");
+			}
+			if (batchPage === undefined) {
+				batchPage = page;
+				batchSnapshot = JSON.stringify(page.batches);
+			} else if (JSON.stringify(page.batches) !== batchSnapshot) {
+				throw new Error("status batches changed during job paging");
+			}
+			for (const batch of page.batches) {
+				const previous = batches.get(batch.id);
+				if (previous && JSON.stringify(previous) !== JSON.stringify(batch)) {
+					throw new Error(`batch ${batch.id} changed during paging`);
+				}
+				batches.set(batch.id, batch);
+				if (target?.kind === "batch" && batch.id === target.id) targetPage ??= page;
+			}
+			for (const job of page.jobs) {
+				const previous = jobs.get(job.id);
+				if (previous && JSON.stringify(previous) !== JSON.stringify(job)) {
+					throw new Error(`job ${job.id} changed during paging`);
+				}
+				const ref = `${job.batch_id}:${job.task}`;
+				const previousRef = taskRefs.get(ref);
+				if (previousRef && JSON.stringify(previousRef) !== JSON.stringify(job)) {
+					throw new Error(`task ${ref} changed during paging`);
+				}
+				jobs.set(job.id, job);
+				taskRefs.set(ref, job);
+				if (target?.kind === "task" && ref === target.id) targetPage ??= page;
+			}
+			jobCursor = page.truncated.jobs ? page.next_job_cursor : null;
+		} while (jobCursor !== null);
+		batchCursor = batchPage.truncated.batches ? batchPage.next_cursor : null;
+	} while (batchCursor !== null);
+	return {
+		first,
+		targetPage,
+		batches: [...batches.values()],
+		jobs: [...jobs.values()],
+	};
+}
+
+/** Condensed current-status summary. */
+function summarizeStatus(document) {
+	const canonical = canonicalStatusDocument(document);
+	const batches = canonical.batches;
+	const jobs = canonical.jobs;
+	const terminalBatchStatuses = new Set(["done", "cancelled", "discarded"]);
+	const knownBatchStatuses = new Set(["queued", "active", "blocked", ...terminalBatchStatuses]);
+	const active = batches.filter((batch) => !terminalBatchStatuses.has(batch.status));
+	const batchCount = canonical.truncated.batches
+		? `${batches.length} shown on this page (more pages available)`
+		: `${batches.length} total`;
+	const batchBreakdown = canonical.truncated.batches
+		? `${batches.length - active.length} terminal shown, ${active.length} active/blocked shown`
+		: `${batches.length - active.length} terminal, ${active.length} active/blocked`;
+	const lines = [
+		`batches: ${batchCount} (${batchBreakdown})`,
+	];
+	for (const batch of active) {
+		const status = knownBatchStatuses.has(batch.status) ? batch.status : `${batch.status} unknown`;
+		lines.push(`  batch ${batch.name ?? batch.batch_name} [${status}] ${batch.progress ?? ""}${batch.depends_on?.length ? ` dep=[${batch.depends_on.join(",")}]` : ""}`);
+	}
+	const knownJobStatuses = new Set([
+		"pending",
+		"running",
+		"done",
+		"skip",
+		"failed",
+		"blocked",
+		"cancelled",
+		"timed_out",
+	]);
+	const live = jobs.filter((job) => job.status === "pending" || job.status === "running");
 	const byStatus = {};
-	for (const j of d.jobs ?? []) byStatus[j.status] = (byStatus[j.status] ?? 0) + 1;
-	lines.push(`jobs: ${d.jobs?.length ?? 0} total — live ${live.length}, by-status ${JSON.stringify(byStatus)}`);
-	for (const j of live.slice(0, 50)) {
-		lines.push(`  job ${j.batch}:${j.task} [${j.status}]${j.gpu != null ? ` gpu=${j.gpu}` : ""}${j.started_at ? ` since ${j.started_at}` : ""}`);
+	for (const job of jobs) byStatus[job.status] = (byStatus[job.status] ?? 0) + 1;
+	const jobsScoped = canonical.truncated.batches || canonical.truncated.jobs;
+	const jobCount = jobsScoped
+		? `${jobs.length} shown in current scope/page`
+			+ (canonical.truncated.jobs ? " (more job pages available)" : " (more batch pages available)")
+		: `${jobs.length} total`;
+	const liveLabel = jobsScoped ? `${live.length} shown` : String(live.length);
+	const statusLabel = jobsScoped ? "by-status shown" : "by-status";
+	lines.push(`jobs: ${jobCount} — live ${liveLabel}, ${statusLabel} ${JSON.stringify(byStatus)}`);
+	for (const job of jobs.slice(0, 50)) {
+		if (!(job.status === "pending" || job.status === "running") && knownJobStatuses.has(job.status)) continue;
+		const status = knownJobStatuses.has(job.status) ? job.status : `${job.status} unknown`;
+		const batch = job.batch_id ?? "?";
+		lines.push(`  job ${batch}:${job.task} [${status}]${job.wait_reason ? ` wait_reason=${job.wait_reason}` : ""}${job.gpu != null ? ` gpu=${job.gpu}` : ""}${job.started_at ? ` since ${job.started_at}` : ""}`);
 	}
-	for (const g of d.gpus ?? []) {
-		lines.push(`  gpu${g.idx} [${g.status}]${g.job ? ` job=${g.job}` : ""}${g.quarantined ? " QUARANTINED" : ""}`);
+	for (const gpu of canonical.gpus) {
+		const assignments = gpu.assignments.length > 0
+			? ` assignments=${JSON.stringify(gpu.assignments)}`
+			: "";
+		lines.push(`  gpu${gpu.idx} [${gpu.status}]${assignments}${gpu.quarantined ? " QUARANTINED" : ""}`);
 	}
-	if (d.cpu) lines.push(`cpu: ${d.cpu.used} in use${d.cpu.total ? ` / ${d.cpu.total} cap` : " (no cap)"}`);
+	if (canonical.cpu) lines.push(`cpu: ${canonical.cpu.used} in use${canonical.cpu.total ? ` / ${canonical.cpu.total} cap` : " (no cap)"}`);
 	return lines.join("\n");
+}
+
+const HISTORY_TOP_LEVEL_KEYS = new Set([
+	"schema_version",
+	"history",
+	"limit",
+	"truncated",
+	"next_cursor",
+]);
+const HISTORY_ROW_KEYS = new Set([
+	"id",
+	"batch_id",
+	"batch_name",
+	"task",
+	"status",
+	"version",
+	"rc",
+	"gpu",
+	"started_at",
+	"finished_at",
+	"duration_seconds",
+	"failure",
+]);
+
+function canonicalHistoryDocument(document) {
+	statusRecord(document, "history");
+	statusKnownKeys(document, HISTORY_TOP_LEVEL_KEYS, "history");
+	if (
+		document.schema_version !== 1
+		|| !Number.isInteger(document.limit)
+		|| document.limit < 1
+		|| document.limit > 200
+		|| typeof document.truncated !== "boolean"
+		|| !Array.isArray(document.history)
+		|| document.history.length > document.limit
+	) {
+		throw new TypeError("history envelope is invalid");
+	}
+	if (document.truncated) {
+		statusText(document.next_cursor, "history.next_cursor", { max: 1024 });
+	} else if (document.next_cursor !== null) {
+		throw new TypeError("history.next_cursor must be null on the final page");
+	}
+	const ids = new Set();
+	for (const [index, row] of document.history.entries()) {
+		statusRecord(row, `history.history[${index}]`);
+		statusKnownKeys(row, HISTORY_ROW_KEYS, `history.history[${index}]`);
+		const id = statusText(row.id, `history.history[${index}].id`, { max: 512 });
+		statusText(row.batch_id, `history.history[${index}].batch_id`, { max: 512 });
+		statusText(row.batch_name, `history.history[${index}].batch_name`, { max: 512 });
+		statusText(row.task, `history.history[${index}].task`, { max: 512 });
+		if (ids.has(id)) throw new TypeError(`history has duplicate id ${id}`);
+		if (!STATUS_JOB_STATES.has(row.status) || !Number.isInteger(row.version) || row.version < 1) {
+			throw new TypeError(`history.history[${index}] status/version is invalid`);
+		}
+		for (const field of ["started_at", "finished_at", "failure"]) {
+			if (row[field] !== null) statusText(row[field], `history.history[${index}].${field}`, { max: 4096 });
+		}
+		if (
+			row.duration_seconds !== null
+			&& (typeof row.duration_seconds !== "number" || !Number.isFinite(row.duration_seconds) || row.duration_seconds < 0)
+		) {
+			throw new TypeError(`history.history[${index}].duration_seconds is invalid`);
+		}
+		if (row.rc !== null && !Number.isInteger(row.rc)) {
+			throw new TypeError(`history.history[${index}].rc is invalid`);
+		}
+		ids.add(id);
+	}
+	return document;
+}
+
+async function serveTerminalWebSocket({
+	ws,
+	clients,
+	slots,
+	maxSlots = 4,
+	opening: reservedOpening,
+	openShell,
+	openDeadlineAt,
+	alias,
+	cols,
+	rows,
+}) {
+	const HIGH_WATER = 1024 * 1024;
+	const LOW_WATER = 512 * 1024;
+	let session;
+	let drainTimer;
+	let paused = false;
+	let cleaned = false;
+	let sessionClosed = false;
+	let openSettled = false;
+	const opening = reservedOpening ?? beginPendingOpen(slots, maxSlots);
+	if (!opening) {
+		try { ws.close(1013, "too many terminal sessions"); } catch { /* gone */ }
+		return false;
+	}
+	const { controller } = opening;
+	const closeSession = () => {
+		if (!session || sessionClosed) return;
+		sessionClosed = true;
+		try { session.close(); } catch { /* already closed */ }
+	};
+	const cleanup = () => {
+		if (!cleaned) {
+			cleaned = true;
+			controller.abort(new Error("terminal websocket closed"));
+			clearInterval(drainTimer);
+			clients.delete(ws);
+			if (openSettled) opening.settle();
+		}
+		closeSession();
+	};
+	clients.add(ws);
+	ws.on("close", cleanup);
+	ws.on("error", cleanup);
+	if (ws.readyState !== ws.OPEN) {
+		cleanup();
+		openSettled = true;
+		opening.settle();
+		return false;
+	}
+	try {
+		session = await openShell(alias, { cols, rows }, {
+			signal: controller.signal,
+			deadlineAt: openDeadlineAt,
+		});
+		openSettled = true;
+		if (cleaned || ws.readyState !== ws.OPEN) {
+			cleanup();
+			return;
+		}
+		const maybePause = () => {
+			if (ws.bufferedAmount > 4 * 1024 * 1024) {
+				try { ws.close(1009, "terminal output buffer exceeded"); } catch { /* gone */ }
+				return;
+			}
+			const over = ws.bufferedAmount > HIGH_WATER;
+			if (over && !paused) {
+				paused = true;
+				session.pause?.();
+			} else if (ws.bufferedAmount < LOW_WATER && paused) {
+				paused = false;
+				session.resume?.();
+			}
+		};
+		drainTimer = setInterval(maybePause, 50);
+		drainTimer.unref?.();
+		ws.send(JSON.stringify({ type: "ready", alias }));
+		session.onData = (data) => {
+			if (ws.readyState !== ws.OPEN) return;
+			const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
+			for (let offset = 0; offset < buffer.length; offset += 64 * 1024) {
+				ws.send(JSON.stringify({
+					type: "output",
+					data: buffer.subarray(offset, offset + 64 * 1024).toString("utf8"),
+				}));
+			}
+			maybePause();
+		};
+		session.onExit = (code, error) => {
+			try {
+				ws.send(JSON.stringify({
+					type: "exit",
+					code,
+					error: error ? safeError(error) : undefined,
+				}));
+			} catch { /* gone */ }
+			try { ws.close(); } catch { /* gone */ }
+		};
+		let messageWindowAt = Date.now();
+		let messageCount = 0;
+		ws.on("message", (raw) => {
+			const now = Date.now();
+			if (now - messageWindowAt >= 1000) {
+				messageWindowAt = now;
+				messageCount = 0;
+			}
+			messageCount += 1;
+			if (messageCount > 100 || raw.length > 64 * 1024) {
+				ws.close(1008, "terminal input rate exceeded");
+				return;
+			}
+			try {
+				const frame = JSON.parse(raw.toString());
+				if (frame.type === "input") {
+					const input = String(frame.data ?? "");
+					if (Buffer.byteLength(input, "utf8") > 32 * 1024) {
+						ws.close(1009, "terminal input too large");
+						return;
+					}
+					session.send(input);
+				} else if (frame.type === "resize") {
+					session.resize(
+						clamp(parseInt(frame.cols, 10) || 80, 20, 500),
+						clamp(parseInt(frame.rows, 10) || 24, 10, 200),
+					);
+				}
+			} catch { /* malformed frame */ }
+		});
+	} catch (error) {
+		cleanup();
+		if (ws.readyState === ws.OPEN) {
+			try {
+				ws.send(JSON.stringify({ type: "exit", code: null, error: safeError(error) }));
+				ws.close();
+			} catch { /* gone */ }
+		}
+	} finally {
+		openSettled = true;
+		if (cleaned || !session || ws.readyState !== ws.OPEN) opening.settle();
+	}
+	return true;
 }
 
 /**
@@ -200,6 +1867,7 @@ function summarizeStatus(d) {
  * instead of failing the mount.
  */
 function apply(ctx, config) {
+	const accessToken = ctx.webServer ? loadOrCreateAccessToken() : null;
 	// ── B24: 内嵌 SSH 引擎（先于 runRemote 创建：绑定后 sched 命令走引擎通道）──
 	const sshStore = new HostStore();
 	const sshEngine = new SshEngine(sshStore);
@@ -225,44 +1893,19 @@ function apply(ctx, config) {
 		ctx.logger.warn("[node-sched] 入口覆盖文件读取失败(忽略): %s", e);
 	}
 	const useLocalTransport = () => transportMode === "local";
-	const persistEntryOverride = (patch) => {
-		let existing = {};
-		try {
-			existing = JSON.parse(fs.readFileSync(entryFile, "utf-8"));
-		} catch {
-			// Missing or malformed overrides are replaced by the validated patch.
-		}
-		fs.mkdirSync(path.dirname(entryFile), { recursive: true });
-		fs.writeFileSync(
-			entryFile,
-			JSON.stringify(mergeEntryOverride(existing, patch), null, 2),
-		);
-	};
+	const persistEntryOverride = (patch) => writeEntryOverride({ fs, file: entryFile, patch });
 
-	// ── B24c: 交互式 2FA 桥接 ──
-	// 质询 → WS 广播给看板 → 用户输入动态码 → POST /sched/ssh/2fa-answer 回来。
-	// broadcastFn 由 webServer 块后置绑定；无看板在线时快速失败并给出明确提示。
-	const pending2fa = new Map(); // id -> resolver
+	// Authentication challenges are independent state machines. A dashboard
+	// disconnect does not cancel SSH authentication; the challenge remains
+	// replayable until its own deadline.
 	let broadcastFn = null;
-	sshEngine.setInteractivePrompter(({ alias, instr, prompts }) => new Promise((resolve) => {
-		if (typeof broadcastFn !== "function") {
-			throw new Error("2FA \u8d28\u8be2\u9700\u8981\u770b\u677f\u5728\u7ebf\u4ea4\u4e92\uff08\u5f53\u524d\u65e0\u6d4f\u89c8\u5668\u8fde\u63a5\uff09");
-		}
-		const id = `k${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
-		pending2fa.set(id, resolve);
-		setTimeout(() => {
-			if (pending2fa.delete(id)) {
-				ctx.logger.warn("[node-sched] audit 2fa-timeout id=%s alias=%s", id, alias);
-				resolve("");
-			}
-		}, 180_000);
-		ctx.logger.warn("[node-sched] audit 2fa-request id=%s alias=%s", id, alias);
-		broadcastFn({
-			type: "kbdint",
-			id, alias,
-			prompt: (prompts && prompts[0] && prompts[0].text) || instr || "Verification code:",
-		});
-	}));
+	let authAudienceAvailable = () => false;
+	const authBroker = new AuthChallengeBroker({
+		timeoutMs: 180_000,
+		hasVisibleAudience: () => authAudienceAvailable(),
+		broadcast: (event) => broadcastFn?.(event),
+	});
+	sshEngine.setInteractivePrompter((request) => authBroker.request(request));
 
 	const runRemoteCli = makeRunner(cp, config);
 	/**
@@ -279,18 +1922,21 @@ function apply(ctx, config) {
 	function runOnTarget(target, args, opts = {}) {
 		if (target.mode === "local") return localTransport.exec(args, opts);
 		if (target.mode === "engine") {
-			return (opts.retry === false
-				? sshEngine.execOnce(target.alias, args, opts.timeoutMs)
-				: sshEngine.exec(target.alias, args, opts.timeoutMs)).then(
-				(r) => ({
-					ok: r.success,
-					code: r.exitCode ?? -1,
-					stdout: r.stdout,
-					stderr: r.stderr + (r.error ? `\n${r.error}` : ""),
+			const execute = opts.retryable && typeof sshEngine.execRetryable === "function"
+				? sshEngine.execRetryable.bind(sshEngine)
+				: sshEngine.execOnce.bind(sshEngine);
+			return execute(target.alias, args, opts.timeoutMs, opts).then(
+				(result) => ({
+					ok: result.success,
+					code: result.exitCode ?? -1,
+					stdout: result.stdout,
+					stderr: result.stderr + (result.error ? `\n${result.error}` : ""),
 				}),
-				(e) => ({
-					ok: false, code: -1, stdout: "",
-stderr: `[ssh-engine:${target.alias}] ${formatSshError(e)}`,
+				(error) => ({
+					ok: false,
+					code: -1,
+					stdout: "",
+					stderr: `[ssh-engine:${target.alias}] ${formatSshError(error)}`,
 				}),
 			);
 		}
@@ -301,56 +1947,45 @@ stderr: `[ssh-engine:${target.alias}] ${formatSshError(e)}`,
 		return runOnTarget(captureTransportTarget(), args, opts);
 	}
 
-		// batch.json 上传：内容经 ssh stdin 写远端临时文件（本地不落盘），
-	// dry-run 纯只读预览；submit 走 operate() 门+审计。两者用后即删临时文件。
-	// ── B24e: 写操作统一走 ambiorix 本机执行 (screen 注入) ──────────────
-	// B24d 守卫 + NFS+WAL 双主机丢数据实测: 网关上的 sched 写操作会被
-	// daemon 检查点静默抹掉 (2026-08-26 sd_repro_v3 事故)。所有产生状态
-	// 变更的命令必须在计算节点上跑。通道: 往 ambior1 screen 注入命令行,
-	// 输出重定向到共享盘结果文件, 轮询该文件取回 stdout/stderr。
-	const SCREEN_SESSION = "3323979.ambior1";
+	// A screen writer is supported only when both its SSH target and session
+	// are explicit deployment configuration. Direct local/engine/ssh writers
+	// execute mutations exactly once without this relay.
 	const INBOX = "$HOME/.sched/inbox";
 	const SCREEN_RESULT_PREFIX_BYTES = 2 * 1024 * 1024;
-	const MAX_SCREEN_STUFF_BYTES = 640;
+	const MAX_SCREEN_STUFF_BYTES = 1024;
 	let screenExecSeq = 0;
-	async function screenExec(cmd, { timeoutMs = 60_000, target = captureTransportTarget() } = {}) {
-		if (target.mode === "local") return runOnTarget(target, cmd, { timeoutMs });
-		if (target.mode === "engine") {
-			return runOnTarget(target, cmd, { timeoutMs, retry: false });
+	async function screenExec(cmd, { timeoutMs = 60_000, writer } = {}) {
+		if (writer?.mode !== "screen" || !writer.sshEntry || !writer.session) {
+			throw new Error("screen mutation writer requires explicit target and session");
 		}
 		const id = `se${Date.now().toString(36)}${++screenExecSeq}`;
 		const out = `${INBOX}/${id}.out`;
 		const markerOut = `${INBOX}/${id}.done`;
 		const cancelOut = `${INBOX}/${id}.cancel`;
-		const remoteOpts = { timeoutMs: 15_000, sshEntry: target.sshEntry };
+		const remoteOpts = { timeoutMs: 15_000, sshEntry: writer.sshEntry };
 		const cleanup = () => runRemoteCli(
 			`rm -f ${out} ${markerOut} ${cancelOut}`,
 			{ ...remoteOpts, maxOutputBytes: 128 },
 		).catch(() => {});
-		const wrapped = `{ echo "--- begin ${id}"; (${cmd}); rc=$?; if [ ! -e ${cancelOut} ]; then printf "\\n--- end rc=%s id=${id}\\n" "$rc" > ${markerOut}; fi; (sleep 60; rm -f ${out} ${markerOut} ${cancelOut}) >/dev/null 2>&1 & } > ${out} 2>&1`;
-		const stuff = `mkdir -p ${INBOX} && ${wrapped}\n`;
+		const wrapped = `{ umask 077; echo "--- begin ${id}"; (${cmd}); rc=$?; if [ ! -e ${cancelOut} ]; then printf "\\n--- end rc=%s id=${id}\\n" "$rc" > ${markerOut}; chmod 600 ${markerOut}; fi; (sleep 60; rm -f ${out} ${markerOut} ${cancelOut}) >/dev/null 2>&1 & } > ${out} 2>&1`;
+		const stuff = `umask 077; mkdir -p ${INBOX} && chmod 700 ${INBOX} && rm -f ${out} ${markerOut} ${cancelOut} && ${wrapped}\n`;
 		if (Buffer.byteLength(stuff, "utf8") > MAX_SCREEN_STUFF_BYTES) {
 			throw new Error(`screenExec command too long (max ${MAX_SCREEN_STUFF_BYTES} bytes)`);
 		}
 		let started = false;
 		let markerSeen = false;
 		try {
-			await new Promise((resolve, reject) => {
-				let errBuf = "";
-				const child = cp.spawn("ssh",
-					["-o", `ConnectTimeout=${config.connectTimeoutSec}`, "-o", "BatchMode=yes",
-						target.sshEntry,
-						`screen -S ${SCREEN_SESSION} -X stuff ${shellQuote(stuff)}`],
-					{ timeout: 15_000 });
-				child.stderr.on("data", (d) => { errBuf += d; });
-				child.on("close", (c) => c === 0 ? resolve() : reject(new Error(`screen stuff failed rc=${c}: ${errBuf.trim().slice(0, 200)}`)));
-			});
+			const start = await runRemoteCli(
+				`screen -S ${shellQuote(writer.session)} -X stuff ${shellQuote(stuff)}`,
+				{ ...remoteOpts, maxOutputBytes: 4096 },
+			);
+			if (!start.ok) {
+				throw new Error(`screen stuff failed rc=${start.code}: ${(start.stderr || start.stdout).trim().slice(0, 200)}`);
+			}
 			started = true;
-			// 轮询结果文件 (NFS 延迟容忍). Completion lives in a separate
-			// marker file so descendants retaining stdout cannot hide the result.
 			const deadline = Date.now() + timeoutMs;
 			while (Date.now() < deadline) {
-				await new Promise((r) => setTimeout(r, 1500));
+				await new Promise((resolve) => setTimeout(resolve, 1500));
 				const markerResult = await runRemoteCli(
 					`cat ${markerOut} 2>/dev/null`,
 					{ ...remoteOpts, maxOutputBytes: 1024 },
@@ -364,12 +1999,7 @@ stderr: `[ssh-engine:${target.alias}] ${formatSshError(e)}`,
 				);
 				if (!prefix.ok) {
 					const detail = prefix.stderr || prefix.stdout || `exit ${prefix.code}`;
-					return {
-						ok: marker.code === 0,
-						code: marker.code,
-						stdout: `[screen output unavailable: ${detail}]`,
-						stderr: detail,
-					};
+					return { ok: false, code: marker.code, stdout: "", stderr: detail };
 				}
 				const sizeResult = await runRemoteCli(
 					`wc -c < ${out} 2>/dev/null`,
@@ -382,21 +2012,18 @@ stderr: `[ssh-engine:${target.alias}] ${formatSshError(e)}`,
 				);
 				if (!result) {
 					return {
-						ok: marker.code === 0,
+						ok: false,
 						code: marker.code,
-						stdout: `${prefix.stdout}\n[screen output framing invalid]`,
+						stdout: prefix.stdout,
 						stderr: "screen output framing invalid",
 					};
 				}
 				if (Number.isFinite(outputBytes) && outputBytes > SCREEN_RESULT_PREFIX_BYTES) {
-					return {
-						...result,
-						stdout: `${result.stdout}\n…[screen output truncated after ${SCREEN_RESULT_PREFIX_BYTES} bytes]`,
-					};
+					result.stdout += `\n…[truncated ${outputBytes - SCREEN_RESULT_PREFIX_BYTES} bytes]`;
 				}
 				return result;
 			}
-			throw new Error(`screenExec 超时 (${timeoutMs}ms): ${cmd.slice(0, 80)}`);
+			throw new Error(`screenExec timed out after ${timeoutMs}ms`);
 		} finally {
 			if (!started || markerSeen) {
 				await cleanup();
@@ -409,6 +2036,50 @@ stderr: `[ssh-engine:${target.alias}] ${formatSshError(e)}`,
 	let auditSeq = 0;
 
 	const S = config.schedBin;
+
+	function configuredMutationWriter() {
+		const expectedNode = String(config.mutationExpectedNode ?? "").trim();
+		if (!expectedNode) throw new Error("mutationExpectedNode is required for an enabled mutation writer");
+		switch (config.mutationMode) {
+			case "local":
+				return { mode: "local", expectedNode };
+			case "engine": {
+				const alias = String(config.mutationTarget ?? "").trim();
+				if (!alias) throw new Error("engine mutation writer requires mutationTarget");
+				return { mode: "engine", alias, expectedNode };
+			}
+			case "ssh": {
+				const sshEntry = String(config.mutationTarget ?? "").trim();
+				if (!sshEntry) throw new Error("ssh mutation writer requires mutationTarget");
+				return { mode: "cli", sshEntry, expectedNode };
+			}
+			case "screen": {
+				const sshEntry = String(config.mutationTarget ?? "").trim();
+				const session = String(config.mutationSession ?? "").trim();
+				if (!sshEntry || !session) throw new Error("screen mutation writer requires mutationTarget and mutationSession");
+				return { mode: "screen", sshEntry, session, expectedNode };
+			}
+			default:
+				throw new Error("explicit mutation writer is disabled");
+		}
+	}
+
+	function writerTransportTarget(writer) {
+		return writer.mode === "screen"
+			? { mode: "cli", sshEntry: writer.sshEntry }
+			: writer;
+	}
+
+	async function executeWriterRead(writer, command, timeoutMs = 30_000) {
+		if (writer.mode === "screen") return screenExec(command, { timeoutMs, writer });
+		return runOnTarget(writer, command, { timeoutMs, retryable: true });
+	}
+
+	async function executeWriterMutation(writer, command, timeoutMs) {
+		if (writer.mode === "screen") return screenExec(command, { timeoutMs, writer });
+		return runOnTarget(writer, command, { timeoutMs, retryable: false });
+	}
+
 
 	// ── Activation probe (background): loud degradation on entry/network mismatch. ──
 	let probeOk = false;
@@ -426,30 +2097,119 @@ stderr: `[ssh-engine:${target.alias}] ${formatSshError(e)}`,
 			ctx.logger.info("[node-sched] probe ok via %s", config.sshEntry);
 		});
 
-		/** Read-only remote query; one retry on transient ssh failure. */
-		async function query(args, opts = {}) {
-const target = opts.target ?? captureTransportTarget();
-			const runOpts = opts.timeoutMs === undefined ? {} : { timeoutMs: opts.timeoutMs };
-			let res = await runOnTarget(target, args, runOpts);
-			if (!res.ok && isTransientSshError(res.stderr)) {
-				res = await runOnTarget(target, args, runOpts);
-			}
-			return envelope(res, opts);
+	/** Read-only remote query; only this path may retry transient failures. */
+	async function query(args, opts = {}) {
+		const target = opts.target ?? captureTransportTarget();
+		const runOpts = {
+			...(opts.timeoutMs === undefined ? {} : { timeoutMs: opts.timeoutMs }),
+			retryable: true,
+		};
+		let res = await runOnTarget(target, args, runOpts);
+		if (target.mode !== "engine" && !res.ok && isTransientSshError(res.stderr)) {
+			res = await runOnTarget(target, args, runOpts);
 		}
+		return envelope(res, opts);
+	}
 
-			/**
-			 * Side-effectful operation. Serialized per key by WriteGate, audited,
-			 * NEVER auto-retried (a timed-out killpg may still have taken effect;
-			 * unknown outcome => report and ask a human to check `sched status`).
-			 */
-			async function operate(key, args, { timeoutMs, target = captureTransportTarget() } = {}) {
-				return gate.run(key, async () => {
-					ctx.logger.warn("[node-sched] audit #%d op=%s cmd=`%s`", ++auditSeq, key, args);
-					// B24e: 写操作走 ambiorix 本机通道 (NFS+WAL 跨主机写会丢数据)
-					const res = await screenExec(args, { timeoutMs, target });
-					return envelope(res, { json: false });
-				});
+	/**
+	 * Side-effectful operation. The explicit writer is attested immediately
+	 * before the exactly-once command; no identity result is cached.
+	 */
+	async function operate(
+		key,
+		args,
+		{
+			timeoutMs,
+			preflight,
+			precondition = { kind: "none" },
+			prepare,
+			requestId,
+		} = {},
+	) {
+		try {
+			if (typeof requestId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(requestId)) {
+				const error = new Error("valid requestId is required for every scheduler mutation");
+				error.httpStatus = 400;
+				throw error;
 			}
+			return await gate.run(key, async () => {
+				const configuredWriter = configuredMutationWriter();
+				const result = await verifyAndExecuteMutation({
+					configuredWriter,
+					command: args,
+					timeoutMs,
+					schedBin: S,
+					executeRead: executeWriterRead,
+					prepare,
+					preflight: async (writer, preflightTimeoutMs) => {
+						const pageTimeoutMs = preflightTimeoutMs ?? 30_000;
+						const fetchPage = async ({ cursor = null, jobCursor = null } = {}) => {
+							const rawStatus = await executeWriterRead(
+								writer,
+								buildStatusCommand({
+									schedBin: S,
+									limit: 1000,
+									cursor,
+									jobCursor,
+								}),
+								pageTimeoutMs,
+							);
+							const status = envelope(rawStatus);
+							if (!status.ok) {
+								throw new Error(status.text || "status command failed");
+							}
+							return status.raw;
+						};
+						let statusDocument;
+						try {
+							const kind = String(precondition?.kind ?? "none");
+							if (kind === "batch" || kind === "task") {
+								const pages = await collectWriterStatusPages(fetchPage, {
+									target: precondition,
+									maxPages: 100,
+								});
+								statusDocument = pages.targetPage ?? pages.first;
+							} else {
+								statusDocument = canonicalStatusDocument(await fetchPage());
+							}
+						} catch (cause) {
+							const error = new Error(
+								`writer status preflight unavailable: ${cause?.message || "invalid status document"}`,
+							);
+							error.httpStatus = 503;
+							throw error;
+						}
+						assertMutationPreconditions(statusDocument, precondition);
+						if (preflight) await preflight(writer, preflightTimeoutMs, statusDocument);
+					},
+					executeMutation: async (writer, command, operationTimeoutMs) => {
+						const durableCommand = buildIdempotentMutationCommand(
+							command,
+							S,
+							requestId,
+							precondition,
+						);
+						ctx.logger.warn(
+							"[node-sched] audit #%d op=%s request=%s",
+							++auditSeq,
+							key,
+							requestId,
+						);
+						return executeWriterMutation(writer, durableCommand, operationTimeoutMs);
+					},
+				});
+				return envelope(result, { json: false });
+			});
+		} catch (error) {
+			return {
+				ok: false,
+				code: -1,
+				text: clip(safeError(error)),
+				raw: undefined,
+				httpStatus: Number.isInteger(error?.httpStatus) ? error.httpStatus : undefined,
+			};
+		}
+	}
 		function presentRead(title) {
 			return () => ({ card: "generic", title, kind: "read" });
 		}
@@ -472,10 +2232,19 @@ const target = opts.target ?? captureTransportTarget();
 					"(state, GPU assignment), per-GPU state (free/assigned/releasing/unmanaged), and CPU quota. " +
 					"History is summarized as counts. The authoritative status source — never guess by ssh-ing into " +
 					"nodes to run nvidia-smi/ps.",
-				parameters: {},
+				parameters: {
+					limit: { type: "number", description: "Rows per batch/job page, clamped to [1, 1000]." },
+					cursor: { type: "string", description: "Previous page next_cursor for batch paging." },
+					job_cursor: { type: "string", description: "Previous page next_job_cursor for job paging." },
+				},
 				output: textOutput,
-				execute: async () => {
-					const { raw, text } = await query(`${S} status --json`);
+				execute: async (args) => {
+					const { raw, text } = await query(buildStatusCommand({
+						schedBin: S,
+						limit: args.limit,
+						cursor: args.cursor,
+						jobCursor: args.job_cursor,
+					}));
 					return { text: raw ? summarizeStatus(raw) : text };
 				},
 				presentCall: presentRead("Query sched status"),
@@ -501,9 +2270,10 @@ const target = opts.target ?? captureTransportTarget();
 					task_id: { type: "string", required: true, description: "`<batch>:<task>` identifier." },
 				},
 				output: textOutput,
-				execute: async (args) =>
-					({ text: (await query(`${S} diag ${shellQuote(args.task_id)}`, { json: false })).text }),
-				presentCall: (a) => ({ card: "generic", title: `Diagnose task ${a.task_id}`, kind: "read" }),
+				execute: async (args) => {
+					const result = await query(buildTaskCommand("task", args.task_id, { schedBin: S }));
+					return { text: result.raw ? JSON.stringify(result.raw, null, 2) : result.text };
+				},
 			})),
 
 			ctx.tools.register(defineTool({
@@ -511,10 +2281,17 @@ const target = opts.target ?? captureTransportTarget();
 				description: "Historical batches/tasks with final states and durations (not just currently active ones).",
 				parameters: {
 					batch: { type: "string", description: "Optional batch name filter." },
+					limit: { type: "number", description: "History rows, clamped to [1, 200]." },
+					cursor: { type: "string", description: "Previous page next_cursor." },
 				},
 				output: textOutput,
 				execute: async (args) => ({
-					text: (await query(args.batch ? `${S} history --json ${shellQuote(args.batch)}` : `${S} history --json`)).text,
+					text: (await query(buildHistoryCommand({
+						schedBin: S,
+						batch: args.batch,
+						limit: args.limit === undefined ? undefined : clamp(args.limit, 1, 200),
+						cursor: args.cursor,
+					}))).text,
 				}),
 				presentCall: presentRead("Query sched history"),
 			})),
@@ -559,15 +2336,15 @@ const target = opts.target ?? captureTransportTarget();
 	ctx.logger.warn("[node-sched] %d read tools registered", disposers.length);
 
 	// ── Dashboard plumbing (M2): HTTP snapshots + WS event stream over the shared webserver. ──
-		let _daemonCache = { ts: 0, targetKey: null, body: null };
 		let _targetEpoch = 0;
-		let _statusCache = null;
 		let _statusInFlight = null;
+		let _daemonInFlight = null;
 		let _refreshTimer;
+		let restartTailForTargetChange = () => {};
 
-		// B11c: 后台统一刷新器 -- 定时经 ssh 查询远程状态并缓存,
-		// 所有 API 路由即时返回缓存值, 网络抖动对浏览器完全透明。
-		const REFRESH_MS = config.pollFallbackSec * 1000;
+		const REFRESH_MS = Math.max(1_000, Number(config.pollFallbackSec) * 1000 || 30_000);
+		const statusCache = new FreshStatusCache({ ttlMs: REFRESH_MS });
+		const daemonCache = new FreshStatusCache({ ttlMs: REFRESH_MS });
 
 		function statusTargetKey() {
 			if (useLocalTransport()) return "local";
@@ -576,43 +2353,61 @@ const target = opts.target ?? captureTransportTarget();
 		}
 
 		function invalidateTargetCaches() {
-		_targetEpoch += 1;
+			_targetEpoch += 1;
 			_statusInFlight = null;
-			_statusCache = null;
-			_daemonCache = { ts: 0, targetKey: statusTargetKey(), body: null };
-			stopTail();
-			if (clients.size > 0) scheduleTailRestart();
+			_daemonInFlight = null;
+			statusCache.clear();
+			daemonCache.clear();
+			restartTailForTargetChange();
 			if (_refreshTimer) refreshCaches().catch(() => {});
 		}
 
-		function hasStatusCache() {
-			return _statusCache?.targetKey === statusTargetKey()
-				&& _statusCache.body?.ok
-				&& _statusCache.body.raw;
+		function cacheStatus(raw, targetKey = statusTargetKey()) {
+			const canonical = canonicalStatusDocument(raw);
+			return statusCache.recordSuccess(targetKey, {
+				ok: true,
+				summary: summarizeStatus(canonical),
+				raw: canonical,
+				daemon_health: canonical.daemon_health ?? null,
+			});
 		}
 
-		function cacheStatus(raw, targetKey = statusTargetKey()) {
-			_statusCache = {
-				ts: Date.now(),
-				targetKey,
-				body: {
-					ok: true,
-					summary: summarizeStatus(raw),
-					raw,
-					daemon_health: raw.daemon_health ?? null,
-				},
+		function visibleCacheBody(view, unavailableText) {
+			const metadata = {
+				fresh: view.fresh,
+				stale: view.stale,
+				ageMs: view.ageMs,
+				lastError: view.lastError == null ? null : safeError(view.lastError),
 			};
+			if (view.fresh) return { ...view.body, ...metadata };
+			if (view.body) {
+				return {
+					...view.body,
+					ok: false,
+					text: metadata.lastError ?? unavailableText,
+					...metadata,
+				};
+			}
+			return { ok: false, text: metadata.lastError ?? unavailableText, ...metadata };
 		}
 
 		function refreshStatusCache() {
 			const targetKey = statusTargetKey();
-const epoch = _targetEpoch;
+			const epoch = _targetEpoch;
 			if (_statusInFlight?.targetKey === targetKey) return _statusInFlight.promise;
-			const request = query(`${S} status --json`).then((sr) => {
-				if (_targetEpoch === epoch && statusTargetKey() === targetKey && sr.ok && sr.raw) {
-					cacheStatus(sr.raw, targetKey);
+			const request = query(buildStatusCommand({ schedBin: S })).then((result) => {
+				if (_targetEpoch !== epoch || statusTargetKey() !== targetKey) return result;
+				if (result.ok && isCanonicalStatusDocument(result.raw)) {
+					cacheStatus(result.raw, targetKey);
+				} else {
+					statusCache.recordFailure(targetKey, new Error(result.text || "status JSON unavailable"));
 				}
-				return sr;
+				return result;
+			}, (error) => {
+				if (_targetEpoch === epoch && statusTargetKey() === targetKey) {
+					statusCache.recordFailure(targetKey, error);
+				}
+				throw error;
 			});
 			const current = { targetKey, promise: request };
 			_statusInFlight = current;
@@ -622,27 +2417,39 @@ const epoch = _targetEpoch;
 			return request;
 		}
 
-		async function refreshCaches() {
-			try {
-				const targetKey = statusTargetKey();
-				const epoch = _targetEpoch;
-				const r = await query(`${S} daemon status`, { json: false });
-				if (_targetEpoch === epoch && statusTargetKey() === targetKey) {
-					_daemonCache = {
-						ts: Date.now(),
-						targetKey,
-						body: { ok: r.ok, text: r.text },
-					};
+		function refreshDaemonCache() {
+			const targetKey = statusTargetKey();
+			const epoch = _targetEpoch;
+			if (_daemonInFlight?.targetKey === targetKey) return _daemonInFlight.promise;
+			const request = query(`${S} daemon status`, { json: false }).then((result) => {
+				if (_targetEpoch !== epoch || statusTargetKey() !== targetKey) return result;
+				if (result.ok) {
+					daemonCache.recordSuccess(targetKey, { ok: true, text: result.text });
+				} else {
+					daemonCache.recordFailure(targetKey, new Error(result.text || "daemon status unavailable"));
 				}
-			} catch { /* keep old */ }
-			try {
-				await refreshStatusCache();
-			} catch { /* keep old */ }
+				return result;
+			}, (error) => {
+				if (_targetEpoch === epoch && statusTargetKey() === targetKey) {
+					daemonCache.recordFailure(targetKey, error);
+				}
+				throw error;
+			});
+			const current = { targetKey, promise: request };
+			_daemonInFlight = current;
+			request.finally(() => {
+				if (_daemonInFlight === current) _daemonInFlight = null;
+			}).catch(() => {});
+			return request;
+		}
+
+		async function refreshCaches() {
+			await Promise.allSettled([refreshDaemonCache(), refreshStatusCache()]);
 		}
 
 		function startRefresher() {
 			if (_refreshTimer) return;
-			refreshCaches(); // 首次立即加载
+			refreshCaches();
 			_refreshTimer = setInterval(refreshCaches, REFRESH_MS);
 		}
 
@@ -660,78 +2467,59 @@ const epoch = _targetEpoch;
 			res.writeHead(code, { "content-type": "application/json; charset=utf-8" });
 			res.end(JSON.stringify(body));
 		};
-		const writeGuard = (req, res) => {
-			if (req?.method !== "POST") {
-				json(res, { ok: false, error: "method not allowed: POST" }, 405);
-				return false;
-			}
-			if (loopbackRequestAllowed(req)) return true;
-			json(res, { ok: false, error: "forbidden: loopback Origin/Host required" }, 403);
-			return false;
-		};
-
-		// Write operations: whitelisted, gated, audited (see operate()). The UI
-		// owns the two-step confirm; the host refuses unknown ops outright.
+		const readGuard = (req, res) => guardReadRequest(req, res, accessToken);
+		const writeGuard = (req, res) => guardMutationRequest(req, res, accessToken);
 		const OPS = {
-			cancel: { cmd: (id) => `${S} cancel ${shellQuote(id)}`, needsId: true },
-			retry: { cmd: (id) => `${S} retry ${shellQuote(id)}`, needsId: true },
-			resubmit: { cmd: (id) => `${S} resubmit ${shellQuote(id)}`, needsId: true },
-			"gpu-free": { cmd: (id) => `${S} gpu-free ${id} --yes`, needsId: true, pattern: /^\d+$/ },
-			"gpu-ignore": { cmd: (id) => `${S} gpu-ignore ${id}`, needsId: true, pattern: /^\d+$/ },
-			"gpu-ok": { cmd: (id) => `${S} gpu-ok ${id}`, needsId: true, pattern: /^\d+$/ },
-			"daemon-start": { cmd: () => `${S} daemon start`, needsId: false },
-			"daemon-stop": { cmd: () => `${S} daemon stop`, needsId: false },
+			cancel: { cmd: (id) => buildOperationCommand("cancel", id, S), needsId: true },
+			retry: { cmd: (id) => buildOperationCommand("retry", id, S), needsId: true },
+			resubmit: { cmd: (id) => buildOperationCommand("resubmit", id, S), needsId: true },
+			"gpu-free": { cmd: (id) => buildOperationCommand("gpu-free", id, S), needsId: true, pattern: /^\d+$/ },
+			"gpu-ignore": { cmd: (id) => buildOperationCommand("gpu-ignore", id, S), needsId: true, pattern: /^\d+$/ },
+			"gpu-ok": { cmd: (id) => buildOperationCommand("gpu-ok", id, S), needsId: true, pattern: /^\d+$/ },
+			"daemon-start": { cmd: () => buildOperationCommand("daemon-start", "", S), needsId: false },
+			"daemon-stop": { cmd: () => buildOperationCommand("daemon-stop", "", S), needsId: false },
 		};
 
 
-		const uploadRemote = async (content, target = captureTransportTarget()) => {
+		const uploadRemote = async (
+			content,
+			target = captureTransportTarget(),
+			{ name: requestedName } = {},
+		) => {
 			if (!/^\s*\{/.test(content)) throw new Error("content is not a JSON object");
-			JSON.parse(content);
-			const name = `nodesched-upload-${Date.now()}-${randomUUID()}.json`;
+			parseBoundedJson(content);
+			const name = requestedName ?? `nodesched-upload-${Date.now()}-${randomUUID()}.json`;
+			if (!/^nodesched-upload-[A-Za-z0-9_.:-]{1,180}\.json$/.test(name)) {
+				throw new Error("upload name is invalid");
+			}
 			// Transport-local mode writes directly beside the local daemon.
 			if (target.mode === "local") {
 				const inboxDir = path.join(os.homedir(), ".sched", "inbox");
-				const localPath = path.join(inboxDir, name);
-				fs.mkdirSync(inboxDir, { recursive: true, mode: 0o700 });
-				fs.writeFileSync(localPath, content, { encoding: "utf8", mode: 0o600 });
-				return localPath;
+				return writePrivateUpload(inboxDir, name, content);
 			}
 			// B24: 引擎模式走连接池 exec+stdin；CLI 模式走 ssh 子进程 stdin
 			if (target.mode === "engine") {
-				const remotePath = `~/.sched/inbox/${name}`;
+				const remotePath = `$HOME/.sched/inbox/${name}`;
 				const r = await sshEngine.execStdin(
 					target.alias,
-					`mkdir -p ~/.sched/inbox && cat > ${remotePath} && printf '%s\\n' "$HOME/.sched/inbox/${name}"`,
+					buildRemoteInboxWriteCommand(remotePath),
 					content,
 					60_000,
 				);
 				if (!r.success) throw new Error(r.stderr || r.error || "upload failed");
 				return parseUploadedPath(r.stdout, name);
 			}
-			return await new Promise((resolve, reject) => {
-				const child = cp.spawn(
-					"ssh",
-					["-o", `ConnectTimeout=${config.connectTimeoutSec}`, "-o", "BatchMode=yes",
-						target.sshEntry, `mkdir -p ~/.sched/inbox && cat > ~/.sched/inbox/${name} && printf '%s\\n' "$HOME/.sched/inbox/${name}"`],
-				);
-				let output = "";
-				let err = "";
-				child.stdout.on("data", (d) => { output += d; });
-				child.stderr.on("data", (d) => { err += d; });
-				child.on("error", reject);
-				child.on("close", (code) => {
-					if (code !== 0) {
-						reject(new Error(err || "upload failed"));
-						return;
-					}
-					try {
-						resolve(parseUploadedPath(output, name));
-					} catch (error) {
-						reject(error);
-					}
-				});
-				child.stdin.end(content);
-			});
+			const result = await runRemoteCli(
+				buildRemoteInboxWriteCommand(`$HOME/.sched/inbox/${name}`),
+				{
+					sshEntry: target.sshEntry,
+					timeoutMs: 60_000,
+					maxOutputBytes: 64 * 1024,
+					stdinData: Buffer.from(content, "utf8"),
+				},
+			);
+			if (!result.ok) throw new Error(result.stderr || result.stdout || "upload failed");
+			return parseUploadedPath(result.stdout, name);
 		};
 		const MAX_JSON_BODY_BYTES = 2 * 1024 * 1024;
 		const readBodyJson = async (req) => {
@@ -745,7 +2533,7 @@ const epoch = _targetEpoch;
 				}
 				chunks.push(buffer);
 			}
-			return JSON.parse(Buffer.concat(chunks, bytes).toString("utf8"));
+			return parseBoundedJson(Buffer.concat(chunks, bytes).toString("utf8"));
 		};
 
 		startRefresher();
@@ -754,39 +2542,89 @@ const epoch = _targetEpoch;
 			ctx.webServer.register({
 				kind: "prefix",
 				path: "/sched/api/status",
-				handler: async (_req, res) => {
-					if (hasStatusCache()) {
-						return void json(res, _statusCache.body);
+				handler: async (req, res) => {
+					if (!readGuard(req, res)) return;
+					try {
+						const url = new URL(req.url ?? "/", "http://x");
+						const cursor = url.searchParams.get("cursor");
+						const jobCursor = url.searchParams.get("job_cursor");
+						const explicitPage = cursor !== null
+							|| jobCursor !== null
+							|| url.searchParams.has("limit");
+						if (explicitPage) {
+							const command = buildStatusCommand({
+								schedBin: S,
+								limit: boundedLimit(url.searchParams.get("limit"), 200, 1000),
+								cursor,
+								jobCursor,
+							});
+							const result = await query(command);
+							if (!result.ok) {
+								return void json(res, { ok: false, text: result.text, fresh: false }, 503);
+							}
+							const raw = canonicalStatusDocument(result.raw);
+							return void json(res, {
+								ok: true,
+								summary: summarizeStatus(raw),
+								raw,
+								daemon_health: raw.daemon_health ?? null,
+								fresh: true,
+								stale: false,
+								ageMs: 0,
+								lastError: null,
+							});
+						}
+						const targetKey = statusTargetKey();
+						const cached = statusCache.read(targetKey);
+						if (cached.fresh) {
+							return void json(res, visibleCacheBody(cached, "status unavailable"));
+						}
+						const epoch = _targetEpoch;
+						await refreshStatusCache().catch(() => {});
+						if (_targetEpoch !== epoch || statusTargetKey() !== targetKey) {
+							return void json(res, { ok: false, text: "status target changed; retry" }, 503);
+						}
+						const view = statusCache.read(targetKey);
+						return void json(
+							res,
+							visibleCacheBody(view, "status unavailable"),
+							view.fresh ? 200 : 503,
+						);
+					} catch (error) {
+						return void json(res, { ok: false, text: safeError(error), fresh: false }, 400);
 					}
-					const targetKey = statusTargetKey();
-					const epoch = _targetEpoch;
-					const { raw, text } = await refreshStatusCache();
-					if (_targetEpoch !== epoch || statusTargetKey() !== targetKey) {
-						return void json(res, { ok: false, text: "status target changed; retry" }, 503);
+				},
+			}),
+
+			ctx.webServer.register({
+				kind: "prefix",
+				path: "/sched/api/history",
+				handler: async (req, res) => {
+					if (!readGuard(req, res)) return;
+					try {
+						const url = new URL(req.url ?? "/", "http://x");
+						const result = await query(buildHistoryCommand({
+							schedBin: S,
+							batch: url.searchParams.get("batch") || undefined,
+							limit: boundedLimit(url.searchParams.get("limit"), 50, 200),
+							cursor: url.searchParams.get("cursor"),
+						}));
+						if (!result.ok) {
+							return void json(res, { ok: false, text: result.text }, 503);
+						}
+						const raw = canonicalHistoryDocument(result.raw);
+						return void json(res, { ok: true, raw, text: result.text });
+					} catch (error) {
+						return void json(res, { ok: false, text: safeError(error) }, 400);
 					}
-					if (hasStatusCache()) {
-						return void json(res, _statusCache.body);
-					}
-					// B26: daemon 健康透传 (CLI 已解析出 raw.daemon_health)
-					const parsedRaw = (() => {
-						if (!raw) return null;
-						if (typeof raw === "object") return raw;
-						try { return JSON.parse(text); } catch (_) { return null; }
-					})();
-					if (parsedRaw) {
-						cacheStatus(parsedRaw, targetKey);
-						return void json(res, _statusCache.body);
-					}
-					const body = { ok: false, text };
-					_statusCache = { ts: Date.now(), targetKey, body };
-					json(res, body);
 				},
 			}),
 
 			ctx.webServer.register({
 				kind: "prefix",
 				path: "/sched/api/gpus",
-				handler: async (_req, res) => {
+				handler: async (req, res) => {
+					if (!readGuard(req, res)) return;
 					const r = await query(`${S} list-gpus`, { json: false });
 					await json(res, { ok: r.ok, text: r.text });
 				},
@@ -798,6 +2636,7 @@ const epoch = _targetEpoch;
 				handler: async (req, res) => {
 					try {
 						if (req.method === "GET") {
+							if (!readGuard(req, res)) return;
 							// B24f: 统一通道描述结构 {alias, mode, sshEntry}（与 /sched/ssh/binding 一致）
 						return void json(res, {
 							ok: true,
@@ -815,8 +2654,7 @@ const epoch = _targetEpoch;
 						const prev = config.sshEntry;
 
 						persistEntryOverride({ sshEntry: entry });
-						config.sshEntry = entry;   // runRemote 每次调用时读取, 即刻生效
-persistEntryOverride({ sshEntry: entry });
+						config.sshEntry = entry;   // runRemote reads this on every call.
 						invalidateTargetCaches();
 						ctx.logger.warn("[node-sched] audit #%d ssh-entry %s -> %s",
 							++auditSeq, prev, entry);
@@ -840,6 +2678,7 @@ persistEntryOverride({ sshEntry: entry });
 				kind: "prefix",
 				path: "/sched/api/incidents",
 				handler: async (req, res) => {
+					if (!readGuard(req, res)) return;
 					try {
 						const u = new URL(req.url, "http://x");
 						const id = u.searchParams.get("id");
@@ -867,36 +2706,51 @@ persistEntryOverride({ sshEntry: entry });
 				handler: async (req, res) => {
 					try {
 						if (req.method === "GET") {
+							if (!readGuard(req, res)) return;
 							const r = await query(`${S} config get`);
 							await json(res, { ok: r.ok, text: r.text });
 							return;
 						}
 						if (!writeGuard(req, res)) return;
-						const target = captureTransportTarget();
 						const body = await readBodyJson(req);
-						if (!body.patch || typeof body.patch !== "object") {
+						if (!body.patch || typeof body.patch !== "object" || Array.isArray(body.patch)) {
 							return void json(res, { ok: false, text: "patch (object) required" }, 400);
 						}
-						const remotePath = await uploadRemote(JSON.stringify(body.patch), target);
-						try {
-							// 配置是双项目共享的 —— 写操作走 WriteGate 单飞 + 审计
-							const r = await gate.run("config-set", async () => {
-								ctx.logger.warn("[node-sched] audit #%d op=config-set", ++auditSeq);
-								// B24e: 配置写入必须在计算节点上落库 (NFS+WAL 守卫)
-								return screenExec(
-									`${S} config set -f ${shellQuote(remotePath)} --yes && rm -f ${shellQuote(remotePath)}`,
-									{ timeoutMs: 90_000, target },
-								);
-							});
-							await json(res, {
-								ok: r.ok,
-								text: r.ok ? (r.text || "已写入并请求热重载") : (r.stderr || r.text || "set 失败"),
-							});
-						} finally {
-							await runOnTarget(target, `rm -f ${shellQuote(remotePath)}`).catch(() => {});
-						}
+						const result = await operate(
+							"config-set",
+							null,
+							{
+								timeoutMs: 90_000,
+								requestId: body.requestId,
+								prepare: async (writer) => {
+									if (writer.mode === "screen") {
+										throw new Error("screen mutation writer cannot attest an uploaded config payload");
+									}
+									const uploadTarget = writerTransportTarget(writer);
+									const uploadContent = JSON.stringify(body.patch);
+									const remotePath = await uploadRemote(
+										uploadContent,
+										uploadTarget,
+										{ name: durableUploadName(body.requestId, uploadContent) },
+									);
+									return {
+										command: `${S} config set -f ${shellQuote(remotePath)} --yes`,
+										cleanup: async () => runOnTarget(
+											uploadTarget,
+											`rm -f ${shellQuote(remotePath)}`,
+											{ retryable: false },
+										).catch(() => {}),
+									};
+								},
+							},
+						);
+						await json(
+							res,
+							operationHttpResult(result),
+							result.httpStatus ?? 200,
+						);
 					} catch (e) {
-						await json(res, { ok: false, text: safeError(e) }, 400);
+						await json(res, { ok: false, code: -1, text: safeError(e) }, 400);
 					}
 				},
 			}),
@@ -928,17 +2782,41 @@ persistEntryOverride({ sshEntry: entry });
 				handler: async (req, res) => {
 					if (!writeGuard(req, res)) return;
 					try {
-						const target = captureTransportTarget();
-						const { content } = await readBodyJson(req);
-						const remotePath = await uploadRemote(String(content), target);
-						try {
-const r = await operate("submit", `${S} submit ${shellQuote(remotePath)}`, { target });
-							await json(res, { ok: r.ok, code: r.code, text: clip((r.stdout || r.stderr || "").trim(), 2000) });
-						} finally {
-							await runOnTarget(target, `rm -f ${shellQuote(remotePath)}`).catch(() => {});
-						}
+						const { content, requestId } = await readBodyJson(req);
+						const result = await operate(
+							"submit",
+							null,
+							{
+								requestId,
+								prepare: async (writer) => {
+									if (writer.mode === "screen") {
+										throw new Error("screen mutation writer cannot attest an uploaded submit payload");
+									}
+									const uploadTarget = writerTransportTarget(writer);
+									const uploadContent = String(content);
+									const remotePath = await uploadRemote(
+										uploadContent,
+										uploadTarget,
+										{ name: durableUploadName(requestId, uploadContent) },
+									);
+									return {
+										command: `${S} submit ${shellQuote(remotePath)}`,
+										cleanup: async () => runOnTarget(
+											uploadTarget,
+											`rm -f ${shellQuote(remotePath)}`,
+											{ retryable: false },
+										).catch(() => {}),
+									};
+								},
+							},
+						);
+						await json(
+							res,
+							operationHttpResult(result),
+							result.httpStatus ?? 200,
+						);
 					} catch (e) {
-						await json(res, { ok: false, text: safeError(e) }, 400);
+						await json(res, { ok: false, code: -1, text: safeError(e) }, 400);
 					}
 				},
 			}),
@@ -946,12 +2824,19 @@ const r = await operate("submit", `${S} submit ${shellQuote(remotePath)}`, { tar
 			ctx.webServer.register({
 				kind: "prefix",
 				path: "/sched/api/daemon",
-				handler: async (_req, res) => {
+				handler: async (req, res) => {
+					if (!readGuard(req, res)) return;
 					const targetKey = statusTargetKey();
-					if (_daemonCache.targetKey === targetKey && _daemonCache.body) {
-						return void json(res, _daemonCache.body);
+					let view = daemonCache.read(targetKey);
+					if (!view.fresh) {
+						await refreshDaemonCache().catch(() => {});
+						view = daemonCache.read(targetKey);
 					}
-					json(res, { ok: false, text: "尚未查询" });
+					json(
+						res,
+						visibleCacheBody(view, "daemon status unavailable"),
+						view.fresh ? 200 : 503,
+					);
 				},
 			}),
 
@@ -960,7 +2845,7 @@ const r = await operate("submit", `${S} submit ${shellQuote(remotePath)}`, { tar
 				path: "/sched/api/op",
 				handler: async (req, res) => {
 					if (!writeGuard(req, res)) return;
-const target = captureTransportTarget();
+
 					let body;
 					try {
 						body = await readBodyJson(req);
@@ -972,7 +2857,16 @@ const target = captureTransportTarget();
 							tooLarge ? 413 : 400,
 						);
 					}
-					const { op, id } = body && typeof body === "object" ? body : {};
+					const {
+						op,
+						id,
+						requestId,
+						expectedStatus,
+						expectedVersion,
+						expectedQuarantined,
+						expectedRevision,
+						expectedAssignments,
+					} = body && typeof body === "object" ? body : {};
 					const spec = OPS[op];
 					if (!spec || typeof (id ?? "") !== "string") {
 						return void json(res, { ok: false, error: "bad op/id" }, 400);
@@ -980,8 +2874,33 @@ const target = captureTransportTarget();
 					if (spec.needsId && (!id || !(spec.pattern ?? /^[\w:.-]+$/).test(id))) {
 						return void json(res, { ok: false, error: "bad id for op" }, 400);
 					}
-					const r = await operate(`${op}:${id ?? ""}`, spec.cmd(id), { target });
-					await json(res, { ok: r.ok, code: r.code, text: (r.stdout || r.stderr || "").trim().slice(0, 2000) });
+					let precondition = { kind: "none" };
+					if (spec.needsId) {
+						const kind = op.startsWith("gpu-")
+							? "gpu"
+							: (id.includes(":") ? "task" : "batch");
+						precondition = {
+							kind,
+							id,
+							expectedStatus,
+							expectedRevision,
+							...(kind === "task" ? { expectedVersion } : {}),
+							...(kind === "gpu" ? {
+								expectedQuarantined,
+								expectedAssignments,
+							} : {}),
+						};
+					}
+					const result = await operate(
+						`${op}:${id ?? ""}`,
+						spec.cmd(id),
+						{ requestId, precondition },
+					);
+					await json(
+						res,
+						operationHttpResult(result),
+						result.httpStatus ?? 200,
+					);
 				},
 			}),
 
@@ -989,6 +2908,7 @@ const target = captureTransportTarget();
 				kind: "prefix",
 				path: "/sched/api/log",
 				handler: async (req, res) => {
+					if (!readGuard(req, res)) return;
 					const url = new URL(req.url ?? "/", "http://x");
 					const task = url.searchParams.get("task") ?? "";
 					const lines = clamp(Number(url.searchParams.get("lines") ?? 200) || 200, 1, 5000);
@@ -1004,13 +2924,21 @@ const target = captureTransportTarget();
 		// Source is ~/.sched/<remote-hostname>/scheduler.log (the B6 events dir is
 		// unimplemented upstream); frames are `{type:'log', line}` plus a periodic
 		// `{type:'status', summary}` heartbeat so clients survive quiet stretches.
-		const wss = new WebSocketServer({ noServer: true });
+		const wss = new WebSocketServer({
+			noServer: true,
+			maxPayload: 4096,
+			handleProtocols: selectAuthenticatedWebSocketProtocol,
+		});
 		/** @type {Set<import('ws').WebSocket>} */
 		const clients = new Set();
+		const authAudiences = new Map();
 		/** @type {import('node:child_process').ChildProcess | undefined} */
 		let tailChild;
+		let tailGroupPid;
 		/** @type {import('./ssh-engine.js').ExecStream | undefined} */
 		let tailStream;
+		const pendingTailOpens = new Set();
+		let tailOpen;
 		let tailRestartTimer;
 		let tailDisposed = false;
 		let tailGeneration = 0;
@@ -1018,6 +2946,11 @@ const target = captureTransportTarget();
 		function broadcast(obj) {
 			const msg = JSON.stringify(obj);
 			for (const ws of clients) {
+				if (ws.readyState !== ws.OPEN) continue;
+				if (ws.bufferedAmount > 4 * 1024 * 1024) {
+					try { ws.close(1009, "event output buffer exceeded"); } catch { /* gone */ }
+					continue;
+				}
 				try { ws.send(msg); } catch { /* socket closing */ }
 			}
 		}
@@ -1025,16 +2958,21 @@ const target = captureTransportTarget();
 			tailGeneration++;
 			clearTimeout(tailRestartTimer);
 			tailRestartTimer = undefined;
+			abortPendingOpens(pendingTailOpens, new Error("event tail stopped"));
 			const stream = tailStream;
 			tailStream = undefined;
 			try { stream?.close(); } catch { /* already closed */ }
 			const child = tailChild;
+			const groupPid = tailGroupPid;
 			tailChild = undefined;
-			try { child?.kill("SIGTERM"); } catch { /* already closed */ }
+			tailGroupPid = undefined;
+			if (child) stopProcessTreeWithGrace(child, groupPid);
 		}
 
 		const removeClient = (ws) => {
 			clients.delete(ws);
+			authAudiences.delete(ws);
+			authBroker.audienceDisconnected();
 			if (clients.size === 0) stopTail();
 		};
 
@@ -1045,15 +2983,21 @@ const target = captureTransportTarget();
 				startTail().catch(() => {});
 			}, 5_000);
 		}
-		// B24c: 引擎 prompter 复用同一条事件通道
+		restartTailForTargetChange = () => {
+			stopTail();
+			if (clients.size > 0) scheduleTailRestart();
+		};
+		// The UI explicitly reports whether its panel is visible. A connected
+		// hidden dashboard is not allowed to start a new auth challenge.
 		broadcastFn = broadcast;
+		authAudienceAvailable = () => [...authAudiences.values()].some(Boolean);
 
 		/** Tail the dispatcher decision log; restart with backoff while clients exist.
 		 * State dir partitions by the configured COMPUTE node (~/.sched/<node>/),
 		 * NOT the ssh-landing host (an outside entry lands on the gateway whose
 		 * own hostname dir is empty) — so resolve `node` from the remote
 		 * ~/.sched/config.json rather than `hostname`. */
-		async function resolveNode() {
+		async function resolveNode(signal, deadlineAt) {
 			if (useLocalTransport()) {
 				try {
 					return JSON.parse(fs.readFileSync(path.join(os.homedir(), ".sched", "config.json"), "utf8")).node;
@@ -1061,41 +3005,57 @@ const target = captureTransportTarget();
 					return undefined;
 				}
 			}
-			const res = await runRemote("cat $HOME/.sched/config.json");
+			const res = await runRemote("cat $HOME/.sched/config.json", {
+				signal,
+				deadlineAt,
+				timeoutMs: Math.max(1, deadlineAt - Date.now()),
+			});
 			if (!res.ok) return undefined;
 			try { return JSON.parse(res.stdout).node; } catch { return undefined; }
 		}
 
 		async function startTail() {
-			if (tailDisposed || tailChild || tailStream || clients.size === 0) return;
+			if (tailDisposed || tailChild || tailStream || pendingTailOpens.size > 0 || clients.size === 0) return;
 			const generation = ++tailGeneration;
-			const nodeName = await resolveNode();
-			if (tailDisposed || generation !== tailGeneration || clients.size === 0) return;
+			const opening = beginPendingOpen(pendingTailOpens, 1);
+			if (!opening) return;
+			tailOpen = opening;
+			const openDeadlineAt = sshOpenDeadlineAt(sshEngine);
+			const releaseOpening = () => {
+				opening.settle();
+				if (tailOpen === opening) tailOpen = undefined;
+				if (!tailDisposed && clients.size > 0 && !tailChild && !tailStream) scheduleTailRestart();
+			};
+			const nodeName = await resolveNode(opening.controller.signal, openDeadlineAt);
+			if (tailDisposed || generation !== tailGeneration || clients.size === 0) {
+				releaseOpening();
+				return;
+			}
 			if (!nodeName) {
 				ctx.logger.error("[node-sched] cannot resolve sched node from remote ~/.sched/config.json");
-				scheduleTailRestart();
+				releaseOpening();
 				return;
 			}
 			const safeNode = String(nodeName).replace(/[^a-zA-Z0-9.-]/g, "");
 			const remoteCmd = `tail -n 50 -F $HOME/.sched/${safeNode}/scheduler.log 2>/dev/null`;
-			let buffer = "";
-			const onLine = (text) => {
+			const framer = new ByteLineFramer({
+				maxLineBytes: 3_000,
+				onLine: (line) => {
+					if (tailDisposed || generation !== tailGeneration || clients.size === 0) return;
+					broadcast({ type: "log", line });
+				},
+			});
+			const onData = (chunk) => {
 				if (tailDisposed || generation !== tailGeneration || clients.size === 0) return;
-				buffer += text;
-				let at;
-				while ((at = buffer.indexOf("\n")) !== -1) {
-					if (tailDisposed || generation !== tailGeneration || clients.size === 0) {
-						buffer = "";
-						return;
-					}
-					const line = buffer.slice(0, at).trimEnd();
-					buffer = buffer.slice(at + 1);
-					if (line) broadcast({ type: "log", line });
-				}
+				framer.push(chunk);
 			};
+			let ended = false;
 			const onEnd = () => {
-				if (generation !== tailGeneration) return;
+				if (ended || generation !== tailGeneration) return;
+				ended = true;
+				framer.flush();
 				tailChild = undefined; tailStream = undefined;
+				tailGroupPid = undefined;
 				if (tailDisposed) return;
 				scheduleTailRestart();
 			};
@@ -1103,53 +3063,76 @@ const target = captureTransportTarget();
 				localTransport.openStream(remoteCmd).then((stream) => {
 					if (tailDisposed || generation !== tailGeneration || tailChild || tailStream || clients.size === 0) { stream.close(); return; }
 					tailStream = stream;
-					stream.onData = (chunk) => onLine(chunk.toString("utf8"));
+					stream.onData = onData;
 					stream.onClose = onEnd;
 				}).catch((e) => {
 					ctx.logger.warn("[node-sched] local tail failed: %s", safeError(e));
 					onEnd();
-				});
+				}).finally(releaseOpening);
 				return;
 			}
 			// B24: 引擎模式走独立 exec 流通道；CLI 模式走 ssh 子进程
 			if (boundAlias) {
-				openExecStream(sshEngine, boundAlias, remoteCmd).then((stream) => {
-					if (tailDisposed || generation !== tailGeneration || tailChild || tailStream || clients.size === 0) { try { stream.close(); } catch {} return; }
+				const { controller } = opening;
+				openExecStream(sshEngine, boundAlias, remoteCmd, {
+					signal: controller.signal,
+					deadlineAt: openDeadlineAt,
+				}).then((stream) => {
+					if (tailDisposed || generation !== tailGeneration || tailChild || tailStream || clients.size === 0) {
+						try { stream.close(); } catch {}
+						return;
+					}
 					tailStream = stream;
-					stream.onData = (chunk) => onLine(chunk.toString("utf8"));
+					stream.onData = onData;
 					stream.onClose = onEnd;
 				}).catch((e) => {
-					ctx.logger.warn("[node-sched] engine tail failed (%s): %s", boundAlias, safeError(e));
+					if (!controller.signal.aborted) {
+						ctx.logger.warn("[node-sched] engine tail failed (%s): %s", boundAlias, safeError(e));
+					}
 					onEnd();
-				});
+				}).finally(releaseOpening);
 				return;
 			}
-			const child = cp.spawn(
-				"ssh",
-				["-o", `ConnectTimeout=${config.connectTimeoutSec}`, "-o", "BatchMode=yes", config.sshEntry, remoteCmd],
-			);
-			tailChild = child;
-			child.stdout.on("data", (d) => onLine(d.toString()));
-			child.on("close", onEnd);
-			child.on("error", onEnd);
+			const detached = process.platform !== "win32";
+			try {
+				const child = cp.spawn(
+					"ssh",
+					["-o", `ConnectTimeout=${config.connectTimeoutSec}`, "-o", "BatchMode=yes", config.sshEntry, remoteCmd],
+					{ detached },
+				);
+				tailChild = child;
+				tailGroupPid = detached && Number.isInteger(child.pid) ? child.pid : undefined;
+				child.stdout.on("data", onData);
+				child.on("exit", onEnd);
+				child.on("close", onEnd);
+				child.on("error", onEnd);
+			} catch (error) {
+				ctx.logger.warn("[node-sched] CLI tail failed: %s", safeError(error));
+				onEnd();
+			} finally {
+				releaseOpening();
+			}
 		}
 		heartbeat = setInterval(async () => {
 			if (clients.size === 0) return;
 			try {
-if (hasStatusCache()) {
-					broadcast({
-						type: "status",
-						summary: _statusCache.body.summary ?? null,
-						ts: Date.now(),
-					});
-					return;
+				const targetKey = statusTargetKey();
+				let view = statusCache.read(targetKey);
+				if (!view.fresh) {
+					const epoch = _targetEpoch;
+					await refreshStatusCache();
+					if (_targetEpoch !== epoch || statusTargetKey() !== targetKey) return;
+					view = statusCache.read(targetKey);
 				}
-const targetKey = statusTargetKey();
-				const epoch = _targetEpoch;
-				const sr = await refreshStatusCache();
-				if (_targetEpoch !== epoch || statusTargetKey() !== targetKey) return;
-				const summary = sr.raw ? summarizeStatus(sr.raw) : null;
-				broadcast({ type: "status", summary, ts: Date.now() });
+				broadcast({
+					type: "status",
+					summary: view.fresh ? (view.body?.summary ?? null) : null,
+					fresh: view.fresh,
+					stale: view.stale,
+					ageMs: view.ageMs,
+					lastError: view.lastError == null ? null : safeError(view.lastError),
+					ts: Date.now(),
+				});
 			} catch { /* transient */ }
 		}, config.pollFallbackSec * 1000);
 
@@ -1157,13 +3140,43 @@ const targetKey = statusTargetKey();
 			ctx.webServer.registerUpgrade({
 				path: "/sched/ws/events",
 				handler: (req, socket, head) => {
-					const remote = req.socket?.remoteAddress ?? "";
-					if (!isLoopbackAddress(remote) || !originHostAllowed(req)) {
+					if (
+						!websocketRequestAllowed(req, accessToken)
+						|| clients.size >= 8
+					) {
 						socket.destroy();
 						return;
 					}
 					wss.handleUpgrade(req, socket, head, (ws) => {
 						clients.add(ws);
+						authAudiences.set(ws, false);
+						try {
+							authBroker.replay((event) => ws.send(JSON.stringify(event)));
+						} catch {
+							removeClient(ws);
+							try { ws.close(); } catch { /* already closed */ }
+							return;
+						}
+						let messageWindowAt = Date.now();
+						let messageCount = 0;
+						ws.on("message", (raw) => {
+							const now = Date.now();
+							if (now - messageWindowAt >= 1000) {
+								messageWindowAt = now;
+								messageCount = 0;
+							}
+							messageCount += 1;
+							if (messageCount > 20 || raw.length > 4096) {
+								ws.close(1008, "event input rate exceeded");
+								return;
+							}
+							try {
+								const frame = JSON.parse(raw.toString());
+								if (frame?.type === "auth-audience") {
+									authAudiences.set(ws, frame.visible === true);
+								}
+							} catch { /* malformed audience frame */ }
+						});
 						ws.on("close", () => removeClient(ws));
 						ws.on("error", () => removeClient(ws));
 						startTail().catch(() => {});
@@ -1177,26 +3190,14 @@ const targetKey = statusTargetKey();
 		postApplyCleanup = () => {
 			tailDisposed = true;
 			stopTail();
+			authBroker.cancelAll();
+			for (const ws of clients) {
+				try { ws.close(1001, "node-sched disposed"); } catch { /* gone */ }
+			}
+			clients.clear();
+			try { wss.close(); } catch { /* already closed */ }
 			localTransport.dispose();
 			sshEngine.dispose();
-		};
-		/** Loopback-only fence: these endpoints execute remote commands. */
-		const loopbackOnly = (req, res) => {
-			const remote = req.socket?.remoteAddress ?? "";
-			const isLo = isLoopbackAddress(remote);
-			if (!isLo) {
-				json(res, { error: "forbidden: loopback-only" }, 403);
-				return false;
-			}
-			if (!originHostAllowed(req)) {
-				json(res, { error: "forbidden: Origin/Host must be loopback" }, 403);
-				return false;
-			}
-			return true;
-		};
-		const aliasOf = (req) => {
-			const u = new URL(req.url, "http://x");
-			return u.searchParams.get("alias") ?? "";
 		};
 		const boundTargetUsesAlias = (alias) => {
 			if (alias === boundAlias) return true;
@@ -1209,39 +3210,35 @@ const targetKey = statusTargetKey();
 				kind: "prefix",
 				path: "/sched/ssh/hosts",
 				handler: async (req, res) => {
-					if (!loopbackOnly(req, res)) return;
 					try {
-						const method = req.method ?? "GET";
-						if (method === "GET") {
-							const u = new URL(req.url, "http://x");
-							return void json(res, { hosts: sshEngine.list(u.searchParams.get("query") ?? undefined) });
+						if (req.method === "GET") {
+							if (!readGuard(req, res)) return;
+							const url = new URL(req.url, "http://x");
+							return void json(res, { hosts: sshEngine.list(url.searchParams.get("query") ?? undefined) });
 						}
-						if (method === "POST") {
-							const entry = sshStore.create(await readBodyJson(req));
+						if (!writeGuard(req, res)) return;
+						const body = await readBodyJson(req);
+						const action = String(body?.action ?? "");
+						if (action === "create") {
+							const entry = sshStore.create(body.host);
 							return void json(res, { host: sshStore.summarize(entry) }, 201);
 						}
-						const alias = aliasOf(req);
-						if (!alias) return void json(res, { error: "alias query param required" }, 400);
-						if ((method === "PATCH" || method === "DELETE") && boundTargetUsesAlias(alias)) {
+						const alias = String(body?.alias ?? "").trim();
+						if (!alias) return void json(res, { error: "alias is required" }, 400);
+						if (!["update", "delete"].includes(action)) {
+							return void json(res, { error: "action must be create, update, or delete" }, 400);
+						}
+						if (boundTargetUsesAlias(alias)) {
 							return void json(res, { error: "unbind the active target before editing or deleting it or its proxy hop" }, 409);
 						}
-						if (method === "PATCH") {
-							const entry = sshStore.update(alias, await readBodyJson(req));
-							sshEngine.dropAlias(alias); // 凭据/地址变更绝不复用旧连接
-							if (alias === boundAlias) invalidateTargetCaches();
+						if (action === "update") {
+							const entry = sshStore.update(alias, body.patch);
+							sshEngine.dropAlias(alias);
 							return void json(res, { host: sshStore.summarize(entry) });
 						}
-						if (method === "DELETE") {
-							const removed = sshStore.remove(alias);
-							sshEngine.dropAlias(alias);
-							if (removed && alias === boundAlias) {
-								boundAlias = null;
-								invalidateTargetCaches();
-								persistEntryOverride({ sshEntry: config.sshEntry, schedAlias: null });
-							}
-							return void json(res, { removed });
-						}
-						json(res, { error: `method not allowed: ${method}` }, 405);
+						const removed = sshStore.remove(alias);
+						sshEngine.dropAlias(alias);
+						return void json(res, { removed });
 					} catch (e) {
 						json(res, { error: safeError(e) }, 400);
 					}
@@ -1252,7 +3249,7 @@ const targetKey = statusTargetKey();
 				kind: "prefix",
 				path: "/sched/ssh/import",
 				handler: async (req, res) => {
-					if (!loopbackOnly(req, res)) return;
+					if (!writeGuard(req, res)) return;
 					try {
 						json(res, { result: sshStore.importSshConfig() });
 					} catch (e) {
@@ -1265,7 +3262,7 @@ const targetKey = statusTargetKey();
 				kind: "prefix",
 				path: "/sched/ssh/test",
 				handler: async (req, res) => {
-					if (!loopbackOnly(req, res)) return;
+					if (!writeGuard(req, res)) return;
 					try {
 						const body = await readBodyJson(req);
 						const result = await sshEngine.test(String(body.alias ?? ""));
@@ -1281,7 +3278,7 @@ const targetKey = statusTargetKey();
 				kind: "prefix",
 				path: "/sched/ssh/exec",
 				handler: async (req, res) => {
-					if (!loopbackOnly(req, res)) return;
+					if (!writeGuard(req, res)) return;
 					try {
 						const body = await readBodyJson(req);
 						const command = String(body.command ?? "").trim();
@@ -1291,16 +3288,12 @@ const targetKey = statusTargetKey();
 							redactCommand(body.alias, 80),
 							redactCommand(command),
 						);
-						// B24g: 引擎连接失败时回退 CLI 通道 (ControlMaster mux 可用时最可靠)
-						let result;
-						try {
-							result = await sshEngine.exec(String(body.alias ?? ""), command, body.timeoutMs);
-						} catch (engineErr) {
-							if (String(body.alias ?? "") !== config.sshEntry) throw engineErr;
-							const cli = await runRemoteCli(command, { timeoutMs: body.timeoutMs ?? 60_000 });
-							result = { success: cli.ok, exitCode: cli.code, timedOut: false,
-								stdout: cli.stdout, stderr: cli.stderr, durationMs: -1 };
-						}
+						const result = await executeGenericSsh(
+							sshEngine,
+							String(body.alias ?? ""),
+							command,
+							{ timeoutMs: body.timeoutMs },
+						);
 						json(res, result);
 					} catch (e) {
 						json(res, { success: false, exitCode: null, timedOut: false, stdout: "", stderr: "", durationMs: 0, error: safeError(e) });
@@ -1312,7 +3305,7 @@ const targetKey = statusTargetKey();
 				kind: "prefix",
 				path: "/sched/ssh/binding",
 				handler: async (req, res) => {
-					if (!loopbackOnly(req, res)) return;
+					if (!readGuard(req, res)) return;
 					json(res, {
 						alias: boundAlias,
 						mode: useLocalTransport() ? "local" : (boundAlias ? "engine" : "cli"),
@@ -1325,7 +3318,7 @@ const targetKey = statusTargetKey();
 				kind: "prefix",
 				path: "/sched/ssh/bind",
 				handler: async (req, res) => {
-					if (!loopbackOnly(req, res)) return;
+					if (!writeGuard(req, res)) return;
 					if (useLocalTransport()) {
 						return void json(res, { ok: false, error: "SSH binding unavailable in local transport" }, 409);
 					}
@@ -1345,7 +3338,9 @@ const targetKey = statusTargetKey();
 						}
 						let probeText = "";
 						try {
-							const pr = await sshEngine.exec(alias, `${S} daemon status`, 25_000);
+							const pr = typeof sshEngine.execRetryable === "function"
+								? await sshEngine.execRetryable(alias, `${S} daemon status`, 25_000)
+								: await sshEngine.execOnce(alias, `${S} daemon status`, 25_000);
 							probeText = sanitizeLogText((pr.stdout || pr.stderr || "").split("\n")[0], 100);
 						} catch (e) {
 							probeText = "\u63a2\u6d4b\u5931\u8d25: " + safeError(e, 80);
@@ -1367,14 +3362,17 @@ const targetKey = statusTargetKey();
 				kind: "prefix",
 				path: "/sched/ssh/unbind",
 				handler: async (req, res) => {
-					if (!loopbackOnly(req, res)) return;
+					if (!writeGuard(req, res)) return;
 					const prev = boundAlias;
+					try {
+						persistEntryOverride({ sshEntry: config.sshEntry, schedAlias: null });
+					} catch (error) {
+						json(res, { ok: false, error: safeError(error) }, 500);
+						return;
+					}
 					boundAlias = null;
 					if (prev) sshEngine.dropAlias(prev);
 					invalidateTargetCaches();
-					try {
-						persistEntryOverride({ sshEntry: config.sshEntry, schedAlias: null });
-					} catch { /* \u6301\u4e45\u5316\u5931\u8d25\u4e0d\u963b\u585e\u89e3\u7ed1 */ }
 					ctx.logger.warn("[node-sched] audit #%d sched-unbind <- %s", ++auditSeq, prev);
 					json(res, { ok: true, prev, mode: "cli", sshEntry: config.sshEntry });
 				},
@@ -1384,12 +3382,12 @@ const targetKey = statusTargetKey();
 				kind: "prefix",
 				path: "/sched/api/client-log",
 				handler: async (req, res) => {
-					if (!loopbackOnly(req, res)) return;
+					if (!writeGuard(req, res)) return;
 					try {
 						const body = await readBodyJson(req);
 						// ctx.logger 只进内存缓冲不落盘 —— 直接追加共享盘文件供远程排查读取
 						const line = `[${sanitizeLogText(body.ts, 80)}] ${sanitizeLogText(body.kind, 80)} ${sanitizeLogText(body.detail, 500)}\n`;
-						fs.appendFileSync(path.join(os.homedir(), ".sched", "client-exceptions.log"), line);
+						appendPrivateClientLog(os.homedir(), line);
 						json(res, { ok: true });
 					} catch (e) {
 						json(res, { ok: false }, 400);
@@ -1399,38 +3397,42 @@ const targetKey = statusTargetKey();
 
 			ctx.webServer.register({
 				kind: "prefix",
-				path: "/sched/ssh/2fa-pending",
+				path: "/sched/ssh/auth-pending",
 				handler: async (req, res) => {
-					if (!loopbackOnly(req, res)) return;
-					json(res, { pending: [...pending2fa.keys()] });
+					if (!readGuard(req, res)) return;
+					json(res, { pending: authBroker.pendingIds() });
 				},
 			}),
 
 			ctx.webServer.register({
 				kind: "prefix",
-				path: "/sched/ssh/2fa-answer",
+				path: "/sched/ssh/auth-answer",
 				handler: async (req, res) => {
-					if (!loopbackOnly(req, res)) return;
+					if (!writeGuard(req, res)) return;
 					try {
 						const body = await readBodyJson(req);
 						const id = String(body.id ?? "");
-						const answer = body.answer ?? {};
-						const resolver = pending2fa.get(id);
-						if (!resolver) {
+						const answer = body.answer;
+						if (!authBroker.pendingIds().includes(id)) {
 							return void json(res, { ok: false, error: "\u8bf7\u6c42\u4e0d\u5b58\u5728\u6216\u5df2\u8fc7\u671f" }, 404);
 						}
-						pending2fa.delete(id);
+						if (!answer || typeof answer !== "object" || !["cancel", "answers"].includes(answer.kind)) {
+							return void json(res, { ok: false, error: "invalid authentication answer" }, 400);
+						}
 						if (answer.kind === "cancel") {
-							ctx.logger.warn("[node-sched] audit 2fa-cancel id=%s (user)", id);
-							resolver(""); // 空应答 = 放弃握手
+							ctx.logger.warn("[node-sched] audit auth-cancel id=%s (user)", id);
+							authBroker.cancel(id);
 						} else {
-							const code = String(answer.code ?? "");
-							ctx.logger.warn("[node-sched] audit 2fa-answer id=%s", id);
-							resolver(code);
+							authBroker.answer(id, answer.answers);
+							ctx.logger.warn(
+								"[node-sched] audit auth-answer id=%s answers=%d",
+								id,
+								answer.answers.length,
+							);
 						}
 						json(res, { ok: true });
 					} catch (e) {
-						json(res, { ok: false, error: String(e.message ?? e) }, 400);
+						json(res, { ok: false, error: safeError(e) }, 400);
 					}
 				},
 			}),
@@ -1439,64 +3441,77 @@ const targetKey = statusTargetKey();
 		// Web 终端：WS 升级 -> 独立 PTY shell 连接。帧协议与 dsh-ssh 相同：
 		// server->client {ready|output|exit}, client->server {input|resize}。
 		{
-			const termWss = new WebSocketServer({ noServer: true });
-			const HIGH_WATER = 1024 * 1024, LOW_WATER = 512 * 1024;
+			const termWss = new WebSocketServer({
+				noServer: true,
+				maxPayload: 64 * 1024,
+				handleProtocols: selectAuthenticatedWebSocketProtocol,
+			});
+			const terminalClients = new Set();
+			const terminalSlots = new Set();
 			routeDisposers.push(
 				ctx.webServer.registerUpgrade({
 					path: "/sched/ws/ssh-terminal",
 					handler: (req, socket, head) => {
-						const remote = req.socket?.remoteAddress ?? "";
-						if (!isLoopbackAddress(remote) || !originHostAllowed(req)) {
+						if (!websocketRequestAllowed(req, accessToken)) {
 							socket.destroy();
 							return;
 						}
-						termWss.handleUpgrade(req, socket, head, async (ws) => {
-							const u = new URL(req.url, "http://x");
-							const alias = u.searchParams.get("alias") ?? "";
-							const cols = parseInt(u.searchParams.get("cols") || "80", 10) || 80;
-							const rows = parseInt(u.searchParams.get("rows") || "24", 10) || 24;
-							let session;
-							try {
-								session = await sshEngine.openShell(alias, { cols, rows });
-							} catch (e) {
-								ws.send(JSON.stringify({ type: "exit", code: null, error: safeError(e) }));
-								ws.close();
-								return;
-							}
-							let paused = false;
-							const maybePause = () => {
-								// 传输背压：发送缓冲超限则暂停远端输出，排空后恢复
-								const over = ws.bufferedAmount > HIGH_WATER;
-								if (over && !paused) { paused = true; session.pause?.(); }
-								else if (!over && paused) { paused = false; session.resume?.(); }
-							};
-							session.onData = (data) => {
-								if (ws.readyState === ws.OPEN) {
-									ws.send(JSON.stringify({ type: "output", data: data.toString("utf8") }));
-									maybePause();
+						const opening = beginPendingOpen(terminalSlots, 4);
+						if (!opening) {
+							socket.destroy();
+							return;
+						}
+						const openDeadlineAt = sshOpenDeadlineAt(sshEngine);
+						let handedOff = false;
+						let admissionClosed = false;
+						const releaseUnhanded = () => {
+							if (handedOff) return;
+							admissionClosed = true;
+							opening.settle();
+						};
+						socket.once?.("close", releaseUnhanded);
+						socket.once?.("error", releaseUnhanded);
+						try {
+							termWss.handleUpgrade(req, socket, head, (ws) => {
+								if (admissionClosed) {
+									try { ws.close(1013, "terminal admission closed"); } catch { /* gone */ }
+									return;
 								}
-							};
-							session.onExit = (code, error) => {
-								try { ws.send(JSON.stringify({ type: "exit", code, error: error ? safeError(error) : undefined })); } catch { /* gone */ }
-								try { ws.close(); } catch { /* gone */ }
-							};
-							ws.send(JSON.stringify({ type: "ready", alias }));
-							ws.on("message", (raw) => {
-								try {
-									const frame = JSON.parse(raw.toString());
-									if (frame.type === "input") session.send(String(frame.data ?? ""));
-									else if (frame.type === "resize") {
-										session.resize(parseInt(frame.cols, 10) || 80, parseInt(frame.rows, 10) || 24);
-									}
-								} catch { /* malformed frame */ }
+								socket.off?.("close", releaseUnhanded);
+								socket.off?.("error", releaseUnhanded);
+								handedOff = true;
+								const u = new URL(req.url, "http://x");
+								const alias = u.searchParams.get("alias") ?? "";
+								const cols = clamp(parseInt(u.searchParams.get("cols") || "80", 10) || 80, 20, 500);
+								const rows = clamp(parseInt(u.searchParams.get("rows") || "24", 10) || 24, 10, 200);
+								void serveTerminalWebSocket({
+									ws,
+									clients: terminalClients,
+									slots: terminalSlots,
+									maxSlots: 4,
+									opening,
+									openShell: (...args) => sshEngine.openShell(...args),
+									openDeadlineAt,
+									alias,
+									cols,
+									rows,
+								});
 							});
-							const bye = () => { try { session.close(); } catch { /* gone */ } };
-							ws.on("close", bye);
-							ws.on("error", bye);
-						});
+						} catch {
+							releaseUnhanded();
+							socket.destroy();
+						}
 					},
 				}),
 			);
+			routeDisposers.push(() => {
+				for (const ws of terminalClients) {
+					try { ws.close(1001, "node-sched disposed"); } catch { /* gone */ }
+				}
+				abortPendingOpens(terminalSlots, new Error("node-sched disposed"));
+				terminalClients.clear();
+				try { termWss.close(); } catch { /* already closed */ }
+			});
 		}
 	}
 
@@ -1509,5 +3524,42 @@ const targetKey = statusTargetKey();
 	};
 }
 
-export { name, inject, Config, apply };
+export {
+	AuthChallengeBroker,
+	ByteLineFramer,
+	FreshStatusCache,
+	WriteGate,
+	Config,
+	apply,
+	buildRemoteInboxWriteCommand,
+	buildHistoryCommand,
+	buildOperationCommand,
+	buildStatusCommand,
+	buildTaskCommand,
+	executeGenericSsh,
+	guardMutationRequest,
+	canonicalHistoryDocument,
+	canonicalStatusDocument,
+	isCanonicalStatusDocument,
+	appendPrivateClientLog,
+	parseBoundedJson,
+	guardReadRequest,
+	beginPendingOpen,
+	inject,
+	makeRunner,
+	loadOrCreateAccessToken,
+	websocketRequestAllowed,
+	name,
+	operationHttpResult,
+	resolveMutationWriter,
+	verifyAndExecuteMutation,
+	assertMutationPreconditions,
+	gcPrivateUploads,
+	writePrivateUpload,
+	buildIdempotentMutationCommand,
+	durableUploadName,
+	serveTerminalWebSocket,
+	stopProcessTreeWithGrace,
+	summarizeStatus,
+};
 export default { name, inject, Config, apply };

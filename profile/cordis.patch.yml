@@ -4,17 +4,51 @@
 # 并在 profile 目录 package.json 的 dsh.profile.bundles 中按序声明：
 #   ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "@zzc/dsh-node-sched", "@zzc/dsh-node-sched-ui"]
 #
-# ssh 入口是显式配置（AGENTS.md §1）：校园网 HPDC / 校外 HPDC_outside，
-# 本插件绝不自动切换入口；探活失败会报错提示检查网络环境。
+# 查询入口必须显式配置：校园网用 HPDC，校外用 HPDC_outside。
+# 本插件绝不自动切换入口；探活失败会直接提示检查网络环境。
+# 查询目标与 mutation writer 相互独立；看板 bind/unbind 不会改变 writer。
 
 - insert:
     - id: node-sched-proxy
       name: "@zzc/dsh-node-sched"
       config:
-        # 入口二选一，改这里（或后续由 setup 脚本生成）
-        sshEntry: "HPDC"
+        # 查询通道：逐项写明，避免依赖插件内置默认值。
+        sshEntry: "HPDC"               # OpenSSH config 的 Host 别名
+        schedBin: "$HOME/bin/sched"    # 非交互执行所需的完整路径
+        probeCommand: "status"
         connectTimeoutSec: 20
         pollFallbackSec: 30
+        transport: "auto"              # "auto"（SSH/engine）或 "local"
+
+        # 写通道默认关闭（fail closed）。启用时必须一次替换以下四项。
+        mutationMode: "disabled"
+        mutationTarget: ""
+        mutationSession: ""
+        mutationExpectedNode: ""
+
+        # local writer：
+        #   mutationMode: "local"
+        #   mutationTarget: ""
+        #   mutationSession: ""
+        #   mutationExpectedNode: "compute-01"
+        # engine writer（mutationTarget 是看板 host store 的 alias）：
+        #   mutationMode: "engine"
+        #   mutationTarget: "compute-engine"
+        #   mutationSession: ""
+        #   mutationExpectedNode: "compute-01"
+        # ssh writer（mutationTarget 是 OpenSSH config 的 Host 别名）：
+        #   mutationMode: "ssh"
+        #   mutationTarget: "compute-writer"
+        #   mutationSession: ""
+        #   mutationExpectedNode: "compute-01"
+        # screen writer（仅兼容；没有内置 session 名）：
+        #   mutationMode: "screen"
+        #   mutationTarget: "compute-writer"
+        #   mutationSession: "exact-screen-session"
+        #   mutationExpectedNode: "compute-01"
+        #
+        # 每次写操作前都在同一 writer 上重新执行 hostname 和 sched config get；
+        # writer hostname、config.node、mutationExpectedNode 三者精确不匹配即拒绝写入，验证结果不跨操作缓存。
 
     - id: node-sched-ui
       name: "@zzc/dsh-node-sched-ui"

@@ -1,6 +1,11 @@
 import cp from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
-import { appendLimitedOutput, finalizeLimitedOutput, limitedOutputText } from "./output-limit.js";
+import {
+	appendLimitedOutput,
+	createLimitedOutput,
+	finalizeLimitedOutput,
+	limitedOutputText,
+} from "./output-limit.js";
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
@@ -24,8 +29,8 @@ function runChild(command, {
 			detached: true,
 		});
 		onStart?.(child);
-		const stdout = { text: "", bytes: 0, truncated: false };
-		const stderr = { text: "", bytes: 0, truncated: false };
+		const stdout = createLimitedOutput();
+		const stderr = createLimitedOutput();
 		let timedOut = false;
 		let stdinError;
 		let settled = false;

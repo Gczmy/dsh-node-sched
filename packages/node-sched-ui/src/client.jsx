@@ -1,3 +1,27 @@
+import {
+	authAnswerErrorText,
+	authAudienceFrame,
+	batchCancelRequest,
+	buildAuthAnswer,
+	buildOperationRequest,
+	collectHistoryPages,
+	collectStatusPages,
+	configuredProjectNames,
+	createIndexedDbRequestStore,
+	jobsForBatch,
+	listenCaptured,
+	mutationResultIsDefinitive,
+	normalizeAuthPrompts,
+	PollGate,
+	reduceAuthQueue,
+	schedulerMutationAvailability,
+	submitExampleForProject,
+	taskReference,
+	taskStatusContract,
+	validAccessToken,
+	validHostKey,
+} from "./ui-contracts.js";
+
 /**
 
  * node-sched dashboard — client plugin.
@@ -84,12 +108,9 @@ const COLORS = {
 
 	running: T.brand, assigned: "#3b82f6",
 
-	blocked: T.label2, releasing: T.warn,
-
+	blocked: T.err, releasing: T.warn,
 	failed: T.err, timed_out: T.err, unmanaged: T.err,
-
-	cancelled: T.label2, interrupted: T.err,
-
+	cancelled: T.err, interrupted: T.err,
 	pending: T.label2, waiting_dep: T.warn, queued: T.label2,
 
 };
@@ -316,7 +337,7 @@ function apply(cctx, config) {
 
 	const panelStyle = {
 
-		flex: 1, minHeight: 0, display: "flex", flexDirection: "column", gap: 8,
+		flex: 1, minHeight: 0, minWidth: 0, display: "flex", flexDirection: "column", gap: 8,
 
 		maxWidth: 1280, width: "100%", margin: "0 auto",
 
@@ -332,10 +353,51 @@ function apply(cctx, config) {
 
 		const Badge = ({ s }) => j("span", { style: badge(s) }, s);
 
+	const ACCESS_TOKEN_KEY = "node-sched:access-token";
+	const durableRequests = createIndexedDbRequestStore();
+
+	function accessToken() {
+		const stored = sessionStorage.getItem(ACCESS_TOKEN_KEY);
+		if (validAccessToken(stored)) return stored;
+		const entered = window.prompt(
+			"node-sched 需要本机访问令牌。请粘贴 ~/.dsh/node-sched-access-token 的内容：",
+			"",
+		);
+		const token = String(entered ?? "").trim();
+		if (!validAccessToken(token)) {
+			sessionStorage.removeItem(ACCESS_TOKEN_KEY);
+			throw new Error("本机访问令牌缺失或格式无效");
+		}
+		sessionStorage.setItem(ACCESS_TOKEN_KEY, token);
+		return token;
+	}
+
+	async function authFetch(input, init = {}) {
+		const headers = new Headers(init.headers ?? {});
+		headers.set("authorization", `Bearer ${accessToken()}`);
+		const response = await globalThis.fetch(input, { ...init, headers });
+		if (response.status === 401) sessionStorage.removeItem(ACCESS_TOKEN_KEY);
+		return response;
+	}
+
+	function authenticatedWebSocket(url) {
+		return new WebSocket(url, ["sched-auth", accessToken()]);
+	}
+
+	async function mutationPayloadKey(action, payload) {
+		const bytes = new TextEncoder().encode(String(payload));
+		const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+		const hash = [...new Uint8Array(digest)]
+			.map((value) => value.toString(16).padStart(2, "0"))
+			.join("");
+		return `${action}:${hash}`;
+	}
+
+
 
 
 	async function post(action, body) {
-		const r = await fetch(`/sched/api/${action}`, {
+		const r = await authFetch(`/sched/api/${action}`, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify(body),
@@ -355,7 +417,7 @@ function apply(cctx, config) {
 
 	async function getText(action, params = "") {
 
-		const r = await fetch(`/sched/api/${action}${params}`);
+		const r = await authFetch(`/sched/api/${action}${params}`);
 
 		return r.text();
 
@@ -406,9 +468,12 @@ function apply(cctx, config) {
 
 
 
-	function useSchedStream() {
+	function useSchedStream(visible) {
 
-		const [state, setState] = useState({ lines: [], connected: false });
+		const [state, setState] = useState({ lines: [], connected: false, authQueue: [] });
+		const socketRef = useRef(null);
+		const visibleRef = useRef(Boolean(visible));
+		visibleRef.current = Boolean(visible);
 
 		useEffect(() => {
 			let ws; let closed = false; let timer;
@@ -416,9 +481,21 @@ function apply(cctx, config) {
 			const connect = () => {
 				if (closed) return;
 				const proto = location.protocol === "https:" ? "wss://" : "ws://";
-				ws = new WebSocket(`${proto}${location.host}/sched/ws/events`);
+				try {
+					ws = authenticatedWebSocket(`${proto}${location.host}/sched/ws/events`);
+				} catch (error) {
+					setState((current) => ({
+						...current,
+						connected: false,
+						lines: [...current.lines.slice(-400), String(error?.message ?? error)],
+					}));
+					return;
+				}
+				socketRef.current = ws;
 				ws.onopen = () => {
-					if (!closed) setState((s) => ({ ...s, connected: true }));
+					if (closed) return;
+					setState((s) => ({ ...s, connected: true }));
+					ws.send(JSON.stringify(authAudienceFrame(visibleRef.current)));
 				};
 				ws.onmessage = (e) => {
 					if (closed) return;
@@ -426,37 +503,107 @@ function apply(cctx, config) {
 					try { m = JSON.parse(e.data); } catch { return; }
 					if (!m || typeof m !== "object") return;
 					if (m.type === "log") setState((s) => ({ ...s, lines: [...s.lines.slice(-400), m.line] }));
-					else if (m.type === "kbdint") setState((s) => ({ ...s, kbdint: m }));
+					else if (m.type === "auth" || m.type === "auth-snapshot") setState((s) => ({
+						...s,
+						authQueue: reduceAuthQueue(s.authQueue, m),
+					}));
 				};
 				ws.onclose = () => {
+					if (socketRef.current === ws) socketRef.current = null;
 					if (closed) return;
-					setState((s) => ({ ...s, connected: false }));
+					setState((s) => ({ ...s, connected: false, authQueue: [] }));
 					timer = setTimeout(connect, 3000);
 				};
 			};
 
 			connect();
 
-			return () => { closed = true; clearTimeout(timer); ws?.close(); };
+			return () => {
+				closed = true;
+				clearTimeout(timer);
+				if (socketRef.current === ws) socketRef.current = null;
+				ws?.close();
+			};
 
 		}, []);
 
-		return [state];
+		useEffect(() => {
+			const ws = socketRef.current;
+			if (ws?.readyState === WebSocket.OPEN) {
+				ws.send(JSON.stringify(authAudienceFrame(visible)));
+			}
+		}, [visible]);
 
+		const clearAuth = useCallback((id) => {
+			setState((s) => ({ ...s, authQueue: (s.authQueue ?? []).filter((req) => req.id !== id) }));
+		}, []);
+
+		return [state, clearAuth];
 	}
 
 
 
 	function useSnapshot(path, ms) {
-
+		const gateRef = useRef(null);
+		if (gateRef.current === null) {
+			gateRef.current = new PollGate({ ttlMs: Math.max(ms * 2, 30_000) });
+		}
+		const inFlightRef = useRef(null);
 		const [data, setData] = useState(null);
 
-		const refresh = useCallback(() => { fetch(path).then((r) => r.json()).then(setData).catch(() => {}); }, [path]);
+		const refresh = useCallback(() => {
+			if (inFlightRef.current) return inFlightRef.current;
+			const gate = gateRef.current;
+			const sequence = gate.issue();
+			let firstEnvelope;
+			const request = collectStatusPages(async ({ cursor, jobCursor }) => {
+				const query = new URLSearchParams();
+				if (cursor !== null) query.set("cursor", cursor);
+				if (jobCursor !== null) query.set("job_cursor", jobCursor);
+				const suffix = query.size > 0 ? `?${query}` : "";
+				const response = await authFetch(`${path}${suffix}`);
+				const envelope = await response.json();
+				if (!response.ok || !envelope?.ok || !envelope.raw) {
+					throw new Error(envelope?.text || envelope?.lastError || `status HTTP ${response.status}`);
+				}
+				firstEnvelope ??= envelope;
+				return envelope.raw;
+			}).then((raw) => {
+				gate.succeed(sequence, {
+					...firstEnvelope,
+					ok: true,
+					fresh: true,
+					stale: false,
+					raw,
+				});
+			}, (error) => {
+				gate.fail(sequence, error);
+			}).finally(() => {
+				if (inFlightRef.current === request) inFlightRef.current = null;
+				setData(gate.snapshot());
+			});
+			inFlightRef.current = request;
+			return request;
+		}, [path]);
 
-		useEffect(() => { refresh(); const t = setInterval(refresh, ms); return () => clearInterval(t); }, [refresh]);
+		useEffect(() => {
+			let alive = true;
+			const update = () => refresh().finally(() => {
+				if (alive) setData(gateRef.current.snapshot());
+			});
+			update();
+			const pollTimer = setInterval(update, ms);
+			const ttlTimer = setInterval(() => {
+				if (alive) setData(gateRef.current.snapshot());
+			}, Math.min(ms, 5_000));
+			return () => {
+				alive = false;
+				clearInterval(pollTimer);
+				clearInterval(ttlTimer);
+			};
+		}, [ms, refresh]);
 
 		return [data, refresh];
-
 	}
 
 
@@ -533,128 +680,119 @@ function apply(cctx, config) {
 
 	// ── B23 组件：依赖 apply 作用域的 j/hooks/T/btn ──
 
-	// B24c: SSH 2FA 质询弹窗 —— 用户输入动态码回传引擎，连接继续握手
-
-	function KbdintModal({ req }) {
-
-		const [code, setCode] = useState("");
-
+	// B24c: SSH 交互式身份认证弹窗 —— 将完整质询逐项回传引擎
+	function AuthPromptModal({ req, onDone }) {
+		const [answers, setAnswers] = useState([]);
 		const [busy, setBusy] = useState(false);
-
-		// 已处理过的质询 id：本地关窗（WS 帧不会撤回，需自行记住）
-
+		const [errorText, setErrorText] = useState("");
 		const [dismissedId, setDismissedId] = useState(null);
+		const prompts = normalizeAuthPrompts(req);
 
-		useEffect(() => { setCode(""); setBusy(false); }, [req?.id]);
+		useEffect(() => {
+			setAnswers(prompts.map(() => ""));
+			setBusy(false);
+			setErrorText("");
+		}, [req?.id]);
 
 		if (!req || dismissedId === req.id) return null;
 
 		const sendAnswer = async (answer) => {
-
 			if (busy) return;
-
 			setBusy(true);
-
+			setErrorText("");
 			try {
-
-				await fetch("/sched/ssh/2fa-answer", {
-
-					method: "POST", headers: { "content-type": "application/json" },
-
+				const response = await authFetch("/sched/ssh/auth-answer", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
 					body: JSON.stringify({ id: req.id, answer }),
-
 				});
-
-			} catch { /* 引擎侧超时/过期会以连接失败形式呈现 */ }
-
-			setDismissedId(req.id); // 无论成败，本地质询已了结 → 关窗
-
+				const responseText = await response.text();
+				let body = {};
+				if (responseText) {
+					try { body = JSON.parse(responseText); } catch { body = responseText; }
+				}
+				if (!response.ok) {
+					setErrorText(authAnswerErrorText({
+						status: response.status,
+						statusText: response.statusText,
+						body,
+					}));
+					setBusy(false);
+					return;
+				}
+				setDismissedId(req.id);
+				onDone?.(req.id);
+			} catch (cause) {
+				setErrorText(authAnswerErrorText({ cause }));
+				setBusy(false);
+			}
 		};
 
 		const submit = async () => {
-
-			if (!code.trim() || busy) return;
-
-			await sendAnswer({ kind: "code", code: code.trim() });
-
+			if (busy) return;
+			await sendAnswer(buildAuthAnswer(prompts, answers));
 		};
-
-		// 取消：通知引擎立即放弃本次握手，并本地关窗
 
 		const cancel = async () => {
-
 			await sendAnswer({ kind: "cancel" });
-
 		};
 
+		const setAnswer = (index, value) => {
+			setAnswers((current) => current.map((answer, i2) => i2 === index ? value : answer));
+		};
+		const methodLabel = req.method === "private-key-passphrase"
+			? "私钥口令"
+			: req.method === "keyboard-interactive" ? "交互式身份验证" : String(req.method || "身份验证");
+		const instructions = req.instructions || req.instr;
+
 		return j("div", { style: {
-
 			position: "fixed", inset: 0, zIndex: 11000,
-
 			background: "rgba(0,0,0,.5)", display: "flex", alignItems: "center", justifyContent: "center",
-
+			padding: 12, boxSizing: "border-box",
 		} }, [
-
 			jsxs2("div", { style: {
-
 				background: "var(--dsw-alias-bg-layer-1, var(--dsw-alias-bg-base, #fff))",
-
 				border: `1px solid ${T.border2}`, borderRadius: 12, padding: 18,
-
-				width: "min(400px, 92vw)", display: "flex", flexDirection: "column", gap: 10,
-
+				width: "min(480px, 100%)", maxHeight: "90vh", overflowY: "auto",
+				display: "flex", flexDirection: "column", gap: 10,
 				boxShadow: "0 18px 60px rgba(0,0,0,.45)", color: T.label, fontFamily: T.font,
-
+				boxSizing: "border-box", minWidth: 0,
 			} }, [
-
-				jsxs2("div", { style: { display: "flex", gap: 8, alignItems: "center" } }, [
-
-					j("b", { style: { fontSize: 14 } }, "SSH 双因子验证"),
-
-					j("span", { style: { color: T.brand, fontWeight: 700, fontSize: 13 } }, req.alias),
-
+				jsxs2("div", { style: { display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap", minWidth: 0 } }, [
+					j("b", { style: { fontSize: 14 } }, `SSH ${methodLabel}`),
+					req.alias && j("span", { style: { color: T.brand, fontWeight: 700, fontSize: 13, overflowWrap: "anywhere" } }, req.alias),
 				]),
-
-				j("div", { style: { fontSize: 13, color: T.label2 } },
-
-					`${req.prompt || "Verification code:"} —— 请输入验证器 App 当前动态码`),
-
-				jsxs2("div", { style: { display: "flex", gap: 8 } }, [
-
+				req.name && j("div", { style: { fontSize: 12, color: T.label2, overflowWrap: "anywhere" } }, req.name),
+				instructions && j("div", { style: { fontSize: 13, color: T.label2, whiteSpace: "pre-wrap", overflowWrap: "anywhere" } }, instructions),
+				...prompts.map((prompt, index) => jsxs2("label", {
+					key: prompt.id ?? index,
+					style: { display: "flex", flexDirection: "column", gap: 4, minWidth: 0 },
+				}, [
+					j("span", { style: { fontSize: 13, color: T.label2, overflowWrap: "anywhere" } },
+						prompt.prompt || `Authentication response ${index + 1}`),
 					j("input", {
-
-						autoFocus: true,
-
-						value: code,
-
-						onChange: (e) => setCode(e.target.value),
-
+						autoFocus: index === 0,
+						type: prompt.echo ? "text" : "password",
+						autoComplete: "off",
+						value: answers[index] ?? "",
+						onChange: (e) => setAnswer(index, e.target.value),
 						onKeyDown: (e) => { if (e.key === "Enter") submit(); },
-
-						placeholder: "动态码 / 验证码",
-
-						style: { flex: 1, padding: "7px 10px", fontSize: 14, fontFamily: T.font,
-
+						style: {
+							width: "100%", boxSizing: "border-box", padding: "7px 10px", fontSize: 14, fontFamily: T.font,
 							border: `1px solid ${T.border2}`, borderRadius: 8, outline: "none",
-
-							color: T.label, background: "var(--dsw-alias-bg-base)" },
-
+							color: T.label, background: "var(--dsw-alias-bg-base)",
+						},
 					}),
-
-					j("button", { onClick: submit, disabled: !code.trim() || busy, style: btn(T.ok, !code.trim() || busy) },
-
+				])),
+				jsxs2("div", { style: { display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" } }, [
+					j("button", { onClick: submit, disabled: busy, style: btn(T.ok, busy) },
 						busy ? "\u63d0\u4ea4\u4e2d\u2026" : "\u786e\u8ba4"),
-
 					j("button", { onClick: cancel, disabled: busy, title: "放弃本次连接", style: { ...ghostBtn, flexShrink: 0 } }, "\u53d6\u6d88"),
-
 				]),
-
-				j("div", { style: { fontSize: 13, color: T.label2 } }, "180 秒内未提交将自动放弃本次连接"),
-
+				errorText && j("div", { role: "alert", style: { fontSize: 13, color: T.err, overflowWrap: "anywhere" } }, errorText),
+				j("div", { style: { fontSize: 13, color: T.label2, overflowWrap: "anywhere" } }, "180 秒内未提交将自动放弃本次连接"),
 			]),
-
 		]);
-
 	}
 
 
@@ -681,9 +819,9 @@ function apply(cctx, config) {
 
 				const [h, b] = await Promise.all([
 
-					fetch("/sched/ssh/hosts").then((r) => r.json()),
+					authFetch("/sched/ssh/hosts").then((r) => r.json()),
 
-					fetch("/sched/ssh/binding").then((r) => r.json()),
+					authFetch("/sched/ssh/binding").then((r) => r.json()),
 
 				]);
 
@@ -707,7 +845,7 @@ function apply(cctx, config) {
 
 			try {
 
-				const r = await fetch("/sched/ssh/bind", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ alias }) }).then((r) => r.json());
+				const r = await authFetch("/sched/ssh/bind", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ alias }) }).then((r) => r.json());
 
 				if (r.ok) setMsg(`✅ ${alias} 已设为 SCHED 主机 (${r.latencyMs}ms) · daemon: ${r.probeText || "?"}`);
 
@@ -727,7 +865,7 @@ function apply(cctx, config) {
 
 			try {
 
-				await fetch("/sched/ssh/unbind", { method: "POST" });
+				await authFetch("/sched/ssh/unbind", { method: "POST" });
 
 				setMsg(`已解绑，回到 CLI 模式 (sshEntry: ${binding?.sshEntry ?? "?"})`);
 
@@ -747,7 +885,7 @@ function apply(cctx, config) {
 
 			try {
 
-				const r = await fetch("/sched/ssh/import", { method: "POST" }).then((r) => r.json());
+				const r = await authFetch("/sched/ssh/import", { method: "POST" }).then((r) => r.json());
 
 				setMsg(r.result ? `导入完成: 解析 ${r.result.parsed} / 新增 ${r.result.added} / 跳过 ${r.result.skipped}` : `失败: ${r.error}`);
 
@@ -765,7 +903,7 @@ function apply(cctx, config) {
 
 			try {
 
-				const r = await fetch("/sched/ssh/test", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ alias }) }).then((r) => r.json());
+				const r = await authFetch("/sched/ssh/test", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ alias }) }).then((r) => r.json());
 
 				setMsg(r.ok ? `${alias}: ok (${r.latencyMs}ms)` : `${alias}: 失败 — ${r.error ?? "unreachable"}`);
 
@@ -778,7 +916,11 @@ function apply(cctx, config) {
 		const doDelete = async (alias) => {
 			setBusy("del:" + alias);
 			try {
-				const response = await fetch(`/sched/ssh/hosts?alias=${encodeURIComponent(alias)}`, { method: "DELETE" });
+				const response = await authFetch("/sched/ssh/hosts", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ action: "delete", alias }),
+				});
 				const result = await response.json().catch(() => ({}));
 				if (!response.ok || result.removed === false) {
 					setMsg(`失败: ${result.error ?? `HTTP ${response.status}`}`);
@@ -788,6 +930,41 @@ function apply(cctx, config) {
 				await load();
 			} catch (e) {
 				setMsg("失败: " + e.message);
+			} finally {
+				setBusy("");
+			}
+		};
+
+		const doPin = async (host) => {
+			const entered = window.prompt(
+				`粘贴 ${host.alias} 的 OpenSSH SHA256 host key 指纹：`,
+				host.hostKey ?? "SHA256:",
+			);
+			if (entered === null) return;
+			const hostKey = entered.trim();
+			if (!validHostKey(hostKey)) {
+				setMsg("失败: host pin 必须是 OpenSSH SHA256: 加 43 位 base64 指纹");
+				return;
+			}
+			setBusy("pin:" + host.alias);
+			try {
+				const response = await authFetch("/sched/ssh/hosts", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({
+						action: "update",
+						alias: host.alias,
+						patch: { hostKey },
+					}),
+				});
+				const result = await response.json().catch(() => ({}));
+				if (!response.ok || !result.host) {
+					throw new Error(result.error ?? `HTTP ${response.status}`);
+				}
+				setMsg(`✅ ${host.alias} host key 已固定`);
+				await load();
+			} catch (error) {
+				setMsg("失败: " + error.message);
 			} finally {
 				setBusy("");
 			}
@@ -890,6 +1067,7 @@ function apply(cctx, config) {
 							(h.proxyJump && h.proxyJump.length > 0) ? ` · via ${h.proxyJump.join(">")}` : "",
 
 							h.description ? ` · ${h.description}` : "",
+							h.hostKeyReady ? " · host✓" : " · ⚠host pin缺失",
 
 						].join("")),
 
@@ -899,19 +1077,40 @@ function apply(cctx, config) {
 
 							? j("span", { key: "sb", style: { color: localMode ? T.brand : T.ok, fontWeight: 700, fontSize: 13, flexShrink: 0 } }, localMode ? "本地运行" : "✔ 数据源")
 
-							: j("button", { key: "bnd", onClick: () => doBind(h.alias), disabled: !!busy, title: "设为 sched 数据源主机（引擎模式，看板数据直连该机）", style: { ...ghostBtn, color: T.brand, borderColor: `color-mix(in srgb, ${T.brand} 45%, transparent)`, flexShrink: 0 } },
+							: j("button", {
+								key: "bnd",
+								onClick: () => doBind(h.alias),
+								disabled: !!busy || !h.hostKeyReady,
+								title: h.hostKeyReady ? "设为 sched 数据源主机（引擎模式）" : "先设置 host pin",
+								style: { ...ghostBtn, color: T.brand, borderColor: `color-mix(in srgb, ${T.brand} 45%, transparent)`, flexShrink: 0, opacity: h.hostKeyReady ? 1 : 0.5 },
+							}, busy === "bind:" + h.alias ? "绑定中…" : "设为SCHED"),
 
-								busy === "bind:" + h.alias ? "绑定中…" : "设为SCHED"),
-
-						j("button", { key: "o", onClick: () => setTermAlias(h.alias), title: "打开网页终端", style: { ...ghostBtn, flexShrink: 0 } }, "终端"),
+						j("button", {
+							key: "pin",
+							onClick: () => doPin(h),
+							disabled: !!busy,
+							title: "固定 OpenSSH SHA256 host key 指纹；未固定时拒绝连接",
+							style: { ...ghostBtn, color: h.hostKeyReady ? T.label2 : T.warn, flexShrink: 0 },
+						}, busy === "pin:" + h.alias ? "…" : (h.hostKeyReady ? "更新pin" : "设置pin")),
+						j("button", {
+							key: "o",
+							onClick: () => setTermAlias(h.alias),
+							disabled: !h.hostKeyReady,
+							title: h.hostKeyReady ? "打开网页终端" : "先设置 host pin",
+							style: { ...ghostBtn, flexShrink: 0, opacity: h.hostKeyReady ? 1 : 0.5 },
+						}, "终端"),
 
 						confirmAlias === h.alias
 
 							? j("button", { key: "c", onClick: () => doDelete(h.alias), style: { ...btn(T.err), flexShrink: 0 } }, "确认删除")
 
-							: j("button", { key: "t", onClick: () => doTest(h.alias), disabled: !!busy, title: "连通性测试", style: { ...ghostBtn, flexShrink: 0 } },
-
-								busy === "test:" + h.alias ? "…" : "测试"),
+							: j("button", {
+								key: "t",
+								onClick: () => doTest(h.alias),
+								disabled: !!busy || !h.hostKeyReady,
+								title: h.hostKeyReady ? "连通性测试" : "先设置 host pin",
+								style: { ...ghostBtn, flexShrink: 0, opacity: h.hostKeyReady ? 1 : 0.5 },
+							}, busy === "test:" + h.alias ? "…" : "测试"),
 
 						confirmAlias === h.alias
 
@@ -985,7 +1184,7 @@ function apply(cctx, config) {
 
 				const proto = location.protocol === "https:" ? "wss://" : "ws://";
 
-				ws = new WebSocket(`${proto}${location.host}/sched/ws/ssh-terminal?alias=${encodeURIComponent(alias)}&cols=${term.cols}&rows=${term.rows}`);
+				ws = authenticatedWebSocket(`${proto}${location.host}/sched/ws/ssh-terminal?alias=${encodeURIComponent(alias)}&cols=${term.cols}&rows=${term.rows}`);
 
 				ws.onmessage = (ev) => {
 
@@ -1068,29 +1267,6 @@ function apply(cctx, config) {
 
 
 
-	// 任务按状态分类计数 → 分段条（红=出错 绿=成功 蓝=运行中 灰=排队/取消）
-
-	function taskSegments(tasks) {
-
-		const seg = { bad: 0, ok: 0, run: 0, off: 0 };
-
-		for (const t of tasks) {
-
-			if (["failed", "timed_out"].includes(t.status)) seg.bad++;
-
-			else if (["done", "skip"].includes(t.status)) seg.ok++;
-
-			else if (t.status === "running") seg.run++;
-
-			else seg.off++;
-
-		}
-
-		return seg;
-
-	}
-
-	const SEG_COLOR = { bad: "#ef4444", ok: "#22c55e", run: "#3b82f6", off: "#9ca3af" };
 
 
 
@@ -1106,13 +1282,6 @@ function apply(cctx, config) {
 
 		if (!tasks || !tasks.length) return null;
 
-		const colorOf = (st) =>
-
-			["failed", "timed_out"].includes(st) ? SEG_COLOR.bad :
-
-			["done", "skip"].includes(st) ? SEG_COLOR.ok :
-
-			st === "running" ? SEG_COLOR.run : SEG_COLOR.off;
 
 		const shown = Math.min(tasks.length, SEG_MAX_VISIBLE);
 
@@ -1136,7 +1305,7 @@ function apply(cctx, config) {
 
 					style: { width: 18, height: 15, borderRadius: 3,
 
-						background: colorOf(t.status), display: "inline-block",
+						background: COLORS[t.status] ?? T.label2, display: "inline-block",
 
 						cursor: "default" },
 
@@ -1157,92 +1326,90 @@ function apply(cctx, config) {
 	function BatchRow({ b, jobsAll, runOp, setLogTask }) {
 
 		const [open, setOpen] = useState(false);
-
-		const tasks = (jobsAll ?? []).filter(
-
-			(x) => x.batch === b.id,
-
-		);
-
-		const failedTasks = tasks.filter((x) => ["failed", "timed_out", "cancelled"].includes(x.status));
-
-		const seg = taskSegments(tasks);
-
-
+		const tasks = jobsForBatch(jobsAll, b.id);
+		const cancelRequest = batchCancelRequest(b);
+		const failures = [];
+		for (const task of tasks) {
+			const reference = taskReference(task);
+			const contract = taskStatusContract(task.status);
+			if (reference && contract.category === "failure") {
+				failures.push({ task, reference, contract });
+			}
+		}
 
 		return jsxs2("div", { style: { marginBottom: 10 } }, [
-
 			jsxs2("div", { style: { ...GRID, alignItems: "start" }, onClick: () => setOpen(!open) }, [
-
 				j("span", { style: { textAlign: "center", cursor: "pointer", lineHeight: "15px" } }, Badge({ s: b.status })),
-
 				jsxs2("span", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "pointer", lineHeight: "15px" }, onClick: (e) => { e.stopPropagation(); setOpen(!open); } }, [
-
-				j("b", { style: { fontSize: 13 }, title: b.name }, b.name),
-
-				b.project && j("span", { style: { fontSize: 11, color: T.label2, marginLeft: 6 } }, b.project),
-
-			]),
-
+					j("b", { style: { fontSize: 13 }, title: b.name }, b.name),
+					b.project && j("span", { style: { fontSize: 11, color: T.label2, marginLeft: 6 } }, b.project),
+				]),
 				j(TaskSegments, { tasks }),
-
 				j("span", { style: { fontSize: 12.5, color: T.label2, textAlign: "right", lineHeight: "15px" } }, b.progress ?? ""),
-
-				j(ArmButton, { label: "cancel", confirmLabel: "cancel(取消任务!)", color: T.err, stopProp: true,
-
-				onConfirm: () => runOp("cancel", b.name) }),
-
+				cancelRequest && j(ArmButton, {
+					label: "cancel",
+					confirmLabel: "cancel(取消任务!)",
+					color: T.err,
+					stopProp: true,
+					onConfirm: () => runOp(cancelRequest.op, b),
+				}),
 			]),
-
 			open && jsxs2("div", { style: { marginTop: 6, marginLeft: 76, paddingLeft: 10, borderLeft: `2px solid ${T.border}` } }, [
-
 				b.depends_on?.length > 0 && j("div", { style: { fontSize: 12, color: T.label2 } }, `依赖: ${b.depends_on.join(", ")}`),
-
-				...tasks.filter((t) => ["failed", "timed_out", "cancelled"].includes(t.status)).map((t) =>
-
-					jsxs2("div", { key: `${t.batch}:${t.task}`, style: { fontSize: 13, marginLeft: 14, marginTop: 2, display: "flex", alignItems: "center" } }, [
-
-						j("span", { style: { fontFamily: "monospace", cursor: "pointer", textDecoration: "underline", marginRight: 6 }, onClick: () => setLogTask(`${t.batch}:${t.task}`), title: "查看日志" }, t.task),
-
-						Badge({ s: t.status }),
-
-						t.retries != null && j("span", { style: { color: T.label2, marginRight: 4 } }, `retries=${t.retries}`),
-
+				...failures.map(({ task, reference, contract }) =>
+					jsxs2("div", { key: reference, style: { fontSize: 13, marginLeft: 14, marginTop: 2, display: "flex", alignItems: "center" } }, [
+						contract.controls.includes("log") && j("span", {
+							style: { fontFamily: "monospace", cursor: "pointer", textDecoration: "underline", marginRight: 6 },
+							onClick: () => setLogTask(reference),
+							title: "查看日志",
+						}, task.task),
+						Badge({ s: task.status }),
+						task.retries != null && j("span", { style: { color: T.label2, marginRight: 4 } }, `retries=${task.retries}`),
 						j("span", { style: { flex: 1 } }),
-
-						j("button", { onClick: () => runOp("retry", `${t.batch}:${t.task}`), style: btn(T.brand) }, "retry"),
-
-						j(ArmButton, { label: "resubmit", confirmLabel: "resubmit(删产物!)", color: T.warn, onConfirm: () => runOp("resubmit", `${t.batch}:${t.task}`) }),
-
+						contract.controls.includes("retry") && j("button", {
+							onClick: () => runOp("retry", { ...task, revision: b.revision }),
+							style: btn(T.brand),
+						}, "retry"),
+						contract.controls.includes("resubmit") && j(ArmButton, {
+							label: "resubmit",
+							confirmLabel: "resubmit(删产物!)",
+							color: T.warn,
+							onConfirm: () => runOp("resubmit", { ...task, revision: b.revision }),
+						}),
 					])),
-
 			]),
-
 		]);
-
 	}
 
 
 
 	function GpuRow({ g, runOp }) {
+		const assignmentText = (g.assignments ?? [])
+			.map((assignment) => `${assignment.job_id}${assignment.vram_gib === null ? "" : ` (${assignment.vram_gib} GiB)`}`)
+			.join(", ");
 
 		return jsxs2("div", { style: { marginBottom: 6, display: "flex", alignItems: "center" } }, [
 
 			Badge({ s: g.status }),
 
-			j("span", { style: { fontFamily: "monospace", marginRight: 8 } }, `GPU${g.idx}`),
+			j("span", {
+				style: { fontFamily: "monospace", marginRight: 8 },
+				title: `revision ${g.revision}`,
+			}, `GPU${g.idx}`),
 
-			g.job && j("span", { style: { fontSize: 12, marginRight: 8, color: T.label2, flex: 1 } }, g.job),
+			assignmentText && j("span", {
+				style: { fontSize: 12, marginRight: 8, color: T.label2, flex: 1 },
+			}, assignmentText),
 
 			g.quarantined && j("span", { style: { color: T.err, marginRight: 8, fontSize: 12 } }, "[quarantined]"),
 
-			!g.job && g.status === "free" && j("span", { style: { flex: 1 } }),
+			!assignmentText && g.status === "free" && j("span", { style: { flex: 1 } }),
 
 			g.status === "unmanaged" && j(ArmButton, { label: "gpu-free 强制回收", confirmLabel: "确认回收?", color: T.warn,
 
-				onConfirm: () => runOp("gpu-free", String(g.idx)) }),
+				onConfirm: () => runOp("gpu-free", g) }),
 
-			g.quarantined && j("button", { onClick: () => runOp("gpu-ok", String(g.idx)), style: btn(T.ok) }, "gpu-ok 解除隔离"),
+			g.quarantined && j("button", { onClick: () => runOp("gpu-ok", g), style: btn(T.ok) }, "gpu-ok 解除隔离"),
 
 		]);
 
@@ -1264,7 +1431,7 @@ function apply(cctx, config) {
 
 			setQuerying(true);
 
-			fetch("/sched/api/daemon").then((r) => r.json()).then((d) => {
+			authFetch("/sched/api/daemon").then((r) => r.json()).then((d) => {
 
 				if (d.ok) setStatus(d.text);
 
@@ -1276,7 +1443,7 @@ function apply(cctx, config) {
 
 			// 只读通道徽章：单一事实来源在 ssh tab 的绑定状态条，这里仅展示
 
-			fetch("/sched/api/entry").then((r) => r.json()).then(setChannel).catch(() => {});
+			authFetch("/sched/api/entry").then((r) => r.json()).then(setChannel).catch(() => {});
 
 		}, []);
 
@@ -1328,7 +1495,7 @@ function apply(cctx, config) {
 
 					? j("button", { key: "s", disabled: true, title: "已在运行", style: btn(T.ok, true) }, "start")
 
-					: j("button", { key: "s", onClick: async () => { await runOp("daemon-start"); setTimeout(load, 3000); }, style: btn(T.ok) }, "start"),
+					: j("button", { key: "s", onClick: async () => { await runOp("daemon-start", null); setTimeout(load, 3000); }, style: btn(T.ok) }, "start"),
 
 				running
 
@@ -1342,7 +1509,7 @@ function apply(cctx, config) {
 
 				placeholder: "输入 stop 确认（会取消未完成任务）", color: T.err,
 
-				onConfirm: async () => { await runOp("daemon-stop"); setConfirmStop(false); },
+				onConfirm: async () => { await runOp("daemon-stop", null); setConfirmStop(false); },
 
 			}, "确认 stop"),
 
@@ -1392,7 +1559,7 @@ function apply(cctx, config) {
 
 			try {
 
-				const r = await fetch(`/sched/api/incidents?id=${id}`);
+				const r = await authFetch(`/sched/api/incidents?id=${id}`);
 
 				const d = await r.json();
 				if (!r.ok || !d?.ok) {
@@ -1429,7 +1596,7 @@ function apply(cctx, config) {
 
 		const load = useCallback(async () => {
 			try {
-				const r = await fetch("/sched/api/incidents?limit=30");
+				const r = await authFetch("/sched/api/incidents?limit=30");
 				const d = await r.json();
 				if (!d.ok) { setMsg("❌ " + (d.text || "").slice(0, 120)); return; }
 				applyList(JSON.parse(d.text).incidents || []);
@@ -1463,22 +1630,19 @@ function apply(cctx, config) {
 
 
 
-		return jsxs2("div", { style: { fontSize: 13 } }, [
+		return jsxs2("div", { style: { fontSize: 13, minWidth: 0, width: "100%" } }, [
 
 			jsxs2("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 6,
-
 				padding: "5px 8px", borderRadius: 6, background: T.bgLayer,
-
-				border: `1px solid ${T.border}` } }, [
+				border: `1px solid ${T.border}`, flexWrap: "wrap", minWidth: 0, width: "100%", boxSizing: "border-box" } }, [
 
 				j("span", { style: { color: T.warn } }, "⏸ 冻结"),
 
-				j("span", { style: { color: T.label2 } },
-
+				j("span", { style: { color: T.label2, minWidth: 0, flex: "1 1 220px", overflowWrap: "anywhere" } },
 					`快照时间 ${frozenAt || "…"} —— 阅读期间内容不变。`),
 
 
-				j("button", { onClick: () => load(), style: btn(T.brand) }, "刷新"),
+				j("button", { onClick: () => load(), style: { ...btn(T.brand), flexShrink: 0 } }, "刷新"),
 
 			]),
 
@@ -1486,7 +1650,7 @@ function apply(cctx, config) {
 
 				"暂无事故快照 (OOM/gpu_fault 发生时自动采集)"),
 
-			list.map((r) => jsxs2("div", { key: r.id }, [
+			list.map((r) => jsxs2("div", { key: r.id, style: { minWidth: 0, width: "100%" } }, [
 
 				jsxs2("div", {
 					key: "row",
@@ -1500,48 +1664,50 @@ function apply(cctx, config) {
 						}
 					},
 					style: { display: "flex", gap: 8, padding: "4px 6px", cursor: "pointer",
-						borderRadius: 4, background: detail && detail.id === r.id ? T.bgLayer : "transparent" },
+						borderRadius: 4, background: detail && detail.id === r.id ? T.bgLayer : "transparent",
+						flexWrap: "wrap", minWidth: 0, width: "100%", boxSizing: "border-box" },
 				}, [
-					j("span", { style: { width: 30, flexShrink: 0, color: T.label2 } }, "#" + r.id),
-					j("span", { style: { width: 130, flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: T.label } }, r.ts),
-					j("span", { style: { width: 70, flexShrink: 0, color: r.kind === "oom" ? T.err : T.warn } }, r.kind),
-					j("span", { style: { width: 36, flexShrink: 0 } }, "gpu" + (r.gpu_idx ?? "-")),
-					j("span", { style: { flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, r.job_id),
+					j("span", { style: { flex: "0 0 30px", width: 30, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: T.label2 } }, "#" + r.id),
+					j("span", { style: { flex: "0 1 130px", width: 130, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: T.label } }, r.ts),
+					j("span", { style: { flex: "0 0 70px", width: 70, minWidth: 0, color: r.kind === "oom" ? T.err : T.warn } }, r.kind),
+					j("span", { style: { flex: "0 0 36px", width: 36 } }, "gpu" + (r.gpu_idx ?? "-")),
+					j("span", { style: { flex: "1 1 180px", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", overflowWrap: "anywhere" } }, r.job_id),
 				]),
 				detail && detail.id === r.id && detail.loading &&
-					j("div", { key: "detail-loading", style: { color: T.label2, padding: 8, margin: "2px 0 6px 38px" } }, "加载事故详情…"),
+					j("div", { key: "detail-loading", style: { color: T.label2, padding: 8, margin: "2px 0 6px clamp(0px, 38px, 10vw)", minWidth: 0, maxWidth: "100%", boxSizing: "border-box", overflowWrap: "anywhere" } }, "加载事故详情…"),
 				detail && detail.id === r.id && detail.error &&
-					j("div", { key: "detail-error", style: { color: T.err, padding: 8, margin: "2px 0 6px 38px" } }, `详情加载失败: ${detail.error}`),
+					j("div", { key: "detail-error", style: { color: T.err, padding: 8, margin: "2px 0 6px clamp(0px, 38px, 10vw)", minWidth: 0, maxWidth: "100%", boxSizing: "border-box", overflowWrap: "anywhere" } }, `详情加载失败: ${detail.error}`),
 				detail && detail.id === r.id && !detail.loading && !detail.error && jsxs2("div", {
 					key: "detail",
-					style: { border: `1px solid ${T.border}`, borderRadius: 6, padding: 8, margin: "2px 0 6px 38px" } }, [
-					jsxs2("div", { style: { marginBottom: 4 } }, [
-						j("span", { style: { fontWeight: 600, color: T.brand } },
+					style: { border: `1px solid ${T.border}`, borderRadius: 6, padding: 8, margin: "2px 0 6px clamp(0px, 38px, 10vw)",
+						minWidth: 0, maxWidth: "100%", boxSizing: "border-box", overflowWrap: "anywhere" } }, [
+					jsxs2("div", { style: { marginBottom: 4, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", minWidth: 0 } }, [
+						j("span", { style: { fontWeight: 600, color: T.brand, minWidth: 0, overflowWrap: "anywhere" } },
 							`#${detail.id} ${detail.kind} @ gpu${detail.gpu_idx ?? "-"}`),
 						j("button", { onClick: (e) => { e.stopPropagation(); INC_VIEW_GEN++; setDetailT(null); INC_OPEN_ID = null; },
-							style: { ...ghostBtn, marginLeft: 8 } }, "收起"),
+							style: { ...ghostBtn, marginLeft: 0, flexShrink: 0 } }, "收起"),
 					]),
-					j("div", { style: { color: T.label2, fontSize: 12, marginBottom: 4 } },
+					j("div", { style: { color: T.label2, fontSize: 12, marginBottom: 4, minWidth: 0, overflowWrap: "anywhere" } },
 						`${detail.ts} · job ${detail.job_id} · batch ${detail.batch_id}`),
-					failed.dispatch_mode && j("div", { style: { wordBreak: "break-word", lineHeight: 1.5 } },
+					failed.dispatch_mode && j("div", { style: { wordBreak: "break-word", overflowWrap: "anywhere", lineHeight: 1.5 } },
 						`派发方式: ${failed.dispatch_mode} · 声明 ${failed.declared_vram_gib ?? "-"} GiB · 历史峰值 ${failed.profile_peak_gib ?? "-"}`),
-					mem.packed_sum_gib !== undefined && j("div", { style: { wordBreak: "break-word", lineHeight: 1.5 } },
+					mem.packed_sum_gib !== undefined && j("div", { style: { wordBreak: "break-word", overflowWrap: "anywhere", lineHeight: 1.5 } },
 						`显存: cap=${mem.cap_gib ?? "?"} packed=${mem.packed_sum_gib} actual=${mem.actual_used_gib ?? "?"}${mem.degraded ? " [降级]" : ""}`),
-					(mem.external_pids || []).length > 0 && jsxs2("div", { style: { color: T.warn } },
+					(mem.external_pids || []).length > 0 && jsxs2("div", { style: { color: T.warn, minWidth: 0, overflowWrap: "anywhere" } },
 						["外部进程: ", ...(mem.external_pids || []).map((e) =>
 							j("span", { key: e.pid }, `pid${e.pid}(${e.mem_mib ?? "?"}MiB) `))]),
-					(p.co_runners || []).length > 0 && jsxs2("div", {}, [
+					(p.co_runners || []).length > 0 && jsxs2("div", { style: { minWidth: 0, overflowWrap: "anywhere" } }, [
 						j("div", { style: { color: T.label2, marginTop: 4 } }, "同卡邻居:"),
-						...p.co_runners.map((c) => j("div", { key: c.job_id, style: { paddingLeft: 10 } },
+						...p.co_runners.map((c) => j("div", { key: c.job_id, style: { paddingLeft: 10, minWidth: 0, overflowWrap: "anywhere" } },
 							`${c.task} [${c.status}] declared=${c.declared_vram_gib} peak=${c.profile_peak_gib} runtime=${c.runtime_sec}s`)),
 					]),
-					(detail.verdicts || []).length > 0 && jsxs2("div", { style: { marginTop: 6 } }, [
+					(detail.verdicts || []).length > 0 && jsxs2("div", { style: { marginTop: 6, minWidth: 0, overflowWrap: "anywhere" } }, [
 						j("div", { style: { color: T.warn, fontWeight: 600 } }, "判读假设:"),
-						...detail.verdicts.map((v, i2) => j("div", { key: i2, style: { color: T.warn, paddingLeft: 10 } }, "? " + v)),
+						...detail.verdicts.map((v, i2) => j("div", { key: i2, style: { color: T.warn, paddingLeft: 10, minWidth: 0, overflowWrap: "anywhere" } }, "? " + v)),
 					]),
-					p.log_excerpt && jsxs2("div", {}, [
+					p.log_excerpt && jsxs2("div", { style: { minWidth: 0 } }, [
 						j("div", { style: { color: T.label2, marginTop: 6 } }, "日志摘录:"),
-						j("pre", { style: { ...pre, maxHeight: 120, overflow: "auto", margin: "2px 0" } }, p.log_excerpt),
+						j("pre", { style: { ...pre, maxHeight: 120, minWidth: 0, overflow: "auto", margin: "2px 0" } }, p.log_excerpt),
 					]),
 				]),
 			])),
@@ -1574,7 +1740,7 @@ function apply(cctx, config) {
 
 		const load = useCallback(() => {
 
-			fetch("/sched/api/config").then((r) => r.json()).then((d) => {
+			authFetch("/sched/api/config").then((r) => r.json()).then((d) => {
 
 				if (!d.ok) { setMsg("❌ 加载失败: " + (d.text || "").slice(0, 120)); return; }
 
@@ -1594,7 +1760,7 @@ function apply(cctx, config) {
 
 		useEffect(() => {
 
-			fetch("/sched/api/client-log", {
+			authFetch("/sched/api/client-log", {
 
 				method: "POST", headers: { "content-type": "application/json" },
 
@@ -1615,27 +1781,26 @@ function apply(cctx, config) {
 
 
 		async function save(patch) {
-
 			setMsg("保存中…");
-
+			const payload = JSON.stringify(patch);
+			let requestKey;
 			try {
-
-				const r = await fetch("/sched/api/config/set", {
-
-					method: "POST", headers: { "Content-Type": "application/json" },
-
-					body: JSON.stringify({ patch }),
-
+				requestKey = await mutationPayloadKey("config-set", payload);
+				const requestId = await durableRequests.claim(requestKey);
+				const response = await authFetch("/sched/api/config/set", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ patch, requestId }),
 				});
-
-				const d = await r.json();
-
-				setMsg((d.ok ? "✅ " : "❌ ") + (d.text || "").split("\n")[0]);
-
-				if (d.ok) load();
-
-			} catch (e) { setMsg("❌ " + e); }
-
+				const result = await response.json();
+				if (mutationResultIsDefinitive(result)) {
+					await durableRequests.complete(requestKey, requestId);
+				}
+				setMsg((result.ok ? "✅ " : "❌ ") + (result.text || "").split("\n")[0]);
+				if (result.ok) load();
+			} catch (error) {
+				setMsg("❌ " + error);
+			}
 		}
 
 
@@ -1921,6 +2086,29 @@ function apply(cctx, config) {
 
 		const [msg, setMsg] = useState("");
 
+		const [projectNames, setProjectNames] = useState(["default"]);
+
+		const [selectedProject, setSelectedProject] = useState("default");
+
+		useEffect(() => {
+			let alive = true;
+			const applyConfig = (cfg) => {
+				const names = configuredProjectNames(cfg);
+				if (!alive || names.length === 0) return;
+				setProjectNames(names);
+				setSelectedProject((current) => names.includes(current) ? current : names[0]);
+			};
+			if (CFG_CACHE?.cfg) applyConfig(CFG_CACHE.cfg);
+			authFetch("/sched/api/config")
+				.then((response) => response.json())
+				.then((payload) => {
+					if (!payload?.ok || typeof payload.text !== "string") return;
+					applyConfig(JSON.parse(payload.text));
+				})
+				.catch(() => {});
+			return () => { alive = false; };
+		}, []);
+
 		const doDryRun = async () => {
 
 			setPreview(null); setMsg("dry-run 中…");
@@ -1936,28 +2124,46 @@ function apply(cctx, config) {
 		};
 
 		const doSubmit = async () => {
-
 			setMsg("提交中…");
-
 			try {
-
-				const r = await post("submit", { content: text });
-
-				setMsg(r.ok ? `已提交：${String(r.text).slice(0, 160)}` : `失败：${String(r.text).slice(0, 160)}`);
-
-				if (r.ok) { setPreview(null); setText(""); refreshSnap(); setTab("batches"); }
-
-			} catch (e) { setMsg(String(e)); }
-
+				const requestKey = await mutationPayloadKey("submit", text);
+				const requestId = await durableRequests.claim(requestKey);
+				const result = await post("submit", { content: text, requestId });
+				if (mutationResultIsDefinitive(result)) {
+					await durableRequests.complete(requestKey, requestId);
+				}
+				setMsg(
+					result.ok
+						? `已提交：${String(result.text).slice(0, 160)}`
+						: `失败：${String(result.text).slice(0, 160)}`,
+				);
+				if (result.ok) {
+					setPreview(null);
+					setText("");
+					refreshSnap();
+					setTab("batches");
+				}
+			} catch (error) {
+				setMsg(String(error));
+			}
 		};
 
 		return jsxs2("div", {}, [
+
+			jsxs2("label", { style: { display: "flex", gap: 8, alignItems: "center", marginBottom: 6 } }, [
+				j("span", { style: { color: T.label2 } }, "Project"),
+				j("select", {
+					value: selectedProject,
+					onChange: (event) => setSelectedProject(event.target.value),
+					style: { minWidth: 160, padding: "5px 8px" },
+				}, projectNames.map((name) => j("option", { key: name, value: name }, name))),
+			]),
 
 			j("textarea", {
 
 				value: text, onChange: (e) => setText(e.target.value),
 
-				placeholder: '粘贴 batch.json，例如 {"schema_version":1,"name":"my_batch","tasks":[{"id":"t1","cmd":["{VENV:k}","..."],"duration_min":5}]}（venv 别名见远端 config.venvs，当前为 k）',
+				placeholder: submitExampleForProject(selectedProject),
 
 				style: { width: "100%", height: 150, fontFamily: "monospace", fontSize: 13 },
 
@@ -1981,9 +2187,57 @@ function apply(cctx, config) {
 
 
 
-	function Dashboard({ onClose }) {
+	function HistoryTab() {
+		const [state, setState] = useState({ loading: true, document: null, error: "" });
+		const load = useCallback(async () => {
+			setState((current) => ({ ...current, loading: true, error: "" }));
+			try {
+				const document = await collectHistoryPages(async ({ cursor }) => {
+					const query = new URLSearchParams({ limit: "200" });
+					if (cursor !== null) query.set("cursor", cursor);
+					const response = await authFetch(`/sched/api/history?${query}`);
+					const envelope = await response.json();
+					if (!response.ok || !envelope?.ok || !envelope.raw) {
+						throw new Error(envelope?.text || `history HTTP ${response.status}`);
+					}
+					return envelope.raw;
+				});
+				setState({ loading: false, document, error: "" });
+			} catch (error) {
+				setState({ loading: false, document: null, error: String(error?.message ?? error) });
+			}
+		}, []);
+		useEffect(() => { load(); }, [load]);
+		const rows = state.document?.history ?? [];
+		return jsxs2("div", {}, [
+			jsxs2("div", { style: { display: "flex", gap: 8, alignItems: "center", marginBottom: 8 } }, [
+				j("b", null, `${rows.length} loaded history rows`),
+				j("button", { onClick: load, disabled: state.loading, style: ghostBtn }, state.loading ? "loading…" : "refresh"),
+			]),
+			state.error && j("div", { role: "alert", style: { color: T.err } }, state.error),
+			!state.loading && !state.error && rows.length === 0 && j("div", null, "(no history)"),
+			...rows.map((row, index) => jsxs2("div", {
+				key: `${row.batch_id}:${row.task}:v${row.version}:${index}`,
+				style: {
+					display: "grid",
+					gridTemplateColumns: "minmax(160px,2fr) minmax(90px,1fr) minmax(80px,1fr) minmax(70px,.7fr)",
+					gap: 8,
+					padding: "6px 8px",
+					borderBottom: `1px solid ${T.border}`,
+					fontSize: 13,
+				},
+			}, [
+				j("span", { title: row.batch_id }, row.batch_name || row.batch_id),
+				j("span", null, row.task),
+				j("span", { style: { color: COLORS[row.status] ?? T.label2 } }, row.status),
+				j("span", null, `v${row.version}`),
+			])),
+		]);
+	}
 
-		const [stream] = useSchedStream();
+	function Dashboard({ onClose, visible }) {
+
+		const [stream, clearAuth] = useSchedStream(visible);
 
 		const [snap, refreshSnap] = useSnapshot("/sched/api/status", 20000);
 
@@ -1998,6 +2252,7 @@ function apply(cctx, config) {
 		const [projFilter, setProjFilter] = useState("");
 
 		const raw = snap?.raw;
+		const mutationAvailability = schedulerMutationAvailability(snap);
 
 		const summary = snap?.summary;
 
@@ -2006,18 +2261,32 @@ function apply(cctx, config) {
 
 
 
-		const runOp = async (op, id) => {
-			const key = `${op}:${id ?? ""}`;
+		const runOp = async (op, entity) => {
+			const id = taskReference(entity)
+				?? (Number.isInteger(entity?.idx) ? String(entity.idx) : entity?.id ?? "");
+			const key = `${op}:${id}`;
+			if (!mutationAvailability.writable) {
+				setOpMsg(mutationAvailability.reason);
+				return;
+			}
 			if (pendingOps.current.has(key)) return;
 			pendingOps.current.add(key);
 			setPendingOpsVersion((version) => version + 1);
 			try {
-				const r = await post("op", { op, id });
-				if (!r || typeof r !== "object") throw new Error("invalid JSON response");
-				setOpMsg(`${op} ${id ?? ""}: ${r.ok ? "ok" : `fail (${r.error ?? r.code})`} ${r.text ? "— " + String(r.text).slice(0, 120) : ""}`);
+				const requestId = await durableRequests.claim(key);
+				const request = buildOperationRequest(op, entity, requestId);
+				const result = await post("op", request);
+				if (!result || typeof result !== "object") throw new Error("invalid JSON response");
+				if (mutationResultIsDefinitive(result)) {
+					await durableRequests.complete(key, requestId);
+				}
+				setOpMsg(
+					`${op} ${id}: ${result.ok ? "ok" : `fail (${result.error ?? result.code})`}`
+					+ (result.text ? ` — ${String(result.text).slice(0, 120)}` : ""),
+				);
 				refreshSnap();
 			} catch (error) {
-				setOpMsg(`${op} ${id ?? ""}: fail (${String(error?.message ?? error).slice(0, 160)})`);
+				setOpMsg(`${op} ${id}: fail (${String(error?.message ?? error).slice(0, 160)})`);
 			} finally {
 				pendingOps.current.delete(key);
 				setPendingOpsVersion((version) => version + 1);
@@ -2069,19 +2338,33 @@ function apply(cctx, config) {
 
 					]),
 
-					...["batches", "gpus", "events", "submit", "config", "incidents", "ssh"].map((t) =>
+					...["batches", "history", "gpus", "events", "submit", "config", "incidents", "ssh"].map((t) =>
 
 						j("button", { key: t, onClick: () => setTab(t), style: tab === t ? btn(T.brand) : ghostBtn }, t)),
 
 				]),
 
-				// B24c: SSH 2FA 动态码弹窗（引擎质询桥接到看板）
-
-				j(KbdintModal, { req: stream.kbdint }),
+				// B24c: SSH 交互式身份验证弹窗（引擎质询桥接到看板）
+				j(AuthPromptModal, { req: stream.authQueue?.[0], onDone: clearAuth }),
 
 				opMsg && j("div", { style: { fontSize: 13, color: T.warn, marginBottom: 4 } }, opMsg),
+				!mutationAvailability.writable && j("div", {
+					id: "sched-read-only-reason",
+					role: "alert",
+					style: {
+						fontSize: 13,
+						color: T.warn,
+						padding: "6px 10px",
+						border: `1px solid ${T.warn}`,
+						borderRadius: 8,
+					},
+				}, mutationAvailability.reason),
 
-				tab === "batches" && jsxs2("div", null, [
+				tab === "batches" && jsxs2("fieldset", {
+					disabled: !mutationAvailability.writable,
+					"aria-describedby": "sched-read-only-reason",
+					style: { border: 0, padding: 0, margin: 0, minWidth: 0 },
+				}, [
 
 					j(DaemonBar, { runOp }),
 
@@ -2093,13 +2376,13 @@ function apply(cctx, config) {
 
 					jsxs2("div", { style: { fontSize: 13, color: T.label2, marginBottom: 6 } }, [
 
-						j("span", { style: { marginRight: 10, color: "#ef4444" } }, "■ 红=出错"),
+						j("span", { style: { marginRight: 10, color: "#ef4444" } }, "■ 红=失败/取消"),
 
 						j("span", { style: { marginRight: 10, color: "#22c55e" } }, "■ 绿=成功"),
 
 						j("span", { style: { marginRight: 10, color: "#3b82f6" } }, "■ 蓝=运行中"),
 
-						j("span", { style: { color: "#9ca3af" } }, "■ 灰=排队/取消"),
+						j("span", { style: { color: "#9ca3af" } }, "■ 灰=排队"),
 
 					]),
 
@@ -2114,8 +2397,14 @@ function apply(cctx, config) {
 				]),
 
 				]),
+				tab === "history" && j(HistoryTab, { key: "tab-history" }),
 
-				tab === "gpus" && jsxs2("div", { key: "tab-gpus" }, [
+				tab === "gpus" && jsxs2("fieldset", {
+					key: "tab-gpus",
+					disabled: !mutationAvailability.writable,
+					"aria-describedby": "sched-read-only-reason",
+					style: { border: 0, padding: 0, margin: 0, minWidth: 0 },
+				}, [
 
 					raw && (raw.gpus ?? []).map((g) => j(GpuRow, { key: g.idx, g, runOp })),
 
@@ -2125,9 +2414,19 @@ function apply(cctx, config) {
 
 				tab === "events" && j("pre", { key: "tab-events", style: { ...pre, maxHeight: "55vh", overflow: "auto" } }, stream.lines.join("\n") || "(no events yet)"),
 
-				tab === "submit" && j(SubmitTab, { key: "tab-submit", post, refreshSnap, setTab }),
+				tab === "submit" && j("fieldset", {
+					key: "tab-submit",
+					disabled: !mutationAvailability.writable,
+					"aria-describedby": "sched-read-only-reason",
+					style: { border: 0, padding: 0, margin: 0, minWidth: 0 },
+				}, j(SubmitTab, { post, refreshSnap, setTab })),
 
-				tab === "config" && j(ConfigTab, { key: "tab-config" }),
+				tab === "config" && j("fieldset", {
+					key: "tab-config",
+					disabled: !mutationAvailability.writable,
+					"aria-describedby": "sched-read-only-reason",
+					style: { border: 0, padding: 0, margin: 0, minWidth: 0 },
+				}, j(ConfigTab)),
 
 				tab === "incidents" && j(IncidentsTab, { key: "tab-incidents" }),
 
@@ -2139,6 +2438,14 @@ function apply(cctx, config) {
 
 		]);
 
+	}
+
+	function DashboardHost({ panel }) {
+		const [visible, setVisible] = useState(panel.isOpen());
+
+		useEffect(() => panel.subscribe(() => setVisible(panel.isOpen())), [panel]);
+
+		return j(Dashboard, { visible, onClose: () => panel.hide() });
 	}
 
 	// ── sidebar footer entry: button toggling the fullscreen dashboard ──────
@@ -2288,9 +2595,9 @@ function apply(cctx, config) {
 				container.setAttribute(VIEW_ATTR, "");
 				col.appendChild(container);
 				root = require("react-dom/client").createRoot(container);
-				root.render(j(Dashboard, { onClose: () => panel.hide() }));
+				root.render(j(DashboardHost, { panel }));
 				try {
-					fetch("/sched/api/client-log", {
+					authFetch("/sched/api/client-log", {
 						method: "POST", headers: { "content-type": "application/json" },
 						body: JSON.stringify({ kind: "lifecycle", detail: "view-mounted ts=" + new Date().toISOString(), ts: new Date().toISOString() }),
 					}).catch(() => {});
@@ -2313,12 +2620,12 @@ function apply(cctx, config) {
 			const t = ev.target;
 			if (t && t.closest && t.closest(SIDEBAR_ROW)) panel.hide();
 		};
-		document.addEventListener("click", onSidebarClick, true);
+		const disposeSidebarClick = listenCaptured(document, "click", onSidebarClick);
 
 		disposersUI.push(() => {
 			viewWaitObs.disconnect();
 			document.removeEventListener(PANEL_ACTIVATE_EVENT, onOtherActivate);
-			document.removeEventListener("click", onSidebarClick);
+			disposeSidebarClick();
 			document.documentElement.removeAttribute(ACTIVE_ATTR);
 			try { root?.unmount(); } catch (_) {}
 			container?.remove();
@@ -2400,7 +2707,7 @@ function apply(cctx, config) {
 	{
 		const report = (kind, detail) => {
 			try {
-				fetch("/sched/api/client-log", {
+				authFetch("/sched/api/client-log", {
 					method: "POST", headers: { "content-type": "application/json" },
 					body: JSON.stringify({ kind, detail: String(detail).slice(0, 2000), ts: new Date().toISOString() }),
 				}).catch(() => {});

@@ -6352,6 +6352,461 @@ __export(client_exports, {
   name: () => name
 });
 module.exports = __toCommonJS(client_exports);
+
+// packages/node-sched-ui/src/ui-contracts.js
+var TERMINAL_AUTH_STATES = /* @__PURE__ */ new Set(["resolved", "expired", "cancelled"]);
+var MAX_AUTH_ERROR_CHARS = 240;
+function boundedAuthError(text) {
+  const value = String(text);
+  return value.length <= MAX_AUTH_ERROR_CHARS ? value : `${value.slice(0, MAX_AUTH_ERROR_CHARS - 1)}\u2026`;
+}
+function submitExampleForProject(project) {
+  const selectedProject = typeof project === "string" && project.trim() ? project.trim() : "default";
+  return JSON.stringify({
+    project: selectedProject,
+    name: "my_batch",
+    tasks: [
+      { id: "t1", cmd: ["echo", "hello from sched"], duration_min: 5 }
+    ]
+  });
+}
+function configuredProjectNames(config) {
+  const projects = config?.projects;
+  if (!projects || typeof projects !== "object" || Array.isArray(projects)) return [];
+  const names = Object.keys(projects).filter((name2) => name2.trim()).sort();
+  const preferred = typeof config.default_project === "string" ? config.default_project.trim() : "";
+  if (!preferred || !names.includes(preferred)) return names;
+  return [preferred, ...names.filter((name2) => name2 !== preferred)];
+}
+var SUBMIT_EXAMPLE = submitExampleForProject("default");
+var TASK_STATUS_CONTRACTS = Object.freeze({
+  pending: Object.freeze({
+    category: "pending",
+    terminal: false,
+    controls: Object.freeze([])
+  }),
+  running: Object.freeze({
+    category: "running",
+    terminal: false,
+    controls: Object.freeze(["log"])
+  }),
+  done: Object.freeze({
+    category: "success",
+    terminal: true,
+    controls: Object.freeze(["log"])
+  }),
+  skip: Object.freeze({
+    category: "success",
+    terminal: true,
+    controls: Object.freeze(["log"])
+  }),
+  blocked: Object.freeze({
+    category: "failure",
+    terminal: true,
+    controls: Object.freeze(["log", "retry", "resubmit"])
+  }),
+  timed_out: Object.freeze({
+    category: "failure",
+    terminal: true,
+    controls: Object.freeze(["log", "retry", "resubmit"])
+  }),
+  failed: Object.freeze({
+    category: "failure",
+    terminal: true,
+    controls: Object.freeze(["log", "retry", "resubmit"])
+  }),
+  cancelled: Object.freeze({
+    category: "failure",
+    terminal: true,
+    controls: Object.freeze(["log", "retry", "resubmit"])
+  }),
+  interrupted: Object.freeze({
+    category: "failure",
+    terminal: true,
+    controls: Object.freeze(["log", "resubmit"])
+  })
+});
+var UNKNOWN_TASK_STATUS_CONTRACT = Object.freeze({
+  category: "pending",
+  terminal: false,
+  controls: Object.freeze([])
+});
+function jobsForBatch(jobs, batchId) {
+  if (!Array.isArray(jobs) || typeof batchId !== "string" || !batchId) return [];
+  return jobs.filter((job) => job?.batch_id === batchId);
+}
+function taskReference(task) {
+  if (typeof task?.batch_id !== "string" || !task.batch_id || typeof task.task !== "string" || !task.task) return null;
+  return `${task.batch_id}:${task.task}`;
+}
+function batchCancelRequest(batch) {
+  if (typeof batch?.id !== "string" || !batch.id) return null;
+  return { op: "cancel", id: batch.id };
+}
+function taskStatusContract(status) {
+  return Object.hasOwn(TASK_STATUS_CONTRACTS, status) ? TASK_STATUS_CONTRACTS[status] : UNKNOWN_TASK_STATUS_CONTRACT;
+}
+function authAnswerErrorText({ status, statusText, body, cause } = {}) {
+  const serverMessage = typeof body === "string" ? body.trim() : typeof body?.error === "string" ? body.error.trim() : typeof body?.message === "string" ? body.message.trim() : "";
+  if (serverMessage) return boundedAuthError(serverMessage);
+  const causeMessage = cause instanceof Error ? cause.message : cause == null ? "" : String(cause);
+  if (causeMessage) return boundedAuthError(causeMessage);
+  const responseDetails = [status, statusText].filter((part) => part != null && String(part).trim()).join(" ");
+  return boundedAuthError(
+    responseDetails ? `Authentication answer failed: ${responseDetails}` : "Authentication answer failed"
+  );
+}
+function listenCaptured(target, type, listener) {
+  target.addEventListener(type, listener, true);
+  return () => target.removeEventListener(type, listener, true);
+}
+function normalizeAuthPrompts(request) {
+  if (Array.isArray(request?.prompts)) return request.prompts;
+  if (!request) return [];
+  return [{ id: "0", prompt: request.prompt || "Authentication response", echo: false }];
+}
+function buildAuthAnswer(prompts, answers) {
+  const values = Array.isArray(answers) ? answers : [];
+  return {
+    kind: "answers",
+    answers: prompts.map((_, index) => values[index] ?? "")
+  };
+}
+function reduceAuthQueue(queue, frame) {
+  const current = Array.isArray(queue) ? queue : [];
+  if (!frame || typeof frame !== "object") return current;
+  if (frame.type === "auth-snapshot") {
+    if (!Array.isArray(frame.requests)) return current;
+    const requestsById = /* @__PURE__ */ new Map();
+    for (const request of frame.requests) {
+      if (request?.id != null) requestsById.set(request.id, request);
+    }
+    return [...requestsById.values()];
+  }
+  if (frame.type !== "auth" || frame.id == null) return current;
+  if (TERMINAL_AUTH_STATES.has(frame.state)) {
+    return current.filter((request) => request.id !== frame.id);
+  }
+  return [...current.filter((request) => request.id !== frame.id), frame];
+}
+function authAudienceFrame(visible) {
+  return { type: "auth-audience", visible: Boolean(visible) };
+}
+function validAccessToken(token) {
+  return typeof token === "string" && /^[A-Za-z0-9_-]{40,128}$/.test(token);
+}
+function validHostKey(hostKey) {
+  return typeof hostKey === "string" && /^SHA256:[A-Za-z0-9+/]{43}$/.test(hostKey);
+}
+function schedulerMutationAvailability(snapshot) {
+  if (!snapshot || snapshot.ok !== true || snapshot.fresh !== true) {
+    return { writable: false, reason: "\u8C03\u5EA6\u5668\u72B6\u6001\u4E0D\u662F\u6700\u65B0\u5FEB\u7167\uFF0C\u64CD\u4F5C\u5DF2\u5207\u6362\u4E3A\u53EA\u8BFB\u3002" };
+  }
+  const raw = snapshot.raw;
+  if (!raw || raw.schema_version !== 1 || !raw.truncated || typeof raw.truncated.batches !== "boolean" || typeof raw.truncated.jobs !== "boolean") {
+    return { writable: false, reason: "\u8C03\u5EA6\u5668\u72B6\u6001\u534F\u8BAE\u65E0\u6548\uFF0C\u64CD\u4F5C\u5DF2\u5207\u6362\u4E3A\u53EA\u8BFB\u3002" };
+  }
+  if (raw.truncated.batches || raw.truncated.jobs) {
+    return { writable: false, reason: "\u8C03\u5EA6\u5668\u72B6\u6001\u5DF2\u622A\u65AD\uFF08\u9700\u8981\u5206\u9875\uFF09\uFF0C\u64CD\u4F5C\u5DF2\u5207\u6362\u4E3A\u53EA\u8BFB\u3002" };
+  }
+  return { writable: true, reason: "" };
+}
+var REQUEST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
+var REQUEST_DATABASE_NAME = "node-sched-mutations";
+var REQUEST_OBJECT_STORE = "requests";
+var DurableRequestStore = class {
+  constructor(transact) {
+    if (typeof transact !== "function") throw new Error("durable request transaction is required");
+    this.transact = transact;
+  }
+  claim(key, create = () => crypto.randomUUID()) {
+    if (typeof key !== "string" || !key) throw new Error("durable request key is required");
+    return this.transact(async (store) => {
+      const existing = await store.get(key);
+      if (REQUEST_ID_PATTERN.test(existing?.requestId ?? "")) return existing.requestId;
+      const requestId = String(create());
+      if (!REQUEST_ID_PATTERN.test(requestId)) throw new Error("generated mutation request id is invalid");
+      await store.put(key, { requestId, createdAt: Date.now() });
+      return requestId;
+    });
+  }
+  complete(key, requestId) {
+    if (typeof key !== "string" || !key || !REQUEST_ID_PATTERN.test(requestId ?? "")) {
+      throw new Error("durable request key and id are required");
+    }
+    return this.transact(async (store) => {
+      const existing = await store.get(key);
+      if (existing?.requestId !== requestId) return false;
+      await store.delete(key);
+      return true;
+    });
+  }
+};
+function requestPromise(request) {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error ?? new Error("IndexedDB request failed"));
+  });
+}
+function createIndexedDbRequestStore(indexedDb = globalThis.indexedDB, databaseName = REQUEST_DATABASE_NAME) {
+  if (!indexedDb || typeof indexedDb.open !== "function") {
+    throw new Error("IndexedDB is required for durable scheduler mutations");
+  }
+  const database = new Promise((resolve, reject) => {
+    const request = indexedDb.open(databaseName, 1);
+    request.onupgradeneeded = () => {
+      if (!request.result.objectStoreNames.contains(REQUEST_OBJECT_STORE)) {
+        request.result.createObjectStore(REQUEST_OBJECT_STORE);
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error ?? new Error("cannot open scheduler mutation database"));
+    request.onblocked = () => reject(new Error("scheduler mutation database upgrade is blocked"));
+  });
+  const transact = async (operation) => {
+    const db = await database;
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(REQUEST_OBJECT_STORE, "readwrite");
+      const objectStore = transaction.objectStore(REQUEST_OBJECT_STORE);
+      let result;
+      let operationError;
+      transaction.oncomplete = () => resolve(result);
+      transaction.onabort = () => reject(operationError ?? transaction.error ?? new Error("mutation transaction aborted"));
+      transaction.onerror = () => {
+      };
+      Promise.resolve(operation({
+        get: (key) => requestPromise(objectStore.get(key)),
+        put: (key, value) => requestPromise(objectStore.put(value, key)),
+        delete: (key) => requestPromise(objectStore.delete(key))
+      })).then(
+        (value) => {
+          result = value;
+        },
+        (error) => {
+          operationError = error;
+          try {
+            transaction.abort();
+          } catch {
+            reject(error);
+          }
+        }
+      );
+    });
+  };
+  return new DurableRequestStore(transact);
+}
+function canonicalAssignments(assignments) {
+  if (!Array.isArray(assignments)) throw new Error("GPU operation requires exact assignments");
+  const result = assignments.map((assignment, index) => {
+    if (!assignment || typeof assignment !== "object" || Array.isArray(assignment) || Object.keys(assignment).some((key) => key !== "job_id" && key !== "vram_gib") || typeof assignment.job_id !== "string" || !assignment.job_id || assignment.vram_gib !== null && (!Number.isFinite(assignment.vram_gib) || assignment.vram_gib < 0)) {
+      throw new Error(`GPU assignment ${index} is invalid`);
+    }
+    return { job_id: assignment.job_id, vram_gib: assignment.vram_gib };
+  });
+  for (let index = 1; index < result.length; index += 1) {
+    if (result[index - 1].job_id >= result[index].job_id) {
+      throw new Error("GPU assignments must be uniquely sorted by job_id");
+    }
+  }
+  return result;
+}
+function mutationResultIsDefinitive(result) {
+  return Number.isInteger(result?.code) && result.code !== -1 && result.code !== 75;
+}
+function buildOperationRequest(op, entity, requestId) {
+  if (typeof op !== "string" || !op || !REQUEST_ID_PATTERN.test(requestId ?? "")) {
+    throw new Error("operation and durable request id are required");
+  }
+  if (entity?.batch_id && entity?.task) {
+    if (typeof entity.status !== "string" || !Number.isInteger(entity.version) || entity.version < 1 || !Number.isInteger(entity.revision) || entity.revision < 0) {
+      throw new Error("task operation requires exact status, version, and batch revision");
+    }
+    return {
+      op,
+      id: `${entity.batch_id}:${entity.task}`,
+      requestId,
+      expectedStatus: entity.status,
+      expectedVersion: entity.version,
+      expectedRevision: entity.revision
+    };
+  }
+  if (Number.isInteger(entity?.idx) && entity.idx >= 0) {
+    if (typeof entity.status !== "string" || ![0, 1].includes(entity.quarantined) || !Number.isInteger(entity.revision) || entity.revision < 0) {
+      throw new Error("GPU operation requires exact status, quarantine state, and revision");
+    }
+    return {
+      op,
+      id: String(entity.idx),
+      requestId,
+      expectedStatus: entity.status,
+      expectedQuarantined: entity.quarantined,
+      expectedRevision: entity.revision,
+      expectedAssignments: canonicalAssignments(entity.assignments)
+    };
+  }
+  if (typeof entity?.id === "string" && entity.id && typeof entity.status === "string" && Number.isInteger(entity.revision) && entity.revision >= 0) {
+    return {
+      op,
+      id: entity.id,
+      requestId,
+      expectedStatus: entity.status,
+      expectedRevision: entity.revision
+    };
+  }
+  if (entity == null) return { op, id: "", requestId };
+  throw new Error("operation entity is not canonical");
+}
+function pageCursor(value, label) {
+  if (value === null) return null;
+  if (typeof value !== "string" || !value || value.length > 1024) {
+    throw new Error(`${label} is invalid`);
+  }
+  return value;
+}
+function stableJson(value) {
+  return JSON.stringify(value);
+}
+async function collectStatusPages(fetchPage, { maxPages = 100 } = {}) {
+  if (typeof fetchPage !== "function") throw new Error("status page loader is required");
+  const batches = /* @__PURE__ */ new Map();
+  const jobs = /* @__PURE__ */ new Map();
+  const seenBatchCursors = /* @__PURE__ */ new Set();
+  let first;
+  let batchCursor = null;
+  let calls = 0;
+  do {
+    const batchCursorKey = batchCursor ?? "";
+    if (seenBatchCursors.has(batchCursorKey)) throw new Error("status batch cursor loop");
+    seenBatchCursors.add(batchCursorKey);
+    let jobCursor = null;
+    const seenJobCursors = /* @__PURE__ */ new Set();
+    let batchPage;
+    do {
+      const jobCursorKey = jobCursor ?? "";
+      if (seenJobCursors.has(jobCursorKey)) throw new Error("status job cursor loop");
+      seenJobCursors.add(jobCursorKey);
+      if (++calls > maxPages) throw new Error("status paging limit exceeded");
+      const page = await fetchPage({ cursor: batchCursor, jobCursor });
+      if (!page || page.schema_version !== 1 || !page.truncated) {
+        throw new Error("invalid status page");
+      }
+      first ??= page;
+      batchPage ??= page;
+      if (stableJson(page.batches) !== stableJson(batchPage.batches) || stableJson(page.gpus) !== stableJson(first.gpus)) {
+        throw new Error("status changed during paging");
+      }
+      for (const batch of page.batches ?? []) {
+        const previous = batches.get(batch.id);
+        if (previous && stableJson(previous) !== stableJson(batch)) {
+          throw new Error(`batch ${batch.id} changed during paging`);
+        }
+        batches.set(batch.id, batch);
+      }
+      for (const job of page.jobs ?? []) {
+        const previous = jobs.get(job.id);
+        if (previous && stableJson(previous) !== stableJson(job)) {
+          throw new Error(`job ${job.id} changed during paging`);
+        }
+        jobs.set(job.id, job);
+      }
+      jobCursor = page.truncated.jobs ? pageCursor(page.next_job_cursor, "status next_job_cursor") : null;
+      if (!page.truncated.jobs && page.next_job_cursor !== null) {
+        throw new Error("status next_job_cursor must be null on the final job page");
+      }
+    } while (jobCursor !== null);
+    batchCursor = batchPage.truncated.batches ? pageCursor(batchPage.next_cursor, "status next_cursor") : null;
+    if (!batchPage.truncated.batches && batchPage.next_cursor !== null) {
+      throw new Error("status next_cursor must be null on the final batch page");
+    }
+  } while (batchCursor !== null);
+  return {
+    ...first,
+    batches: [...batches.values()],
+    jobs: [...jobs.values()],
+    truncated: { batches: false, jobs: false },
+    next_cursor: null,
+    next_job_cursor: null,
+    loaded: { batches: batches.size, jobs: jobs.size }
+  };
+}
+async function collectHistoryPages(fetchPage, { maxPages = 100 } = {}) {
+  if (typeof fetchPage !== "function") throw new Error("history page loader is required");
+  const history = [];
+  const seen = /* @__PURE__ */ new Set();
+  let first;
+  let cursor = null;
+  for (let count = 0; count < maxPages; count += 1) {
+    const cursorKey = cursor ?? "";
+    if (seen.has(cursorKey)) throw new Error("history cursor loop");
+    seen.add(cursorKey);
+    const page = await fetchPage({ cursor });
+    if (!page || page.schema_version !== 1 || !Array.isArray(page.history) || typeof page.truncated !== "boolean") {
+      throw new Error("invalid history page");
+    }
+    first ??= page;
+    history.push(...page.history);
+    if (!page.truncated) {
+      if (page.next_cursor !== null) throw new Error("history next_cursor must be null on the final page");
+      return { ...first, history, truncated: false, next_cursor: null, loaded: history.length };
+    }
+    cursor = pageCursor(page.next_cursor, "history next_cursor");
+  }
+  throw new Error("history paging limit exceeded");
+}
+var PollGate = class {
+  constructor({ ttlMs, now = Date.now } = {}) {
+    if (!Number.isFinite(ttlMs) || ttlMs <= 0 || typeof now !== "function") {
+      throw new Error("poll gate requires a positive TTL and clock");
+    }
+    this.ttlMs = ttlMs;
+    this.now = now;
+    this.issued = 0;
+    this.accepted = 0;
+    this.value = null;
+    this.receivedAt = null;
+    this.error = null;
+  }
+  issue() {
+    this.issued += 1;
+    return this.issued;
+  }
+  succeed(sequence, value) {
+    if (sequence !== this.issued || sequence <= this.accepted) return false;
+    this.accepted = sequence;
+    this.value = value;
+    this.receivedAt = this.now();
+    this.error = null;
+    return true;
+  }
+  fail(sequence, error) {
+    if (sequence !== this.issued || sequence < this.accepted) return false;
+    this.accepted = sequence;
+    this.error = error instanceof Error ? error.message : String(error);
+    return true;
+  }
+  snapshot() {
+    if (!this.value) {
+      return this.error ? { ok: false, fresh: false, stale: false, lastError: this.error } : null;
+    }
+    const localAgeMs = Math.max(0, this.now() - this.receivedAt);
+    if (localAgeMs >= this.ttlMs) {
+      return {
+        ...this.value,
+        ok: false,
+        fresh: false,
+        stale: true,
+        ageMs: Math.max(Number(this.value.ageMs) || 0, localAgeMs),
+        lastError: "local snapshot TTL expired"
+      };
+    }
+    if (this.error) {
+      return { ...this.value, ok: false, fresh: false, stale: true, lastError: this.error };
+    }
+    return { ...this.value, localAgeMs };
+  }
+};
+
+// packages/node-sched-ui/src/client.jsx
 var ENTRY_ATTR = "data-dsh-sched-entry";
 var VIEW_ATTR = "data-dsh-sched-view";
 var ACTIVE_ATTR = "data-dsh-sched-active";
@@ -6382,12 +6837,12 @@ var COLORS = {
   active: T.ok,
   running: T.brand,
   assigned: "#3b82f6",
-  blocked: T.label2,
+  blocked: T.err,
   releasing: T.warn,
   failed: T.err,
   timed_out: T.err,
   unmanaged: T.err,
-  cancelled: T.label2,
+  cancelled: T.err,
   interrupted: T.err,
   pending: T.label2,
   waiting_dep: T.warn,
@@ -6514,6 +6969,7 @@ function apply(cctx, config) {
   const panelStyle = {
     flex: 1,
     minHeight: 0,
+    minWidth: 0,
     display: "flex",
     flexDirection: "column",
     gap: 8,
@@ -6528,8 +6984,41 @@ function apply(cctx, config) {
   const bar = (pct) => ({ height: 6, background: "rgba(127,127,127,.2)", borderRadius: 3, overflow: "hidden", flex: 1, margin: "0 8px", display: "flex" });
   const barFill = (pct) => ({ height: "100%", width: `${Math.max(0, Math.min(100, pct))}%`, background: T.brand });
   const Badge = ({ s }) => j("span", { style: badge(s) }, s);
+  const ACCESS_TOKEN_KEY = "node-sched:access-token";
+  const durableRequests = createIndexedDbRequestStore();
+  function accessToken() {
+    const stored = sessionStorage.getItem(ACCESS_TOKEN_KEY);
+    if (validAccessToken(stored)) return stored;
+    const entered = window.prompt(
+      "node-sched \u9700\u8981\u672C\u673A\u8BBF\u95EE\u4EE4\u724C\u3002\u8BF7\u7C98\u8D34 ~/.dsh/node-sched-access-token \u7684\u5185\u5BB9\uFF1A",
+      ""
+    );
+    const token = String(entered ?? "").trim();
+    if (!validAccessToken(token)) {
+      sessionStorage.removeItem(ACCESS_TOKEN_KEY);
+      throw new Error("\u672C\u673A\u8BBF\u95EE\u4EE4\u724C\u7F3A\u5931\u6216\u683C\u5F0F\u65E0\u6548");
+    }
+    sessionStorage.setItem(ACCESS_TOKEN_KEY, token);
+    return token;
+  }
+  async function authFetch(input, init = {}) {
+    const headers = new Headers(init.headers ?? {});
+    headers.set("authorization", `Bearer ${accessToken()}`);
+    const response = await globalThis.fetch(input, { ...init, headers });
+    if (response.status === 401) sessionStorage.removeItem(ACCESS_TOKEN_KEY);
+    return response;
+  }
+  function authenticatedWebSocket(url) {
+    return new WebSocket(url, ["sched-auth", accessToken()]);
+  }
+  async function mutationPayloadKey(action, payload) {
+    const bytes = new TextEncoder().encode(String(payload));
+    const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+    const hash = [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
+    return `${action}:${hash}`;
+  }
   async function post(action, body) {
-    const r = await fetch(`/sched/api/${action}`, {
+    const r = await authFetch(`/sched/api/${action}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body)
@@ -6547,7 +7036,7 @@ function apply(cctx, config) {
     return payload;
   }
   async function getText(action, params = "") {
-    const r = await fetch(`/sched/api/${action}${params}`);
+    const r = await authFetch(`/sched/api/${action}${params}`);
     return r.text();
   }
   function ArmButton({ label, confirmLabel, color, onConfirm, stopProp }) {
@@ -6588,8 +7077,11 @@ function apply(cctx, config) {
       j("button", { onClick: () => setTyped(""), style: ghostBtn }, "\xD7")
     ]);
   }
-  function useSchedStream() {
-    const [state, setState] = useState({ lines: [], connected: false });
+  function useSchedStream(visible) {
+    const [state, setState] = useState({ lines: [], connected: false, authQueue: [] });
+    const socketRef = useRef(null);
+    const visibleRef = useRef(Boolean(visible));
+    visibleRef.current = Boolean(visible);
     useEffect(() => {
       let ws;
       let closed = false;
@@ -6597,9 +7089,21 @@ function apply(cctx, config) {
       const connect = () => {
         if (closed) return;
         const proto = location.protocol === "https:" ? "wss://" : "ws://";
-        ws = new WebSocket(`${proto}${location.host}/sched/ws/events`);
+        try {
+          ws = authenticatedWebSocket(`${proto}${location.host}/sched/ws/events`);
+        } catch (error) {
+          setState((current) => ({
+            ...current,
+            connected: false,
+            lines: [...current.lines.slice(-400), String(error?.message ?? error)]
+          }));
+          return;
+        }
+        socketRef.current = ws;
         ws.onopen = () => {
-          if (!closed) setState((s) => ({ ...s, connected: true }));
+          if (closed) return;
+          setState((s) => ({ ...s, connected: true }));
+          ws.send(JSON.stringify(authAudienceFrame(visibleRef.current)));
         };
         ws.onmessage = (e) => {
           if (closed) return;
@@ -6611,11 +7115,15 @@ function apply(cctx, config) {
           }
           if (!m || typeof m !== "object") return;
           if (m.type === "log") setState((s) => ({ ...s, lines: [...s.lines.slice(-400), m.line] }));
-          else if (m.type === "kbdint") setState((s) => ({ ...s, kbdint: m }));
+          else if (m.type === "auth" || m.type === "auth-snapshot") setState((s) => ({
+            ...s,
+            authQueue: reduceAuthQueue(s.authQueue, m)
+          }));
         };
         ws.onclose = () => {
+          if (socketRef.current === ws) socketRef.current = null;
           if (closed) return;
-          setState((s) => ({ ...s, connected: false }));
+          setState((s) => ({ ...s, connected: false, authQueue: [] }));
           timer = setTimeout(connect, 3e3);
         };
       };
@@ -6623,22 +7131,78 @@ function apply(cctx, config) {
       return () => {
         closed = true;
         clearTimeout(timer);
+        if (socketRef.current === ws) socketRef.current = null;
         ws?.close();
       };
     }, []);
-    return [state];
+    useEffect(() => {
+      const ws = socketRef.current;
+      if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(authAudienceFrame(visible)));
+      }
+    }, [visible]);
+    const clearAuth = useCallback((id) => {
+      setState((s) => ({ ...s, authQueue: (s.authQueue ?? []).filter((req) => req.id !== id) }));
+    }, []);
+    return [state, clearAuth];
   }
   function useSnapshot(path, ms) {
+    const gateRef = useRef(null);
+    if (gateRef.current === null) {
+      gateRef.current = new PollGate({ ttlMs: Math.max(ms * 2, 3e4) });
+    }
+    const inFlightRef = useRef(null);
     const [data, setData] = useState(null);
     const refresh = useCallback(() => {
-      fetch(path).then((r) => r.json()).then(setData).catch(() => {
+      if (inFlightRef.current) return inFlightRef.current;
+      const gate = gateRef.current;
+      const sequence = gate.issue();
+      let firstEnvelope;
+      const request = collectStatusPages(async ({ cursor, jobCursor }) => {
+        const query = new URLSearchParams();
+        if (cursor !== null) query.set("cursor", cursor);
+        if (jobCursor !== null) query.set("job_cursor", jobCursor);
+        const suffix = query.size > 0 ? `?${query}` : "";
+        const response = await authFetch(`${path}${suffix}`);
+        const envelope = await response.json();
+        if (!response.ok || !envelope?.ok || !envelope.raw) {
+          throw new Error(envelope?.text || envelope?.lastError || `status HTTP ${response.status}`);
+        }
+        firstEnvelope ??= envelope;
+        return envelope.raw;
+      }).then((raw) => {
+        gate.succeed(sequence, {
+          ...firstEnvelope,
+          ok: true,
+          fresh: true,
+          stale: false,
+          raw
+        });
+      }, (error) => {
+        gate.fail(sequence, error);
+      }).finally(() => {
+        if (inFlightRef.current === request) inFlightRef.current = null;
+        setData(gate.snapshot());
       });
+      inFlightRef.current = request;
+      return request;
     }, [path]);
     useEffect(() => {
-      refresh();
-      const t = setInterval(refresh, ms);
-      return () => clearInterval(t);
-    }, [refresh]);
+      let alive = true;
+      const update = () => refresh().finally(() => {
+        if (alive) setData(gateRef.current.snapshot());
+      });
+      update();
+      const pollTimer = setInterval(update, ms);
+      const ttlTimer = setInterval(() => {
+        if (alive) setData(gateRef.current.snapshot());
+      }, Math.min(ms, 5e3));
+      return () => {
+        alive = false;
+        clearInterval(pollTimer);
+        clearInterval(ttlTimer);
+      };
+    }, [ms, refresh]);
     return [data, refresh];
   }
   function parseProgress(p) {
@@ -6680,35 +7244,65 @@ function apply(cctx, config) {
       ])
     ]);
   }
-  function KbdintModal({ req }) {
-    const [code, setCode] = useState("");
+  function AuthPromptModal({ req, onDone }) {
+    const [answers, setAnswers] = useState([]);
     const [busy, setBusy] = useState(false);
+    const [errorText, setErrorText] = useState("");
     const [dismissedId, setDismissedId] = useState(null);
+    const prompts = normalizeAuthPrompts(req);
     useEffect(() => {
-      setCode("");
+      setAnswers(prompts.map(() => ""));
       setBusy(false);
+      setErrorText("");
     }, [req?.id]);
     if (!req || dismissedId === req.id) return null;
     const sendAnswer = async (answer) => {
       if (busy) return;
       setBusy(true);
+      setErrorText("");
       try {
-        await fetch("/sched/ssh/2fa-answer", {
+        const response = await authFetch("/sched/ssh/auth-answer", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ id: req.id, answer })
         });
-      } catch {
+        const responseText = await response.text();
+        let body = {};
+        if (responseText) {
+          try {
+            body = JSON.parse(responseText);
+          } catch {
+            body = responseText;
+          }
+        }
+        if (!response.ok) {
+          setErrorText(authAnswerErrorText({
+            status: response.status,
+            statusText: response.statusText,
+            body
+          }));
+          setBusy(false);
+          return;
+        }
+        setDismissedId(req.id);
+        onDone?.(req.id);
+      } catch (cause) {
+        setErrorText(authAnswerErrorText({ cause }));
+        setBusy(false);
       }
-      setDismissedId(req.id);
     };
     const submit = async () => {
-      if (!code.trim() || busy) return;
-      await sendAnswer({ kind: "code", code: code.trim() });
+      if (busy) return;
+      await sendAnswer(buildAuthAnswer(prompts, answers));
     };
     const cancel = async () => {
       await sendAnswer({ kind: "cancel" });
     };
+    const setAnswer = (index, value) => {
+      setAnswers((current) => current.map((answer, i2) => i2 === index ? value : answer));
+    };
+    const methodLabel = req.method === "private-key-passphrase" ? "\u79C1\u94A5\u53E3\u4EE4" : req.method === "keyboard-interactive" ? "\u4EA4\u4E92\u5F0F\u8EAB\u4EFD\u9A8C\u8BC1" : String(req.method || "\u8EAB\u4EFD\u9A8C\u8BC1");
+    const instructions = req.instructions || req.instr;
     return j("div", { style: {
       position: "fixed",
       inset: 0,
@@ -6716,41 +7310,54 @@ function apply(cctx, config) {
       background: "rgba(0,0,0,.5)",
       display: "flex",
       alignItems: "center",
-      justifyContent: "center"
+      justifyContent: "center",
+      padding: 12,
+      boxSizing: "border-box"
     } }, [
       jsxs2("div", { style: {
         background: "var(--dsw-alias-bg-layer-1, var(--dsw-alias-bg-base, #fff))",
         border: `1px solid ${T.border2}`,
         borderRadius: 12,
         padding: 18,
-        width: "min(400px, 92vw)",
+        width: "min(480px, 100%)",
+        maxHeight: "90vh",
+        overflowY: "auto",
         display: "flex",
         flexDirection: "column",
         gap: 10,
         boxShadow: "0 18px 60px rgba(0,0,0,.45)",
         color: T.label,
-        fontFamily: T.font
+        fontFamily: T.font,
+        boxSizing: "border-box",
+        minWidth: 0
       } }, [
-        jsxs2("div", { style: { display: "flex", gap: 8, alignItems: "center" } }, [
-          j("b", { style: { fontSize: 14 } }, "SSH \u53CC\u56E0\u5B50\u9A8C\u8BC1"),
-          j("span", { style: { color: T.brand, fontWeight: 700, fontSize: 13 } }, req.alias)
+        jsxs2("div", { style: { display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap", minWidth: 0 } }, [
+          j("b", { style: { fontSize: 14 } }, `SSH ${methodLabel}`),
+          req.alias && j("span", { style: { color: T.brand, fontWeight: 700, fontSize: 13, overflowWrap: "anywhere" } }, req.alias)
         ]),
-        j(
-          "div",
-          { style: { fontSize: 13, color: T.label2 } },
-          `${req.prompt || "Verification code:"} \u2014\u2014 \u8BF7\u8F93\u5165\u9A8C\u8BC1\u5668 App \u5F53\u524D\u52A8\u6001\u7801`
-        ),
-        jsxs2("div", { style: { display: "flex", gap: 8 } }, [
+        req.name && j("div", { style: { fontSize: 12, color: T.label2, overflowWrap: "anywhere" } }, req.name),
+        instructions && j("div", { style: { fontSize: 13, color: T.label2, whiteSpace: "pre-wrap", overflowWrap: "anywhere" } }, instructions),
+        ...prompts.map((prompt, index) => jsxs2("label", {
+          key: prompt.id ?? index,
+          style: { display: "flex", flexDirection: "column", gap: 4, minWidth: 0 }
+        }, [
+          j(
+            "span",
+            { style: { fontSize: 13, color: T.label2, overflowWrap: "anywhere" } },
+            prompt.prompt || `Authentication response ${index + 1}`
+          ),
           j("input", {
-            autoFocus: true,
-            value: code,
-            onChange: (e) => setCode(e.target.value),
+            autoFocus: index === 0,
+            type: prompt.echo ? "text" : "password",
+            autoComplete: "off",
+            value: answers[index] ?? "",
+            onChange: (e) => setAnswer(index, e.target.value),
             onKeyDown: (e) => {
               if (e.key === "Enter") submit();
             },
-            placeholder: "\u52A8\u6001\u7801 / \u9A8C\u8BC1\u7801",
             style: {
-              flex: 1,
+              width: "100%",
+              boxSizing: "border-box",
               padding: "7px 10px",
               fontSize: 14,
               fontFamily: T.font,
@@ -6760,15 +7367,18 @@ function apply(cctx, config) {
               color: T.label,
               background: "var(--dsw-alias-bg-base)"
             }
-          }),
+          })
+        ])),
+        jsxs2("div", { style: { display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" } }, [
           j(
             "button",
-            { onClick: submit, disabled: !code.trim() || busy, style: btn(T.ok, !code.trim() || busy) },
+            { onClick: submit, disabled: busy, style: btn(T.ok, busy) },
             busy ? "\u63D0\u4EA4\u4E2D\u2026" : "\u786E\u8BA4"
           ),
           j("button", { onClick: cancel, disabled: busy, title: "\u653E\u5F03\u672C\u6B21\u8FDE\u63A5", style: { ...ghostBtn, flexShrink: 0 } }, "\u53D6\u6D88")
         ]),
-        j("div", { style: { fontSize: 13, color: T.label2 } }, "180 \u79D2\u5185\u672A\u63D0\u4EA4\u5C06\u81EA\u52A8\u653E\u5F03\u672C\u6B21\u8FDE\u63A5")
+        errorText && j("div", { role: "alert", style: { fontSize: 13, color: T.err, overflowWrap: "anywhere" } }, errorText),
+        j("div", { style: { fontSize: 13, color: T.label2, overflowWrap: "anywhere" } }, "180 \u79D2\u5185\u672A\u63D0\u4EA4\u5C06\u81EA\u52A8\u653E\u5F03\u672C\u6B21\u8FDE\u63A5")
       ])
     ]);
   }
@@ -6782,8 +7392,8 @@ function apply(cctx, config) {
     const load = useCallback(async () => {
       try {
         const [h, b] = await Promise.all([
-          fetch("/sched/ssh/hosts").then((r) => r.json()),
-          fetch("/sched/ssh/binding").then((r) => r.json())
+          authFetch("/sched/ssh/hosts").then((r) => r.json()),
+          authFetch("/sched/ssh/binding").then((r) => r.json())
         ]);
         setHosts(h.hosts ?? []);
         setBinding(b);
@@ -6797,7 +7407,7 @@ function apply(cctx, config) {
     const doBind = async (alias) => {
       setBusy("bind:" + alias);
       try {
-        const r = await fetch("/sched/ssh/bind", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ alias }) }).then((r2) => r2.json());
+        const r = await authFetch("/sched/ssh/bind", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ alias }) }).then((r2) => r2.json());
         if (r.ok) setMsg(`\u2705 ${alias} \u5DF2\u8BBE\u4E3A SCHED \u4E3B\u673A (${r.latencyMs}ms) \xB7 daemon: ${r.probeText || "?"}`);
         else setMsg(`\u7ED1\u5B9A\u5931\u8D25: ${r.error}`);
         await load();
@@ -6809,7 +7419,7 @@ function apply(cctx, config) {
     const doUnbind = async () => {
       setBusy("unbind");
       try {
-        await fetch("/sched/ssh/unbind", { method: "POST" });
+        await authFetch("/sched/ssh/unbind", { method: "POST" });
         setMsg(`\u5DF2\u89E3\u7ED1\uFF0C\u56DE\u5230 CLI \u6A21\u5F0F (sshEntry: ${binding?.sshEntry ?? "?"})`);
         await load();
       } catch (e) {
@@ -6820,7 +7430,7 @@ function apply(cctx, config) {
     const doImport = async () => {
       setBusy("import");
       try {
-        const r = await fetch("/sched/ssh/import", { method: "POST" }).then((r2) => r2.json());
+        const r = await authFetch("/sched/ssh/import", { method: "POST" }).then((r2) => r2.json());
         setMsg(r.result ? `\u5BFC\u5165\u5B8C\u6210: \u89E3\u6790 ${r.result.parsed} / \u65B0\u589E ${r.result.added} / \u8DF3\u8FC7 ${r.result.skipped}` : `\u5931\u8D25: ${r.error}`);
         await load();
       } catch (e) {
@@ -6831,7 +7441,7 @@ function apply(cctx, config) {
     const doTest = async (alias) => {
       setBusy("test:" + alias);
       try {
-        const r = await fetch("/sched/ssh/test", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ alias }) }).then((r2) => r2.json());
+        const r = await authFetch("/sched/ssh/test", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ alias }) }).then((r2) => r2.json());
         setMsg(r.ok ? `${alias}: ok (${r.latencyMs}ms)` : `${alias}: \u5931\u8D25 \u2014 ${r.error ?? "unreachable"}`);
       } catch (e) {
         setMsg("\u5931\u8D25: " + e.message);
@@ -6841,7 +7451,11 @@ function apply(cctx, config) {
     const doDelete = async (alias) => {
       setBusy("del:" + alias);
       try {
-        const response = await fetch(`/sched/ssh/hosts?alias=${encodeURIComponent(alias)}`, { method: "DELETE" });
+        const response = await authFetch("/sched/ssh/hosts", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ action: "delete", alias })
+        });
         const result = await response.json().catch(() => ({}));
         if (!response.ok || result.removed === false) {
           setMsg(`\u5931\u8D25: ${result.error ?? `HTTP ${response.status}`}`);
@@ -6851,6 +7465,40 @@ function apply(cctx, config) {
         await load();
       } catch (e) {
         setMsg("\u5931\u8D25: " + e.message);
+      } finally {
+        setBusy("");
+      }
+    };
+    const doPin = async (host) => {
+      const entered = window.prompt(
+        `\u7C98\u8D34 ${host.alias} \u7684 OpenSSH SHA256 host key \u6307\u7EB9\uFF1A`,
+        host.hostKey ?? "SHA256:"
+      );
+      if (entered === null) return;
+      const hostKey = entered.trim();
+      if (!validHostKey(hostKey)) {
+        setMsg("\u5931\u8D25: host pin \u5FC5\u987B\u662F OpenSSH SHA256: \u52A0 43 \u4F4D base64 \u6307\u7EB9");
+        return;
+      }
+      setBusy("pin:" + host.alias);
+      try {
+        const response = await authFetch("/sched/ssh/hosts", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            action: "update",
+            alias: host.alias,
+            patch: { hostKey }
+          })
+        });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok || !result.host) {
+          throw new Error(result.error ?? `HTTP ${response.status}`);
+        }
+        setMsg(`\u2705 ${host.alias} host key \u5DF2\u56FA\u5B9A`);
+        await load();
+      } catch (error) {
+        setMsg("\u5931\u8D25: " + error.message);
       } finally {
         setBusy("");
       }
@@ -6916,20 +7564,38 @@ function apply(cctx, config) {
               `:${h.port}`,
               h.auth === "key" ? h.keyReady ? " \xB7 \u{1F511}" : " \xB7 \u26A0key\u7F3A\u5931" : h.auth === "agent" ? " \xB7 agent" : " \xB7 \u5BC6\u7801",
               h.proxyJump && h.proxyJump.length > 0 ? ` \xB7 via ${h.proxyJump.join(">")}` : "",
-              h.description ? ` \xB7 ${h.description}` : ""
+              h.description ? ` \xB7 ${h.description}` : "",
+              h.hostKeyReady ? " \xB7 host\u2713" : " \xB7 \u26A0host pin\u7F3A\u5931"
             ].join("")),
             // 右：操作区
-            localMode || boundHere ? j("span", { key: "sb", style: { color: localMode ? T.brand : T.ok, fontWeight: 700, fontSize: 13, flexShrink: 0 } }, localMode ? "\u672C\u5730\u8FD0\u884C" : "\u2714 \u6570\u636E\u6E90") : j(
-              "button",
-              { key: "bnd", onClick: () => doBind(h.alias), disabled: !!busy, title: "\u8BBE\u4E3A sched \u6570\u636E\u6E90\u4E3B\u673A\uFF08\u5F15\u64CE\u6A21\u5F0F\uFF0C\u770B\u677F\u6570\u636E\u76F4\u8FDE\u8BE5\u673A\uFF09", style: { ...ghostBtn, color: T.brand, borderColor: `color-mix(in srgb, ${T.brand} 45%, transparent)`, flexShrink: 0 } },
-              busy === "bind:" + h.alias ? "\u7ED1\u5B9A\u4E2D\u2026" : "\u8BBE\u4E3ASCHED"
-            ),
-            j("button", { key: "o", onClick: () => setTermAlias(h.alias), title: "\u6253\u5F00\u7F51\u9875\u7EC8\u7AEF", style: { ...ghostBtn, flexShrink: 0 } }, "\u7EC8\u7AEF"),
-            confirmAlias === h.alias ? j("button", { key: "c", onClick: () => doDelete(h.alias), style: { ...btn(T.err), flexShrink: 0 } }, "\u786E\u8BA4\u5220\u9664") : j(
-              "button",
-              { key: "t", onClick: () => doTest(h.alias), disabled: !!busy, title: "\u8FDE\u901A\u6027\u6D4B\u8BD5", style: { ...ghostBtn, flexShrink: 0 } },
-              busy === "test:" + h.alias ? "\u2026" : "\u6D4B\u8BD5"
-            ),
+            localMode || boundHere ? j("span", { key: "sb", style: { color: localMode ? T.brand : T.ok, fontWeight: 700, fontSize: 13, flexShrink: 0 } }, localMode ? "\u672C\u5730\u8FD0\u884C" : "\u2714 \u6570\u636E\u6E90") : j("button", {
+              key: "bnd",
+              onClick: () => doBind(h.alias),
+              disabled: !!busy || !h.hostKeyReady,
+              title: h.hostKeyReady ? "\u8BBE\u4E3A sched \u6570\u636E\u6E90\u4E3B\u673A\uFF08\u5F15\u64CE\u6A21\u5F0F\uFF09" : "\u5148\u8BBE\u7F6E host pin",
+              style: { ...ghostBtn, color: T.brand, borderColor: `color-mix(in srgb, ${T.brand} 45%, transparent)`, flexShrink: 0, opacity: h.hostKeyReady ? 1 : 0.5 }
+            }, busy === "bind:" + h.alias ? "\u7ED1\u5B9A\u4E2D\u2026" : "\u8BBE\u4E3ASCHED"),
+            j("button", {
+              key: "pin",
+              onClick: () => doPin(h),
+              disabled: !!busy,
+              title: "\u56FA\u5B9A OpenSSH SHA256 host key \u6307\u7EB9\uFF1B\u672A\u56FA\u5B9A\u65F6\u62D2\u7EDD\u8FDE\u63A5",
+              style: { ...ghostBtn, color: h.hostKeyReady ? T.label2 : T.warn, flexShrink: 0 }
+            }, busy === "pin:" + h.alias ? "\u2026" : h.hostKeyReady ? "\u66F4\u65B0pin" : "\u8BBE\u7F6Epin"),
+            j("button", {
+              key: "o",
+              onClick: () => setTermAlias(h.alias),
+              disabled: !h.hostKeyReady,
+              title: h.hostKeyReady ? "\u6253\u5F00\u7F51\u9875\u7EC8\u7AEF" : "\u5148\u8BBE\u7F6E host pin",
+              style: { ...ghostBtn, flexShrink: 0, opacity: h.hostKeyReady ? 1 : 0.5 }
+            }, "\u7EC8\u7AEF"),
+            confirmAlias === h.alias ? j("button", { key: "c", onClick: () => doDelete(h.alias), style: { ...btn(T.err), flexShrink: 0 } }, "\u786E\u8BA4\u5220\u9664") : j("button", {
+              key: "t",
+              onClick: () => doTest(h.alias),
+              disabled: !!busy || !h.hostKeyReady,
+              title: h.hostKeyReady ? "\u8FDE\u901A\u6027\u6D4B\u8BD5" : "\u5148\u8BBE\u7F6E host pin",
+              style: { ...ghostBtn, flexShrink: 0, opacity: h.hostKeyReady ? 1 : 0.5 }
+            }, busy === "test:" + h.alias ? "\u2026" : "\u6D4B\u8BD5"),
             confirmAlias === h.alias ? j("button", { key: "x", onClick: () => setConfirmAlias(null), style: { ...ghostBtn, flexShrink: 0 } }, "\u53D6\u6D88") : j("button", { key: "d", onClick: () => setConfirmAlias(h.alias), disabled: !!busy, title: "\u5220\u9664\u8BE5\u4E3B\u673A\u914D\u7F6E", style: { ...ghostBtn, color: T.err, flexShrink: 0 } }, "\u5220")
           ]);
         })
@@ -6967,7 +7633,7 @@ function apply(cctx, config) {
         }
         term.writeln(`\x1B[90m\u8FDE\u63A5 ${alias} \u2026\x1B[0m`);
         const proto = location.protocol === "https:" ? "wss://" : "ws://";
-        ws = new WebSocket(`${proto}${location.host}/sched/ws/ssh-terminal?alias=${encodeURIComponent(alias)}&cols=${term.cols}&rows=${term.rows}`);
+        ws = authenticatedWebSocket(`${proto}${location.host}/sched/ws/ssh-terminal?alias=${encodeURIComponent(alias)}&cols=${term.cols}&rows=${term.rows}`);
         ws.onmessage = (ev) => {
           let frame;
           try {
@@ -7036,21 +7702,9 @@ function apply(cctx, config) {
     gap: "0 12px",
     alignItems: "center"
   };
-  function taskSegments(tasks) {
-    const seg = { bad: 0, ok: 0, run: 0, off: 0 };
-    for (const t of tasks) {
-      if (["failed", "timed_out"].includes(t.status)) seg.bad++;
-      else if (["done", "skip"].includes(t.status)) seg.ok++;
-      else if (t.status === "running") seg.run++;
-      else seg.off++;
-    }
-    return seg;
-  }
-  const SEG_COLOR = { bad: "#ef4444", ok: "#22c55e", run: "#3b82f6", off: "#9ca3af" };
   const SEG_MAX_VISIBLE = 30;
   function TaskSegments({ tasks }) {
     if (!tasks || !tasks.length) return null;
-    const colorOf = (st) => ["failed", "timed_out"].includes(st) ? SEG_COLOR.bad : ["done", "skip"].includes(st) ? SEG_COLOR.ok : st === "running" ? SEG_COLOR.run : SEG_COLOR.off;
     const shown = Math.min(tasks.length, SEG_MAX_VISIBLE);
     return jsxs2("span", { style: {
       display: "flex",
@@ -7067,7 +7721,7 @@ function apply(cctx, config) {
           width: 18,
           height: 15,
           borderRadius: 3,
-          background: colorOf(t.status),
+          background: COLORS[t.status] ?? T.label2,
           display: "inline-block",
           cursor: "default"
         }
@@ -7079,11 +7733,16 @@ function apply(cctx, config) {
   }
   function BatchRow({ b, jobsAll, runOp, setLogTask }) {
     const [open, setOpen] = useState(false);
-    const tasks = (jobsAll ?? []).filter(
-      (x) => x.batch === b.id
-    );
-    const failedTasks = tasks.filter((x) => ["failed", "timed_out", "cancelled"].includes(x.status));
-    const seg = taskSegments(tasks);
+    const tasks = jobsForBatch(jobsAll, b.id);
+    const cancelRequest = batchCancelRequest(b);
+    const failures = [];
+    for (const task of tasks) {
+      const reference = taskReference(task);
+      const contract = taskStatusContract(task.status);
+      if (reference && contract.category === "failure") {
+        failures.push({ task, reference, contract });
+      }
+    }
     return jsxs2("div", { style: { marginBottom: 10 } }, [
       jsxs2("div", { style: { ...GRID, alignItems: "start" }, onClick: () => setOpen(!open) }, [
         j("span", { style: { textAlign: "center", cursor: "pointer", lineHeight: "15px" } }, Badge({ s: b.status })),
@@ -7096,41 +7755,59 @@ function apply(cctx, config) {
         ]),
         j(TaskSegments, { tasks }),
         j("span", { style: { fontSize: 12.5, color: T.label2, textAlign: "right", lineHeight: "15px" } }, b.progress ?? ""),
-        j(ArmButton, {
+        cancelRequest && j(ArmButton, {
           label: "cancel",
           confirmLabel: "cancel(\u53D6\u6D88\u4EFB\u52A1!)",
           color: T.err,
           stopProp: true,
-          onConfirm: () => runOp("cancel", b.name)
+          onConfirm: () => runOp(cancelRequest.op, b)
         })
       ]),
       open && jsxs2("div", { style: { marginTop: 6, marginLeft: 76, paddingLeft: 10, borderLeft: `2px solid ${T.border}` } }, [
         b.depends_on?.length > 0 && j("div", { style: { fontSize: 12, color: T.label2 } }, `\u4F9D\u8D56: ${b.depends_on.join(", ")}`),
-        ...tasks.filter((t) => ["failed", "timed_out", "cancelled"].includes(t.status)).map((t) => jsxs2("div", { key: `${t.batch}:${t.task}`, style: { fontSize: 13, marginLeft: 14, marginTop: 2, display: "flex", alignItems: "center" } }, [
-          j("span", { style: { fontFamily: "monospace", cursor: "pointer", textDecoration: "underline", marginRight: 6 }, onClick: () => setLogTask(`${t.batch}:${t.task}`), title: "\u67E5\u770B\u65E5\u5FD7" }, t.task),
-          Badge({ s: t.status }),
-          t.retries != null && j("span", { style: { color: T.label2, marginRight: 4 } }, `retries=${t.retries}`),
+        ...failures.map(({ task, reference, contract }) => jsxs2("div", { key: reference, style: { fontSize: 13, marginLeft: 14, marginTop: 2, display: "flex", alignItems: "center" } }, [
+          contract.controls.includes("log") && j("span", {
+            style: { fontFamily: "monospace", cursor: "pointer", textDecoration: "underline", marginRight: 6 },
+            onClick: () => setLogTask(reference),
+            title: "\u67E5\u770B\u65E5\u5FD7"
+          }, task.task),
+          Badge({ s: task.status }),
+          task.retries != null && j("span", { style: { color: T.label2, marginRight: 4 } }, `retries=${task.retries}`),
           j("span", { style: { flex: 1 } }),
-          j("button", { onClick: () => runOp("retry", `${t.batch}:${t.task}`), style: btn(T.brand) }, "retry"),
-          j(ArmButton, { label: "resubmit", confirmLabel: "resubmit(\u5220\u4EA7\u7269!)", color: T.warn, onConfirm: () => runOp("resubmit", `${t.batch}:${t.task}`) })
+          contract.controls.includes("retry") && j("button", {
+            onClick: () => runOp("retry", { ...task, revision: b.revision }),
+            style: btn(T.brand)
+          }, "retry"),
+          contract.controls.includes("resubmit") && j(ArmButton, {
+            label: "resubmit",
+            confirmLabel: "resubmit(\u5220\u4EA7\u7269!)",
+            color: T.warn,
+            onConfirm: () => runOp("resubmit", { ...task, revision: b.revision })
+          })
         ]))
       ])
     ]);
   }
   function GpuRow({ g, runOp }) {
+    const assignmentText = (g.assignments ?? []).map((assignment) => `${assignment.job_id}${assignment.vram_gib === null ? "" : ` (${assignment.vram_gib} GiB)`}`).join(", ");
     return jsxs2("div", { style: { marginBottom: 6, display: "flex", alignItems: "center" } }, [
       Badge({ s: g.status }),
-      j("span", { style: { fontFamily: "monospace", marginRight: 8 } }, `GPU${g.idx}`),
-      g.job && j("span", { style: { fontSize: 12, marginRight: 8, color: T.label2, flex: 1 } }, g.job),
+      j("span", {
+        style: { fontFamily: "monospace", marginRight: 8 },
+        title: `revision ${g.revision}`
+      }, `GPU${g.idx}`),
+      assignmentText && j("span", {
+        style: { fontSize: 12, marginRight: 8, color: T.label2, flex: 1 }
+      }, assignmentText),
       g.quarantined && j("span", { style: { color: T.err, marginRight: 8, fontSize: 12 } }, "[quarantined]"),
-      !g.job && g.status === "free" && j("span", { style: { flex: 1 } }),
+      !assignmentText && g.status === "free" && j("span", { style: { flex: 1 } }),
       g.status === "unmanaged" && j(ArmButton, {
         label: "gpu-free \u5F3A\u5236\u56DE\u6536",
         confirmLabel: "\u786E\u8BA4\u56DE\u6536?",
         color: T.warn,
-        onConfirm: () => runOp("gpu-free", String(g.idx))
+        onConfirm: () => runOp("gpu-free", g)
       }),
-      g.quarantined && j("button", { onClick: () => runOp("gpu-ok", String(g.idx)), style: btn(T.ok) }, "gpu-ok \u89E3\u9664\u9694\u79BB")
+      g.quarantined && j("button", { onClick: () => runOp("gpu-ok", g), style: btn(T.ok) }, "gpu-ok \u89E3\u9664\u9694\u79BB")
     ]);
   }
   function DaemonBar({ runOp }) {
@@ -7140,14 +7817,14 @@ function apply(cctx, config) {
     const [channel, setChannel] = useState(null);
     const load = useCallback(() => {
       setQuerying(true);
-      fetch("/sched/api/daemon").then((r) => r.json()).then((d) => {
+      authFetch("/sched/api/daemon").then((r) => r.json()).then((d) => {
         if (d.ok) setStatus(d.text);
         else setStatus((prev) => prev ?? "\u67E5\u8BE2\u5931\u8D25: " + String(d.text ?? "").slice(0, 80));
         setQuerying(false);
       }).catch(() => {
         setQuerying(false);
       });
-      fetch("/sched/api/entry").then((r) => r.json()).then(setChannel).catch(() => {
+      authFetch("/sched/api/entry").then((r) => r.json()).then(setChannel).catch(() => {
       });
     }, []);
     useEffect(() => {
@@ -7185,7 +7862,7 @@ function apply(cctx, config) {
       // B14: 状态联动 —— 运行中禁用 start, 未运行禁用 stop
       ...status === null ? [j("span", { key: "dw", style: btn(T.label2, true) }, "\u2026")] : [
         running ? j("button", { key: "s", disabled: true, title: "\u5DF2\u5728\u8FD0\u884C", style: btn(T.ok, true) }, "start") : j("button", { key: "s", onClick: async () => {
-          await runOp("daemon-start");
+          await runOp("daemon-start", null);
           setTimeout(load, 3e3);
         }, style: btn(T.ok) }, "start"),
         running ? !confirmStop && j("button", { key: "x", onClick: () => setConfirmStop(true), style: btn(T.err) }, "stop") : j("button", { key: "x", disabled: true, title: "\u672A\u8FD0\u884C", style: btn(T.err, true) }, "stop")
@@ -7194,7 +7871,7 @@ function apply(cctx, config) {
         placeholder: "\u8F93\u5165 stop \u786E\u8BA4\uFF08\u4F1A\u53D6\u6D88\u672A\u5B8C\u6210\u4EFB\u52A1\uFF09",
         color: T.err,
         onConfirm: async () => {
-          await runOp("daemon-stop");
+          await runOp("daemon-stop", null);
           setConfirmStop(false);
         }
       }, "\u786E\u8BA4 stop")
@@ -7219,7 +7896,7 @@ function apply(cctx, config) {
       setDetailT({ id, loading: true });
       INC_OPEN_ID = id;
       try {
-        const r = await fetch(`/sched/api/incidents?id=${id}`);
+        const r = await authFetch(`/sched/api/incidents?id=${id}`);
         const d = await r.json();
         if (!r.ok || !d?.ok) {
           throw new Error(String(d?.text || `HTTP ${r.status}`).slice(0, 240));
@@ -7243,7 +7920,7 @@ function apply(cctx, config) {
     }, []);
     const load = useCallback(async () => {
       try {
-        const r = await fetch("/sched/api/incidents?limit=30");
+        const r = await authFetch("/sched/api/incidents?limit=30");
         const d = await r.json();
         if (!d.ok) {
           setMsg("\u274C " + (d.text || "").slice(0, 120));
@@ -7265,7 +7942,7 @@ function apply(cctx, config) {
     const p = detail && !detail.loading && !detail.error ? detail.payload || {} : null;
     const failed = p ? p.failed || {} : {};
     const mem = p ? p.memory || {} : {};
-    return jsxs2("div", { style: { fontSize: 13 } }, [
+    return jsxs2("div", { style: { fontSize: 13, minWidth: 0, width: "100%" } }, [
       jsxs2("div", { style: {
         display: "flex",
         alignItems: "center",
@@ -7274,22 +7951,26 @@ function apply(cctx, config) {
         padding: "5px 8px",
         borderRadius: 6,
         background: T.bgLayer,
-        border: `1px solid ${T.border}`
+        border: `1px solid ${T.border}`,
+        flexWrap: "wrap",
+        minWidth: 0,
+        width: "100%",
+        boxSizing: "border-box"
       } }, [
         j("span", { style: { color: T.warn } }, "\u23F8 \u51BB\u7ED3"),
         j(
           "span",
-          { style: { color: T.label2 } },
+          { style: { color: T.label2, minWidth: 0, flex: "1 1 220px", overflowWrap: "anywhere" } },
           `\u5FEB\u7167\u65F6\u95F4 ${frozenAt || "\u2026"} \u2014\u2014 \u9605\u8BFB\u671F\u95F4\u5185\u5BB9\u4E0D\u53D8\u3002`
         ),
-        j("button", { onClick: () => load(), style: btn(T.brand) }, "\u5237\u65B0")
+        j("button", { onClick: () => load(), style: { ...btn(T.brand), flexShrink: 0 } }, "\u5237\u65B0")
       ]),
       list.length === 0 && j(
         "div",
         { style: { color: T.label2 } },
         "\u6682\u65E0\u4E8B\u6545\u5FEB\u7167 (OOM/gpu_fault \u53D1\u751F\u65F6\u81EA\u52A8\u91C7\u96C6)"
       ),
-      list.map((r) => jsxs2("div", { key: r.id }, [
+      list.map((r) => jsxs2("div", { key: r.id, style: { minWidth: 0, width: "100%" } }, [
         jsxs2("div", {
           key: "row",
           onClick: () => {
@@ -7307,25 +7988,38 @@ function apply(cctx, config) {
             padding: "4px 6px",
             cursor: "pointer",
             borderRadius: 4,
-            background: detail && detail.id === r.id ? T.bgLayer : "transparent"
+            background: detail && detail.id === r.id ? T.bgLayer : "transparent",
+            flexWrap: "wrap",
+            minWidth: 0,
+            width: "100%",
+            boxSizing: "border-box"
           }
         }, [
-          j("span", { style: { width: 30, flexShrink: 0, color: T.label2 } }, "#" + r.id),
-          j("span", { style: { width: 130, flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: T.label } }, r.ts),
-          j("span", { style: { width: 70, flexShrink: 0, color: r.kind === "oom" ? T.err : T.warn } }, r.kind),
-          j("span", { style: { width: 36, flexShrink: 0 } }, "gpu" + (r.gpu_idx ?? "-")),
-          j("span", { style: { flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, r.job_id)
+          j("span", { style: { flex: "0 0 30px", width: 30, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: T.label2 } }, "#" + r.id),
+          j("span", { style: { flex: "0 1 130px", width: 130, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: T.label } }, r.ts),
+          j("span", { style: { flex: "0 0 70px", width: 70, minWidth: 0, color: r.kind === "oom" ? T.err : T.warn } }, r.kind),
+          j("span", { style: { flex: "0 0 36px", width: 36 } }, "gpu" + (r.gpu_idx ?? "-")),
+          j("span", { style: { flex: "1 1 180px", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", overflowWrap: "anywhere" } }, r.job_id)
         ]),
-        detail && detail.id === r.id && detail.loading && j("div", { key: "detail-loading", style: { color: T.label2, padding: 8, margin: "2px 0 6px 38px" } }, "\u52A0\u8F7D\u4E8B\u6545\u8BE6\u60C5\u2026"),
-        detail && detail.id === r.id && detail.error && j("div", { key: "detail-error", style: { color: T.err, padding: 8, margin: "2px 0 6px 38px" } }, `\u8BE6\u60C5\u52A0\u8F7D\u5931\u8D25: ${detail.error}`),
+        detail && detail.id === r.id && detail.loading && j("div", { key: "detail-loading", style: { color: T.label2, padding: 8, margin: "2px 0 6px clamp(0px, 38px, 10vw)", minWidth: 0, maxWidth: "100%", boxSizing: "border-box", overflowWrap: "anywhere" } }, "\u52A0\u8F7D\u4E8B\u6545\u8BE6\u60C5\u2026"),
+        detail && detail.id === r.id && detail.error && j("div", { key: "detail-error", style: { color: T.err, padding: 8, margin: "2px 0 6px clamp(0px, 38px, 10vw)", minWidth: 0, maxWidth: "100%", boxSizing: "border-box", overflowWrap: "anywhere" } }, `\u8BE6\u60C5\u52A0\u8F7D\u5931\u8D25: ${detail.error}`),
         detail && detail.id === r.id && !detail.loading && !detail.error && jsxs2("div", {
           key: "detail",
-          style: { border: `1px solid ${T.border}`, borderRadius: 6, padding: 8, margin: "2px 0 6px 38px" }
+          style: {
+            border: `1px solid ${T.border}`,
+            borderRadius: 6,
+            padding: 8,
+            margin: "2px 0 6px clamp(0px, 38px, 10vw)",
+            minWidth: 0,
+            maxWidth: "100%",
+            boxSizing: "border-box",
+            overflowWrap: "anywhere"
+          }
         }, [
-          jsxs2("div", { style: { marginBottom: 4 } }, [
+          jsxs2("div", { style: { marginBottom: 4, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", minWidth: 0 } }, [
             j(
               "span",
-              { style: { fontWeight: 600, color: T.brand } },
+              { style: { fontWeight: 600, color: T.brand, minWidth: 0, overflowWrap: "anywhere" } },
               `#${detail.id} ${detail.kind} @ gpu${detail.gpu_idx ?? "-"}`
             ),
             j("button", {
@@ -7335,44 +8029,44 @@ function apply(cctx, config) {
                 setDetailT(null);
                 INC_OPEN_ID = null;
               },
-              style: { ...ghostBtn, marginLeft: 8 }
+              style: { ...ghostBtn, marginLeft: 0, flexShrink: 0 }
             }, "\u6536\u8D77")
           ]),
           j(
             "div",
-            { style: { color: T.label2, fontSize: 12, marginBottom: 4 } },
+            { style: { color: T.label2, fontSize: 12, marginBottom: 4, minWidth: 0, overflowWrap: "anywhere" } },
             `${detail.ts} \xB7 job ${detail.job_id} \xB7 batch ${detail.batch_id}`
           ),
           failed.dispatch_mode && j(
             "div",
-            { style: { wordBreak: "break-word", lineHeight: 1.5 } },
+            { style: { wordBreak: "break-word", overflowWrap: "anywhere", lineHeight: 1.5 } },
             `\u6D3E\u53D1\u65B9\u5F0F: ${failed.dispatch_mode} \xB7 \u58F0\u660E ${failed.declared_vram_gib ?? "-"} GiB \xB7 \u5386\u53F2\u5CF0\u503C ${failed.profile_peak_gib ?? "-"}`
           ),
           mem.packed_sum_gib !== void 0 && j(
             "div",
-            { style: { wordBreak: "break-word", lineHeight: 1.5 } },
+            { style: { wordBreak: "break-word", overflowWrap: "anywhere", lineHeight: 1.5 } },
             `\u663E\u5B58: cap=${mem.cap_gib ?? "?"} packed=${mem.packed_sum_gib} actual=${mem.actual_used_gib ?? "?"}${mem.degraded ? " [\u964D\u7EA7]" : ""}`
           ),
           (mem.external_pids || []).length > 0 && jsxs2(
             "div",
-            { style: { color: T.warn } },
+            { style: { color: T.warn, minWidth: 0, overflowWrap: "anywhere" } },
             ["\u5916\u90E8\u8FDB\u7A0B: ", ...(mem.external_pids || []).map((e) => j("span", { key: e.pid }, `pid${e.pid}(${e.mem_mib ?? "?"}MiB) `))]
           ),
-          (p.co_runners || []).length > 0 && jsxs2("div", {}, [
+          (p.co_runners || []).length > 0 && jsxs2("div", { style: { minWidth: 0, overflowWrap: "anywhere" } }, [
             j("div", { style: { color: T.label2, marginTop: 4 } }, "\u540C\u5361\u90BB\u5C45:"),
             ...p.co_runners.map((c) => j(
               "div",
-              { key: c.job_id, style: { paddingLeft: 10 } },
+              { key: c.job_id, style: { paddingLeft: 10, minWidth: 0, overflowWrap: "anywhere" } },
               `${c.task} [${c.status}] declared=${c.declared_vram_gib} peak=${c.profile_peak_gib} runtime=${c.runtime_sec}s`
             ))
           ]),
-          (detail.verdicts || []).length > 0 && jsxs2("div", { style: { marginTop: 6 } }, [
+          (detail.verdicts || []).length > 0 && jsxs2("div", { style: { marginTop: 6, minWidth: 0, overflowWrap: "anywhere" } }, [
             j("div", { style: { color: T.warn, fontWeight: 600 } }, "\u5224\u8BFB\u5047\u8BBE:"),
-            ...detail.verdicts.map((v, i2) => j("div", { key: i2, style: { color: T.warn, paddingLeft: 10 } }, "? " + v))
+            ...detail.verdicts.map((v, i2) => j("div", { key: i2, style: { color: T.warn, paddingLeft: 10, minWidth: 0, overflowWrap: "anywhere" } }, "? " + v))
           ]),
-          p.log_excerpt && jsxs2("div", {}, [
+          p.log_excerpt && jsxs2("div", { style: { minWidth: 0 } }, [
             j("div", { style: { color: T.label2, marginTop: 6 } }, "\u65E5\u5FD7\u6458\u5F55:"),
-            j("pre", { style: { ...pre, maxHeight: 120, overflow: "auto", margin: "2px 0" } }, p.log_excerpt)
+            j("pre", { style: { ...pre, maxHeight: 120, minWidth: 0, overflow: "auto", margin: "2px 0" } }, p.log_excerpt)
           ])
         ])
       ])),
@@ -7386,7 +8080,7 @@ function apply(cctx, config) {
     const [msg, setMsg] = useState("");
     const [advanced, setAdvanced] = useState(false);
     const load = useCallback(() => {
-      fetch("/sched/api/config").then((r) => r.json()).then((d) => {
+      authFetch("/sched/api/config").then((r) => r.json()).then((d) => {
         if (!d.ok) {
           setMsg("\u274C \u52A0\u8F7D\u5931\u8D25: " + (d.text || "").slice(0, 120));
           return;
@@ -7399,7 +8093,7 @@ function apply(cctx, config) {
       }).catch(() => setMsg("\u274C \u52A0\u8F7D\u5F02\u5E38"));
     }, []);
     useEffect(() => {
-      fetch("/sched/api/client-log", {
+      authFetch("/sched/api/client-log", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ kind: "lifecycle", detail: "config-mount ts=" + (/* @__PURE__ */ new Date()).toISOString() + " cache=" + (CFG_CACHE ? "hit" : "miss"), ts: (/* @__PURE__ */ new Date()).toISOString() })
@@ -7415,17 +8109,24 @@ function apply(cctx, config) {
     });
     async function save(patch) {
       setMsg("\u4FDD\u5B58\u4E2D\u2026");
+      const payload = JSON.stringify(patch);
+      let requestKey;
       try {
-        const r = await fetch("/sched/api/config/set", {
+        requestKey = await mutationPayloadKey("config-set", payload);
+        const requestId = await durableRequests.claim(requestKey);
+        const response = await authFetch("/sched/api/config/set", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ patch })
+          body: JSON.stringify({ patch, requestId })
         });
-        const d = await r.json();
-        setMsg((d.ok ? "\u2705 " : "\u274C ") + (d.text || "").split("\n")[0]);
-        if (d.ok) load();
-      } catch (e) {
-        setMsg("\u274C " + e);
+        const result = await response.json();
+        if (mutationResultIsDefinitive(result)) {
+          await durableRequests.complete(requestKey, requestId);
+        }
+        setMsg((result.ok ? "\u2705 " : "\u274C ") + (result.text || "").split("\n")[0]);
+        if (result.ok) load();
+      } catch (error) {
+        setMsg("\u274C " + error);
       }
     }
     const numInput = (value, onChange, style) => j("input", {
@@ -7599,6 +8300,26 @@ function apply(cctx, config) {
     const [text, setText] = useState("");
     const [preview, setPreview] = useState(null);
     const [msg, setMsg] = useState("");
+    const [projectNames, setProjectNames] = useState(["default"]);
+    const [selectedProject, setSelectedProject] = useState("default");
+    useEffect(() => {
+      let alive = true;
+      const applyConfig = (cfg) => {
+        const names = configuredProjectNames(cfg);
+        if (!alive || names.length === 0) return;
+        setProjectNames(names);
+        setSelectedProject((current) => names.includes(current) ? current : names[0]);
+      };
+      if (CFG_CACHE?.cfg) applyConfig(CFG_CACHE.cfg);
+      authFetch("/sched/api/config").then((response) => response.json()).then((payload) => {
+        if (!payload?.ok || typeof payload.text !== "string") return;
+        applyConfig(JSON.parse(payload.text));
+      }).catch(() => {
+      });
+      return () => {
+        alive = false;
+      };
+    }, []);
     const doDryRun = async () => {
       setPreview(null);
       setMsg("dry-run \u4E2D\u2026");
@@ -7613,23 +8334,38 @@ function apply(cctx, config) {
     const doSubmit = async () => {
       setMsg("\u63D0\u4EA4\u4E2D\u2026");
       try {
-        const r = await post2("submit", { content: text });
-        setMsg(r.ok ? `\u5DF2\u63D0\u4EA4\uFF1A${String(r.text).slice(0, 160)}` : `\u5931\u8D25\uFF1A${String(r.text).slice(0, 160)}`);
-        if (r.ok) {
+        const requestKey = await mutationPayloadKey("submit", text);
+        const requestId = await durableRequests.claim(requestKey);
+        const result = await post2("submit", { content: text, requestId });
+        if (mutationResultIsDefinitive(result)) {
+          await durableRequests.complete(requestKey, requestId);
+        }
+        setMsg(
+          result.ok ? `\u5DF2\u63D0\u4EA4\uFF1A${String(result.text).slice(0, 160)}` : `\u5931\u8D25\uFF1A${String(result.text).slice(0, 160)}`
+        );
+        if (result.ok) {
           setPreview(null);
           setText("");
           refreshSnap();
           setTab("batches");
         }
-      } catch (e) {
-        setMsg(String(e));
+      } catch (error) {
+        setMsg(String(error));
       }
     };
     return jsxs2("div", {}, [
+      jsxs2("label", { style: { display: "flex", gap: 8, alignItems: "center", marginBottom: 6 } }, [
+        j("span", { style: { color: T.label2 } }, "Project"),
+        j("select", {
+          value: selectedProject,
+          onChange: (event) => setSelectedProject(event.target.value),
+          style: { minWidth: 160, padding: "5px 8px" }
+        }, projectNames.map((name2) => j("option", { key: name2, value: name2 }, name2)))
+      ]),
       j("textarea", {
         value: text,
         onChange: (e) => setText(e.target.value),
-        placeholder: '\u7C98\u8D34 batch.json\uFF0C\u4F8B\u5982 {"schema_version":1,"name":"my_batch","tasks":[{"id":"t1","cmd":["{VENV:k}","..."],"duration_min":5}]}\uFF08venv \u522B\u540D\u89C1\u8FDC\u7AEF config.venvs\uFF0C\u5F53\u524D\u4E3A k\uFF09',
+        placeholder: submitExampleForProject(selectedProject),
         style: { width: "100%", height: 150, fontFamily: "monospace", fontSize: 13 }
       }),
       jsxs2("div", { style: { margin: "6px 0" } }, [
@@ -7640,8 +8376,57 @@ function apply(cctx, config) {
       preview && j("pre", { style: { ...pre, maxHeight: 240, overflow: "auto" } }, preview.text)
     ]);
   }
-  function Dashboard({ onClose }) {
-    const [stream] = useSchedStream();
+  function HistoryTab() {
+    const [state, setState] = useState({ loading: true, document: null, error: "" });
+    const load = useCallback(async () => {
+      setState((current) => ({ ...current, loading: true, error: "" }));
+      try {
+        const document2 = await collectHistoryPages(async ({ cursor }) => {
+          const query = new URLSearchParams({ limit: "200" });
+          if (cursor !== null) query.set("cursor", cursor);
+          const response = await authFetch(`/sched/api/history?${query}`);
+          const envelope = await response.json();
+          if (!response.ok || !envelope?.ok || !envelope.raw) {
+            throw new Error(envelope?.text || `history HTTP ${response.status}`);
+          }
+          return envelope.raw;
+        });
+        setState({ loading: false, document: document2, error: "" });
+      } catch (error) {
+        setState({ loading: false, document: null, error: String(error?.message ?? error) });
+      }
+    }, []);
+    useEffect(() => {
+      load();
+    }, [load]);
+    const rows = state.document?.history ?? [];
+    return jsxs2("div", {}, [
+      jsxs2("div", { style: { display: "flex", gap: 8, alignItems: "center", marginBottom: 8 } }, [
+        j("b", null, `${rows.length} loaded history rows`),
+        j("button", { onClick: load, disabled: state.loading, style: ghostBtn }, state.loading ? "loading\u2026" : "refresh")
+      ]),
+      state.error && j("div", { role: "alert", style: { color: T.err } }, state.error),
+      !state.loading && !state.error && rows.length === 0 && j("div", null, "(no history)"),
+      ...rows.map((row, index) => jsxs2("div", {
+        key: `${row.batch_id}:${row.task}:v${row.version}:${index}`,
+        style: {
+          display: "grid",
+          gridTemplateColumns: "minmax(160px,2fr) minmax(90px,1fr) minmax(80px,1fr) minmax(70px,.7fr)",
+          gap: 8,
+          padding: "6px 8px",
+          borderBottom: `1px solid ${T.border}`,
+          fontSize: 13
+        }
+      }, [
+        j("span", { title: row.batch_id }, row.batch_name || row.batch_id),
+        j("span", null, row.task),
+        j("span", { style: { color: COLORS[row.status] ?? T.label2 } }, row.status),
+        j("span", null, `v${row.version}`)
+      ]))
+    ]);
+  }
+  function Dashboard({ onClose, visible }) {
+    const [stream, clearAuth] = useSchedStream(visible);
     const [snap, refreshSnap] = useSnapshot("/sched/api/status", 2e4);
     const [tab, setTab] = useState("batches");
     const [opMsg, setOpMsg] = useState("");
@@ -7650,21 +8435,34 @@ function apply(cctx, config) {
     const [logTask, setLogTask] = useState(null);
     const [projFilter, setProjFilter] = useState("");
     const raw = snap?.raw;
+    const mutationAvailability = schedulerMutationAvailability(snap);
     const summary = snap?.summary;
     const projects = [...new Set((raw?.batches ?? []).map((b) => b.project).filter(Boolean))];
     const jobsAll = raw?.jobs;
-    const runOp = async (op, id) => {
-      const key = `${op}:${id ?? ""}`;
+    const runOp = async (op, entity) => {
+      const id = taskReference(entity) ?? (Number.isInteger(entity?.idx) ? String(entity.idx) : entity?.id ?? "");
+      const key = `${op}:${id}`;
+      if (!mutationAvailability.writable) {
+        setOpMsg(mutationAvailability.reason);
+        return;
+      }
       if (pendingOps.current.has(key)) return;
       pendingOps.current.add(key);
       setPendingOpsVersion((version) => version + 1);
       try {
-        const r = await post("op", { op, id });
-        if (!r || typeof r !== "object") throw new Error("invalid JSON response");
-        setOpMsg(`${op} ${id ?? ""}: ${r.ok ? "ok" : `fail (${r.error ?? r.code})`} ${r.text ? "\u2014 " + String(r.text).slice(0, 120) : ""}`);
+        const requestId = await durableRequests.claim(key);
+        const request = buildOperationRequest(op, entity, requestId);
+        const result = await post("op", request);
+        if (!result || typeof result !== "object") throw new Error("invalid JSON response");
+        if (mutationResultIsDefinitive(result)) {
+          await durableRequests.complete(key, requestId);
+        }
+        setOpMsg(
+          `${op} ${id}: ${result.ok ? "ok" : `fail (${result.error ?? result.code})`}` + (result.text ? ` \u2014 ${String(result.text).slice(0, 120)}` : "")
+        );
         refreshSnap();
       } catch (error) {
-        setOpMsg(`${op} ${id ?? ""}: fail (${String(error?.message ?? error).slice(0, 160)})`);
+        setOpMsg(`${op} ${id}: fail (${String(error?.message ?? error).slice(0, 160)})`);
       } finally {
         pendingOps.current.delete(key);
         setPendingOpsVersion((version) => version + 1);
@@ -7694,37 +8492,73 @@ function apply(cctx, config) {
             j("option", { value: "" }, "all projects"),
             ...projects.map((pr) => j("option", { key: pr, value: pr }, pr))
           ]),
-          ...["batches", "gpus", "events", "submit", "config", "incidents", "ssh"].map((t) => j("button", { key: t, onClick: () => setTab(t), style: tab === t ? btn(T.brand) : ghostBtn }, t))
+          ...["batches", "history", "gpus", "events", "submit", "config", "incidents", "ssh"].map((t) => j("button", { key: t, onClick: () => setTab(t), style: tab === t ? btn(T.brand) : ghostBtn }, t))
         ]),
-        // B24c: SSH 2FA 动态码弹窗（引擎质询桥接到看板）
-        j(KbdintModal, { req: stream.kbdint }),
+        // B24c: SSH 交互式身份验证弹窗（引擎质询桥接到看板）
+        j(AuthPromptModal, { req: stream.authQueue?.[0], onDone: clearAuth }),
         opMsg && j("div", { style: { fontSize: 13, color: T.warn, marginBottom: 4 } }, opMsg),
-        tab === "batches" && jsxs2("div", null, [
+        !mutationAvailability.writable && j("div", {
+          id: "sched-read-only-reason",
+          role: "alert",
+          style: {
+            fontSize: 13,
+            color: T.warn,
+            padding: "6px 10px",
+            border: `1px solid ${T.warn}`,
+            borderRadius: 8
+          }
+        }, mutationAvailability.reason),
+        tab === "batches" && jsxs2("fieldset", {
+          disabled: !mutationAvailability.writable,
+          "aria-describedby": "sched-read-only-reason",
+          style: { border: 0, padding: 0, margin: 0, minWidth: 0 }
+        }, [
           j(DaemonBar, { runOp }),
           !summary && j("div", null, "loading\u2026"),
           summary && j("pre", { style: { ...pre, maxHeight: 110, overflow: "auto" } }, summary.split("\njobs:")[0]),
           raw && jsxs2("div", {}, [
             jsxs2("div", { style: { fontSize: 13, color: T.label2, marginBottom: 6 } }, [
-              j("span", { style: { marginRight: 10, color: "#ef4444" } }, "\u25A0 \u7EA2=\u51FA\u9519"),
+              j("span", { style: { marginRight: 10, color: "#ef4444" } }, "\u25A0 \u7EA2=\u5931\u8D25/\u53D6\u6D88"),
               j("span", { style: { marginRight: 10, color: "#22c55e" } }, "\u25A0 \u7EFF=\u6210\u529F"),
               j("span", { style: { marginRight: 10, color: "#3b82f6" } }, "\u25A0 \u84DD=\u8FD0\u884C\u4E2D"),
-              j("span", { style: { color: "#9ca3af" } }, "\u25A0 \u7070=\u6392\u961F/\u53D6\u6D88")
+              j("span", { style: { color: "#9ca3af" } }, "\u25A0 \u7070=\u6392\u961F")
             ]),
             (raw.batches ?? []).filter((b) => !["done", "skip", "discarded"].includes(b.status)).filter((b) => !projFilter || b.project === projFilter).map((b) => j(BatchRow, { key: b.id ?? b.name, b, jobsAll, runOp, setLogTask }))
           ])
         ]),
-        tab === "gpus" && jsxs2("div", { key: "tab-gpus" }, [
+        tab === "history" && j(HistoryTab, { key: "tab-history" }),
+        tab === "gpus" && jsxs2("fieldset", {
+          key: "tab-gpus",
+          disabled: !mutationAvailability.writable,
+          "aria-describedby": "sched-read-only-reason",
+          style: { border: 0, padding: 0, margin: 0, minWidth: 0 }
+        }, [
           raw && (raw.gpus ?? []).map((g) => j(GpuRow, { key: g.idx, g, runOp })),
           !raw && j("div", null, "loading\u2026")
         ]),
         tab === "events" && j("pre", { key: "tab-events", style: { ...pre, maxHeight: "55vh", overflow: "auto" } }, stream.lines.join("\n") || "(no events yet)"),
-        tab === "submit" && j(SubmitTab, { key: "tab-submit", post, refreshSnap, setTab }),
-        tab === "config" && j(ConfigTab, { key: "tab-config" }),
+        tab === "submit" && j("fieldset", {
+          key: "tab-submit",
+          disabled: !mutationAvailability.writable,
+          "aria-describedby": "sched-read-only-reason",
+          style: { border: 0, padding: 0, margin: 0, minWidth: 0 }
+        }, j(SubmitTab, { post, refreshSnap, setTab })),
+        tab === "config" && j("fieldset", {
+          key: "tab-config",
+          disabled: !mutationAvailability.writable,
+          "aria-describedby": "sched-read-only-reason",
+          style: { border: 0, padding: 0, margin: 0, minWidth: 0 }
+        }, j(ConfigTab)),
         tab === "incidents" && j(IncidentsTab, { key: "tab-incidents" }),
         tab === "ssh" && j(SshTab, { key: "tab-ssh" }),
         logTask && j(LogViewer, { taskId: logTask, onClose: () => setLogTask(null) })
       ])
     ]);
+  }
+  function DashboardHost({ panel: panel2 }) {
+    const [visible, setVisible] = useState(panel2.isOpen());
+    useEffect(() => panel2.subscribe(() => setVisible(panel2.isOpen())), [panel2]);
+    return j(Dashboard, { visible, onClose: () => panel2.hide() });
   }
   function StatusCard() {
     const [open, setOpen] = useState(false);
@@ -7917,9 +8751,9 @@ function apply(cctx, config) {
         container.setAttribute(VIEW_ATTR, "");
         col.appendChild(container);
         root = require("react-dom/client").createRoot(container);
-        root.render(j(Dashboard, { onClose: () => panel.hide() }));
+        root.render(j(DashboardHost, { panel }));
         try {
-          fetch("/sched/api/client-log", {
+          authFetch("/sched/api/client-log", {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ kind: "lifecycle", detail: "view-mounted ts=" + (/* @__PURE__ */ new Date()).toISOString(), ts: (/* @__PURE__ */ new Date()).toISOString() })
@@ -7944,11 +8778,11 @@ function apply(cctx, config) {
       const t = ev.target;
       if (t && t.closest && t.closest(SIDEBAR_ROW)) panel.hide();
     };
-    document.addEventListener("click", onSidebarClick, true);
+    const disposeSidebarClick = listenCaptured(document, "click", onSidebarClick);
     disposersUI.push(() => {
       viewWaitObs.disconnect();
       document.removeEventListener(PANEL_ACTIVATE_EVENT, onOtherActivate);
-      document.removeEventListener("click", onSidebarClick);
+      disposeSidebarClick();
       document.documentElement.removeAttribute(ACTIVE_ATTR);
       try {
         root?.unmount();
@@ -8032,7 +8866,7 @@ function apply(cctx, config) {
   {
     const report = (kind, detail) => {
       try {
-        fetch("/sched/api/client-log", {
+        authFetch("/sched/api/client-log", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ kind, detail: String(detail).slice(0, 2e3), ts: (/* @__PURE__ */ new Date()).toISOString() })

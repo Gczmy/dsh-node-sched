@@ -13,7 +13,7 @@ function loopbackEndpoint(value) {
 		const url = new URL(raw.includes("://") ? raw : `http://${raw}`);
 		const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
 		if (!LOOPBACK_HOSTS.has(hostname)) return null;
-		return { protocol: url.protocol, port: url.port ? Number(url.port) : null };
+		return { hostname, protocol: url.protocol, port: url.port ? Number(url.port) : null };
 	} catch {
 		return null;
 	}
@@ -40,4 +40,26 @@ export function originHostAllowed(req) {
 	const hostPort = host.port ?? (req?.socket?.encrypted ? 443 : 80);
 	const originPort = origin.port ?? defaultPort(origin.protocol);
 	return hostPort === originPort;
+}
+
+export function sameOriginPostAllowed(req) {
+	if (!isLoopbackAddress(req?.socket?.remoteAddress ?? "")) return false;
+	const headers = req?.headers ?? {};
+	const hostRaw = String(headers.host ?? "").trim();
+	const originRaw = String(headers.origin ?? "").trim();
+	if (!hostRaw || /[/\\@?#\s]/.test(hostRaw) || !originRaw) return false;
+	let originUrl;
+	try {
+		originUrl = new URL(originRaw);
+	} catch {
+		return false;
+	}
+	if (originUrl.origin !== originRaw) return false;
+	const host = loopbackEndpoint(hostRaw);
+	const origin = loopbackEndpoint(originRaw);
+	if (!host || !origin || origin.hostname !== host.hostname) return false;
+	const protocol = req?.socket?.encrypted ? "https:" : "http:";
+	const hostPort = host.port ?? defaultPort(protocol);
+	const originPort = origin.port ?? defaultPort(origin.protocol);
+	return origin.protocol === protocol && originPort === hostPort;
 }
