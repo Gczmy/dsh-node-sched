@@ -493,6 +493,32 @@ export async function collectHistoryPages(fetchPage, { maxPages = 100 } = {}) {
 	throw new Error("history paging limit exceeded");
 }
 
+export class EnabledRequestEpoch {
+	constructor(enabled = false) {
+		this.enabled = Boolean(enabled);
+		this.generation = 0;
+	}
+
+	setEnabled(enabled) {
+		const next = Boolean(enabled);
+		if (next === this.enabled) return false;
+		this.enabled = next;
+		this.invalidate();
+		return true;
+	}
+
+	invalidate() {
+		this.generation += 1;
+		return this.generation;
+	}
+
+	issue() { return this.generation; }
+
+	isCurrent(generation) {
+		return this.enabled && generation === this.generation;
+	}
+}
+
 export class PollGate {
 	constructor({ ttlMs, now = Date.now } = {}) {
 		if (!Number.isFinite(ttlMs) || ttlMs <= 0 || typeof now !== "function") {

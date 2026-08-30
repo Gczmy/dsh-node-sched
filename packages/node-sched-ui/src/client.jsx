@@ -1,3 +1,4 @@
+import { BrowserAuthGate, IndexedDbTrustedDeviceStore } from "./auth-gate.js";
 import {
 	authAnswerErrorText,
 	authAudienceFrame,
@@ -8,6 +9,7 @@ import {
 	collectStatusPages,
 	configuredProjectNames,
 	createIndexedDbRequestStore,
+	EnabledRequestEpoch,
 	jobsForBatch,
 	listenCaptured,
 	mutationResultIsDefinitive,
@@ -18,7 +20,6 @@ import {
 	submitExampleForProject,
 	taskReference,
 	taskStatusContract,
-	validAccessToken,
 	validHostKey,
 } from "./ui-contracts.js";
 
@@ -353,35 +354,26 @@ function apply(cctx, config) {
 
 		const Badge = ({ s }) => j("span", { style: badge(s) }, s);
 
-	const ACCESS_TOKEN_KEY = "node-sched:access-token";
 	const durableRequests = createIndexedDbRequestStore();
-
-	function accessToken() {
-		const stored = sessionStorage.getItem(ACCESS_TOKEN_KEY);
-		if (validAccessToken(stored)) return stored;
-		const entered = window.prompt(
-			"node-sched 需要本机访问令牌。请粘贴 ~/.dsh/node-sched-access-token 的内容：",
-			"",
-		);
-		const token = String(entered ?? "").trim();
-		if (!validAccessToken(token)) {
-			sessionStorage.removeItem(ACCESS_TOKEN_KEY);
-			throw new Error("本机访问令牌缺失或格式无效");
-		}
-		sessionStorage.setItem(ACCESS_TOKEN_KEY, token);
-		return token;
-	}
+	const authGate = new BrowserAuthGate({
+		fetchImpl: globalThis.fetch.bind(globalThis),
+		cryptoImpl: globalThis.crypto,
+		sessionStorage: globalThis.sessionStorage,
+		deviceStore: new IndexedDbTrustedDeviceStore(globalThis.indexedDB),
+	});
 
 	async function authFetch(input, init = {}) {
-		const headers = new Headers(init.headers ?? {});
-		headers.set("authorization", `Bearer ${accessToken()}`);
-		const response = await globalThis.fetch(input, { ...init, headers });
-		if (response.status === 401) sessionStorage.removeItem(ACCESS_TOKEN_KEY);
-		return response;
+		return authGate.authorizedFetch(input, init);
 	}
 
 	function authenticatedWebSocket(url) {
-		return new WebSocket(url, ["sched-auth", accessToken()]);
+		return new WebSocket(url, authGate.webSocketProtocols());
+	}
+
+	function useAuthGateState() {
+		const [state, setState] = useState(authGate.snapshot());
+		useEffect(() => authGate.subscribe(setState), []);
+		return state;
 	}
 
 	async function mutationPayloadKey(action, payload) {
@@ -479,7 +471,7 @@ function apply(cctx, config) {
 			let ws; let closed = false; let timer;
 
 			const connect = () => {
-				if (closed) return;
+				if (closed || !authGate.isReady()) return;
 				const proto = location.protocol === "https:" ? "wss://" : "ws://";
 				try {
 					ws = authenticatedWebSocket(`${proto}${location.host}/sched/ws/events`);
@@ -510,7 +502,7 @@ function apply(cctx, config) {
 				};
 				ws.onclose = () => {
 					if (socketRef.current === ws) socketRef.current = null;
-					if (closed) return;
+					if (closed || !authGate.isReady()) return;
 					setState((s) => ({ ...s, connected: false, authQueue: [] }));
 					timer = setTimeout(connect, 3000);
 				};
@@ -543,20 +535,30 @@ function apply(cctx, config) {
 
 
 
-	function useSnapshot(path, ms) {
+	function useSnapshot(path, ms, enabled = true) {
 		const gateRef = useRef(null);
 		if (gateRef.current === null) {
 			gateRef.current = new PollGate({ ttlMs: Math.max(ms * 2, 30_000) });
 		}
 		const inFlightRef = useRef(null);
+		const requestEpochRef = useRef(null);
+		if (requestEpochRef.current === null) requestEpochRef.current = new EnabledRequestEpoch(enabled);
+		if (requestEpochRef.current.setEnabled(enabled)) {
+			inFlightRef.current = null;
+		}
 		const [data, setData] = useState(null);
 
 		const refresh = useCallback(() => {
-			if (inFlightRef.current) return inFlightRef.current;
+			if (!enabled) return Promise.resolve();
+			const generation = requestEpochRef.current.issue();
+			if (inFlightRef.current?.generation === generation) return inFlightRef.current.promise;
 			const gate = gateRef.current;
 			const sequence = gate.issue();
 			let firstEnvelope;
-			const request = collectStatusPages(async ({ cursor, jobCursor }) => {
+			const entry = { generation, promise: null };
+			const isCurrent = () => requestEpochRef.current.isCurrent(generation);
+			entry.promise = collectStatusPages(async ({ cursor, jobCursor }) => {
+				if (!isCurrent()) throw new Error("status request superseded");
 				const query = new URLSearchParams();
 				if (cursor !== null) query.set("cursor", cursor);
 				if (jobCursor !== null) query.set("job_cursor", jobCursor);
@@ -569,7 +571,7 @@ function apply(cctx, config) {
 				firstEnvelope ??= envelope;
 				return envelope.raw;
 			}).then((raw) => {
-				gate.succeed(sequence, {
+				if (isCurrent()) gate.succeed(sequence, {
 					...firstEnvelope,
 					ok: true,
 					fresh: true,
@@ -577,20 +579,22 @@ function apply(cctx, config) {
 					raw,
 				});
 			}, (error) => {
-				gate.fail(sequence, error);
+				if (isCurrent()) gate.fail(sequence, error);
 			}).finally(() => {
-				if (inFlightRef.current === request) inFlightRef.current = null;
-				setData(gate.snapshot());
+				if (inFlightRef.current === entry) inFlightRef.current = null;
+				if (isCurrent()) setData(gate.snapshot());
 			});
-			inFlightRef.current = request;
-			return request;
-		}, [path]);
+			inFlightRef.current = entry;
+			return entry.promise;
+		}, [enabled, path]);
 
 		useEffect(() => {
+			if (!enabled) {
+				setData(null);
+				return undefined;
+			}
 			let alive = true;
-			const update = () => refresh().finally(() => {
-				if (alive) setData(gateRef.current.snapshot());
-			});
+			const update = () => { void refresh(); };
 			update();
 			const pollTimer = setInterval(update, ms);
 			const ttlTimer = setInterval(() => {
@@ -598,10 +602,12 @@ function apply(cctx, config) {
 			}, Math.min(ms, 5_000));
 			return () => {
 				alive = false;
+				requestEpochRef.current.invalidate();
+				inFlightRef.current = null;
 				clearInterval(pollTimer);
 				clearInterval(ttlTimer);
 			};
-		}, [ms, refresh]);
+		}, [enabled, ms, refresh]);
 
 		return [data, refresh];
 	}
@@ -806,6 +812,7 @@ function apply(cctx, config) {
 		const [msg, setMsg] = useState("");
 
 		const [confirmAlias, setConfirmAlias] = useState(null);
+		const [pinDraft, setPinDraft] = useState(null);
 
 		const [termAlias, setTermAlias] = useState(null);
 
@@ -935,25 +942,21 @@ function apply(cctx, config) {
 			}
 		};
 
-		const doPin = async (host) => {
-			const entered = window.prompt(
-				`粘贴 ${host.alias} 的 OpenSSH SHA256 host key 指纹：`,
-				host.hostKey ?? "SHA256:",
-			);
-			if (entered === null) return;
-			const hostKey = entered.trim();
+		const doPin = async () => {
+			if (!pinDraft) return;
+			const hostKey = pinDraft.value.trim();
 			if (!validHostKey(hostKey)) {
 				setMsg("失败: host pin 必须是 OpenSSH SHA256: 加 43 位 base64 指纹");
 				return;
 			}
-			setBusy("pin:" + host.alias);
+			setBusy("pin:" + pinDraft.alias);
 			try {
 				const response = await authFetch("/sched/ssh/hosts", {
 					method: "POST",
 					headers: { "content-type": "application/json" },
 					body: JSON.stringify({
 						action: "update",
-						alias: host.alias,
+						alias: pinDraft.alias,
 						patch: { hostKey },
 					}),
 				});
@@ -961,7 +964,8 @@ function apply(cctx, config) {
 				if (!response.ok || !result.host) {
 					throw new Error(result.error ?? `HTTP ${response.status}`);
 				}
-				setMsg(`✅ ${host.alias} host key 已固定`);
+				setMsg(`✅ ${pinDraft.alias} host key 已固定`);
+				setPinDraft(null);
 				await load();
 			} catch (error) {
 				setMsg("失败: " + error.message);
@@ -1026,6 +1030,22 @@ function apply(cctx, config) {
 
 				"暂无主机 —— 点上方「从 ~/.ssh/config 导入」一键导入"),
 
+			pinDraft && jsxs2("div", {
+				style: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", padding: "8px 10px", border: `1px solid ${T.warn}`, borderRadius: 8 },
+			}, [
+				j("label", { style: { flex: 1, minWidth: 260 } }, [
+					j("span", { style: { display: "block", color: T.label2, marginBottom: 4 } }, `${pinDraft.alias} 的 OpenSSH SHA256 host key 指纹`),
+					j("input", {
+						value: pinDraft.value,
+						onChange: (event) => setPinDraft((current) => ({ ...current, value: event.target.value })),
+						spellCheck: false,
+						style: { width: "100%", boxSizing: "border-box", padding: "7px 9px", borderRadius: 8, border: `1px solid ${T.border}`, fontFamily: "monospace" },
+					}),
+				]),
+				j("button", { onClick: doPin, disabled: !!busy, style: btn(T.warn, !!busy) }, busy === "pin:" + pinDraft.alias ? "保存中…" : "保存 pin"),
+				j("button", { onClick: () => setPinDraft(null), disabled: !!busy, style: ghostBtn }, "取消"),
+			]),
+
 			hosts !== null && jsxs2("div", { style: { display: "flex", flexDirection: "column", gap: 6 } }, [
 
 				...hosts.map((h) => {
@@ -1087,7 +1107,7 @@ function apply(cctx, config) {
 
 						j("button", {
 							key: "pin",
-							onClick: () => doPin(h),
+							onClick: () => setPinDraft({ alias: h.alias, value: h.hostKey ?? "SHA256:" }),
 							disabled: !!busy,
 							title: "固定 OpenSSH SHA256 host key 指纹；未固定时拒绝连接",
 							style: { ...ghostBtn, color: h.hostKeyReady ? T.label2 : T.warn, flexShrink: 0 },
@@ -1214,7 +1234,12 @@ function apply(cctx, config) {
 
 				ro.observe(el);
 
-			})();
+				})().catch((error) => {
+					if (disposed) return;
+					try {
+						term?.write(`\r\n\x1b[31m■ 终端认证不可用: ${String(error?.message ?? error).slice(0, 160)}\x1b[0m\r\n`);
+					} catch { /* terminal not initialized */ }
+				});
 
 			return () => {
 
@@ -2235,7 +2260,114 @@ function apply(cctx, config) {
 		]);
 	}
 
-	function Dashboard({ onClose, visible }) {
+	function AuthenticationGate({ auth, onCancel }) {
+		const [token, setToken] = useState("");
+		const [remember, setRemember] = useState(auth.canTrust);
+		const [label, setLabel] = useState(() => {
+			const platform = String(globalThis.navigator?.platform ?? "").trim();
+			return platform ? `${platform} 浏览器` : "当前浏览器";
+		});
+		const restoring = auth.status === "idle" || auth.status === "restoring";
+		const busy = restoring || auth.status === "pairing";
+
+		useEffect(() => {
+			if (!auth.canTrust) setRemember(false);
+		}, [auth.canTrust]);
+
+		useEffect(() => {
+			const onKeyDown = (event) => {
+				if (event.key !== "Escape") return;
+				authGate.cancelPending();
+				setToken("");
+				onCancel();
+			};
+			window.addEventListener("keydown", onKeyDown);
+			return () => window.removeEventListener("keydown", onKeyDown);
+		}, [onCancel]);
+
+		const submit = async (event) => {
+			event.preventDefault();
+			if (busy || !token.trim()) return;
+			const masterToken = token;
+			setToken("");
+			try {
+				await authGate.pair(masterToken, { remember, label, trustDays: 30 });
+			} catch { /* coordinator publishes a bounded visible error */ }
+		};
+
+		const cancel = () => {
+			authGate.cancelPending();
+			setToken("");
+			onCancel();
+		};
+
+		return jsxs2("div", { style: overlayStyle }, [
+			jsxs2("div", { style: { ...panelStyle, maxWidth: 560, justifyContent: "center" } }, [
+				j("form", {
+					onSubmit: submit,
+					style: {
+						background: T.bgLayer,
+						border: `1px solid ${T.border}`,
+						borderRadius: 12,
+						padding: 20,
+						display: "flex",
+						flexDirection: "column",
+						gap: 12,
+					},
+				}, [
+					j("h2", { style: { ...boardTitleStyle, fontSize: 18 } }, "连接 sched 看板"),
+					j("div", { style: { color: T.label2 } }, busy
+						? (restoring ? "正在验证受信设备…" : "正在创建短期访问会话…")
+						: "首次连接需要粘贴一次本机主令牌。主令牌只用于本次配对，不会保存在浏览器中。"),
+					auth.message && j("div", {
+						role: "alert",
+						style: { color: T.err, border: `1px solid ${T.err}`, borderRadius: 8, padding: "8px 10px" },
+					}, auth.message),
+					auth.hasTrustedDevice && !busy && j("button", {
+						type: "button",
+						onClick: () => { void authGate.restore({ force: true }); },
+						style: btn(T.brand),
+					}, "使用受信设备重新验证"),
+					!busy && j("label", { style: { display: "flex", flexDirection: "column", gap: 5 } }, [
+						j("span", null, "本机主令牌"),
+						j("input", {
+							type: "password",
+							value: token,
+							onChange: (event) => setToken(event.target.value),
+							autoComplete: "off",
+							spellCheck: false,
+							placeholder: "粘贴 ~/.dsh/node-sched-access-token 的内容",
+							style: { padding: "9px 10px", borderRadius: 8, border: `1px solid ${T.border}`, fontFamily: "monospace" },
+						}),
+					]),
+					!busy && j("label", { style: { display: "flex", gap: 8, alignItems: "center" } }, [
+						j("input", {
+							type: "checkbox",
+							checked: remember,
+							disabled: !auth.canTrust,
+							onChange: (event) => setRemember(event.target.checked),
+						}),
+						j("span", null, auth.canTrust ? "信任此浏览器 30 天（推荐）" : "此环境不支持持久设备信任"),
+					]),
+					!busy && remember && j("label", { style: { display: "flex", flexDirection: "column", gap: 5 } }, [
+						j("span", null, "设备名称"),
+						j("input", {
+							value: label,
+							onChange: (event) => setLabel(event.target.value),
+							maxLength: 80,
+							style: { padding: "8px 10px", borderRadius: 8, border: `1px solid ${T.border}` },
+						}),
+					]),
+					j("div", { style: { display: "flex", gap: 8, justifyContent: "flex-end" } }, [
+						j("button", { type: "button", onClick: cancel, style: ghostBtn }, "取消"),
+						!busy && j("button", { type: "submit", disabled: !token.trim(), style: btn(T.brand, !token.trim()) }, remember ? "配对并打开" : "仅本次会话"),
+					]),
+				]),
+			]),
+		]);
+	}
+
+	function Dashboard({ onClose, visible, auth }) {
 
 		const [stream, clearAuth] = useSchedStream(visible);
 
@@ -2293,6 +2425,14 @@ function apply(cctx, config) {
 			}
 		};
 
+		const forgetDevice = async () => {
+			try {
+				await authGate.forget();
+			} catch (error) {
+				setOpMsg(`认证清理失败: ${String(error?.message ?? error).slice(0, 160)}`);
+			}
+		};
+
 
 
 		// 批次行网格：徽章 | 名称 | 分段进度条 | 计数 | cancel —— 固定列宽对齐
@@ -2321,6 +2461,13 @@ function apply(cctx, config) {
 					j("span", { style: { color: stream.connected ? T.ok : T.err, fontSize: 13 } }, stream.connected ? "\u25cf live" : "\u25cb offline"),
 
 					j("button", { onClick: refreshSnap, style: ghostBtn }, "refresh"),
+
+					j(ArmButton, {
+						label: auth.trusted ? "忘记本设备" : "结束会话",
+						confirmLabel: auth.trusted ? "确认忘记?" : "确认结束?",
+						color: T.warn,
+						onConfirm: forgetDevice,
+					}),
 
 					j("select", {
 
@@ -2442,10 +2589,34 @@ function apply(cctx, config) {
 
 	function DashboardHost({ panel }) {
 		const [visible, setVisible] = useState(panel.isOpen());
+		const auth = useAuthGateState();
+		const reportedOpen = useRef(false);
 
 		useEffect(() => panel.subscribe(() => setVisible(panel.isOpen())), [panel]);
+		useEffect(() => {
+			if (visible) void authGate.restore();
+			else authGate.cancelPending();
+		}, [visible]);
+		useEffect(() => {
+			if (visible && auth.status === "locked" && auth.hasTrustedDevice) {
+				void authGate.restore({ force: true });
+			}
+		}, [auth.hasTrustedDevice, auth.status, visible]);
 
-		return j(Dashboard, { visible, onClose: () => panel.hide() });
+		useEffect(() => {
+			if (!visible || auth.status !== "ready" || reportedOpen.current) return;
+			reportedOpen.current = true;
+			authFetch("/sched/api/client-log", {
+				method: "POST", headers: { "content-type": "application/json" },
+				body: JSON.stringify({ kind: "lifecycle", detail: "view-mounted ts=" + new Date().toISOString(), ts: new Date().toISOString() }),
+			}).catch(() => {});
+		}, [auth.status, visible]);
+
+		if (!visible) return null;
+		if (auth.status !== "ready") {
+			return j(AuthenticationGate, { auth, onCancel: () => panel.hide() });
+		}
+		return j(Dashboard, { visible: true, auth, onClose: () => panel.hide() });
 	}
 
 	// ── sidebar footer entry: button toggling the fullscreen dashboard ──────
@@ -2454,7 +2625,8 @@ function apply(cctx, config) {
 	// ── settings card: 与 PluginSettingsCard 完全同构 (1:1 样式) ──────────
 	function StatusCard() {
 		const [open, setOpen] = useState(false);
-		const [snap] = useSnapshot("/sched/api/status", 30000);
+		const auth = useAuthGateState();
+		const [snap] = useSnapshot("/sched/api/status", 30000, open && auth.status === "ready");
 		const raw = snap?.raw;
 		const gpus = raw?.gpus ?? [];
 		const batches = raw?.batches ?? [];
@@ -2564,8 +2736,8 @@ function apply(cctx, config) {
 	injectStyles();
 	const disposersUI = [];
 
-	// 面板开关控制器：纯 JS 非 React；视图显隐由 <html> data 属性驱动，
-	// 对话子树保持挂载有状态，切换零成本。
+	// 面板开关控制器：纯 JS 非 React；容器保持挂载，但看板子树仅在
+	// 面板打开时存在，避免隐藏看板请求令牌或启动后台轮询。
 	const panel = {
 		open: false,
 		listeners: new Set(),
@@ -2578,12 +2750,17 @@ function apply(cctx, config) {
 			document.dispatchEvent(new CustomEvent(PANEL_ACTIVATE_EVENT, { detail: PANEL_NAME }));
 			this.emit();
 		},
-		hide() { this.open = false; document.documentElement.removeAttribute(ACTIVE_ATTR); this.emit(); },
+		hide() {
+			authGate.cancelPending();
+			this.open = false;
+			document.documentElement.removeAttribute(ACTIVE_ATTR);
+			this.emit();
+		},
 		toggle() { if (this.open) this.hide(); else this.show(); },
 	};
 
 	// 页面视图：centerCol 内追加 React 永不管理的容器 + 自建 root。
-	// 外壳 reconciliation 不认识这个节点所以不会驱逐它；显隐纯 CSS。
+	// 外壳 reconciliation 不认识这个节点所以不会驱逐它；子树由 DashboardHost 懒挂载。
 	{
 		let root = null, container = null;
 		const ensure = () => {
@@ -2596,12 +2773,6 @@ function apply(cctx, config) {
 				col.appendChild(container);
 				root = require("react-dom/client").createRoot(container);
 				root.render(j(DashboardHost, { panel }));
-				try {
-					authFetch("/sched/api/client-log", {
-						method: "POST", headers: { "content-type": "application/json" },
-						body: JSON.stringify({ kind: "lifecycle", detail: "view-mounted ts=" + new Date().toISOString(), ts: new Date().toISOString() }),
-					}).catch(() => {});
-				} catch (_) {}
 			} catch (e) {
 				cctx.logger?.warn?.("[node-sched-ui] view mount failed:", e?.message);
 			}
@@ -2706,6 +2877,7 @@ function apply(cctx, config) {
 	// B25c: 渲染树异常遥测 —— 掀树根因捕获 (错误对象回传 host 落盘)
 	{
 		const report = (kind, detail) => {
+			if (!panel.isOpen()) return;
 			try {
 				authFetch("/sched/api/client-log", {
 					method: "POST", headers: { "content-type": "application/json" },
@@ -2729,6 +2901,7 @@ function apply(cctx, config) {
 	const disposeSettings = cctx.slots.inject(SLOT_SETTINGS, () =>
 		cctx.slots.register({ name: SLOT_SETTINGS, id: NS, order: 90 }, StatusCard));
 	disposersUI.push(disposeSettings);
+	disposersUI.push(() => authGate.dispose());
 	return () => { for (const d of disposersUI) { try { d?.(); } catch (_) {} } };
 }
 

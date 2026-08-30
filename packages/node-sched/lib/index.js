@@ -35,6 +35,7 @@ import { parseScreenEnd, parseScreenResult } from "./screen-result.js";
 import { appendLimitedOutput, finalizeLimitedOutput, limitedOutputText } from "./output-limit.js";
 import { redactCommand, sanitizeLogText } from "./redact.js";
 import { isTransientSshError } from "./retry-policy.js";
+import { DeviceAuthError, TrustedBrowserAuth } from "./device-auth.js";
 
 const name = "node-sched";
 
@@ -887,29 +888,73 @@ function writePrivateUpload(directory, name, content) {
 	}
 }
 
-function bearerRequestAllowed(req, expectedToken) {
-	if (typeof expectedToken !== "string" || !expectedToken) return false;
-	const header = req?.headers?.authorization;
-	if (typeof header !== "string" || !header.startsWith("Bearer ")) return false;
-	const supplied = Buffer.from(header.slice(7), "utf8");
-	const expected = Buffer.from(expectedToken, "utf8");
-	return supplied.length === expected.length && timingSafeEqual(supplied, expected);
+function requestCredentialOrigin(req) {
+	const supplied = String(req?.headers?.origin ?? "").trim();
+	if (supplied) return supplied;
+	const host = String(req?.headers?.host ?? "").trim();
+	if (!host) return "";
+	try {
+		return new URL(`${req?.socket?.encrypted ? "https" : "http"}://${host}`).origin;
+	} catch {
+		return "";
+	}
 }
 
-function websocketRequestAllowed(req, expectedToken) {
+function bearerToken(req) {
+	const header = req?.headers?.authorization;
+	if (typeof header !== "string" || !header.startsWith("Bearer ")) return null;
+	return header.slice(7);
+}
+
+function bearerPrincipal(req, expectedToken) {
+	const token = bearerToken(req);
+	if (token === null) return null;
+	if (expectedToken && typeof expectedToken.authenticateBearer === "function") {
+		try {
+			return expectedToken.authenticateBearer(token, requestCredentialOrigin(req));
+		} catch {
+			return null;
+		}
+	}
+	if (typeof expectedToken !== "string" || !expectedToken) return null;
+	const supplied = Buffer.from(token, "utf8");
+	const expected = Buffer.from(expectedToken, "utf8");
+	return supplied.length === expected.length && timingSafeEqual(supplied, expected)
+		? { kind: "master", clientId: null, expiresAt: null }
+		: null;
+}
+
+function bearerRequestAllowed(req, expectedToken) {
+	return bearerPrincipal(req, expectedToken) !== null;
+}
+
+function websocketRequestPrincipal(req, expectedToken) {
 	const remote = req?.socket?.remoteAddress ?? "";
-	if (!isLoopbackAddress(remote) || !originHostAllowed(req)) return false;
+	if (!isLoopbackAddress(remote) || !originHostAllowed(req)) return null;
 	const header = req?.headers?.["sec-websocket-protocol"];
-	if (typeof header !== "string") return false;
+	if (typeof header !== "string") return null;
 	const protocols = header.split(",").map((value) => value.trim()).filter(Boolean);
-	if (!protocols.includes("sched-auth")) return false;
+	if (!protocols.includes("sched-auth")) return null;
 	const suppliedToken = protocols.find((value) => value !== "sched-auth");
-	if (!suppliedToken || protocols.length !== 2) return false;
+	if (!suppliedToken || protocols.length !== 2) return null;
+	if (expectedToken && typeof expectedToken.authenticateBearer === "function") {
+		try {
+			return expectedToken.authenticateBearer(suppliedToken, requestCredentialOrigin(req));
+		} catch {
+			return null;
+		}
+	}
 	const supplied = Buffer.from(suppliedToken, "utf8");
 	const expected = Buffer.from(String(expectedToken ?? ""), "utf8");
 	return expected.length > 0
 		&& supplied.length === expected.length
-		&& timingSafeEqual(supplied, expected);
+		&& timingSafeEqual(supplied, expected)
+		? { kind: "master", clientId: null, expiresAt: null }
+		: null;
+}
+
+function websocketRequestAllowed(req, expectedToken) {
+	return websocketRequestPrincipal(req, expectedToken) !== null;
 }
 
 function selectAuthenticatedWebSocketProtocol(protocols) {
@@ -926,7 +971,7 @@ function rejectUnauthorized(res) {
 }
 
 
-function guardMutationRequest(req, res, accessToken) {
+function guardSameOriginPostRequest(req, res) {
 	if (req?.method !== "POST") {
 		res.writeHead(405, { "content-type": "application/json; charset=utf-8" });
 		res.end(JSON.stringify({ ok: false, error: "method not allowed: POST" }));
@@ -937,6 +982,11 @@ function guardMutationRequest(req, res, accessToken) {
 		res.end(JSON.stringify({ ok: false, error: "forbidden: exact same-origin loopback request required" }));
 		return false;
 	}
+	return true;
+}
+
+function guardMutationRequest(req, res, accessToken) {
+	if (!guardSameOriginPostRequest(req, res)) return false;
 	if (!bearerRequestAllowed(req, accessToken)) {
 		rejectUnauthorized(res);
 		return false;
@@ -1868,6 +1918,9 @@ async function serveTerminalWebSocket({
  */
 function apply(ctx, config) {
 	const accessToken = ctx.webServer ? loadOrCreateAccessToken() : null;
+	const browserAuth = ctx.webServer
+		? new TrustedBrowserAuth({ masterToken: accessToken })
+		: null;
 	// ── B24: 内嵌 SSH 引擎（先于 runRemote 创建：绑定后 sched 命令走引擎通道）──
 	const sshStore = new HostStore();
 	const sshEngine = new SshEngine(sshStore);
@@ -2467,8 +2520,8 @@ function apply(ctx, config) {
 			res.writeHead(code, { "content-type": "application/json; charset=utf-8" });
 			res.end(JSON.stringify(body));
 		};
-		const readGuard = (req, res) => guardReadRequest(req, res, accessToken);
-		const writeGuard = (req, res) => guardMutationRequest(req, res, accessToken);
+		const readGuard = (req, res) => guardReadRequest(req, res, browserAuth);
+		const writeGuard = (req, res) => guardMutationRequest(req, res, browserAuth);
 		const OPS = {
 			cancel: { cmd: (id) => buildOperationCommand("cancel", id, S), needsId: true },
 			retry: { cmd: (id) => buildOperationCommand("retry", id, S), needsId: true },
@@ -2535,8 +2588,122 @@ function apply(ctx, config) {
 			}
 			return parseBoundedJson(Buffer.concat(chunks, bytes).toString("utf8"));
 		};
+		const exactObjectBody = (body, allowedKeys) => {
+			if (!body || typeof body !== "object" || Array.isArray(body)) {
+				throw new DeviceAuthError("request body must be a JSON object");
+			}
+			const allowed = new Set(allowedKeys);
+			if (Object.keys(body).some((key) => !allowed.has(key))) {
+				throw new DeviceAuthError("request body contains an unsupported field");
+			}
+			return body;
+		};
+		const authError = async (res, error) => {
+			if (error instanceof DeviceAuthError) {
+				return json(res, { ok: false, error: error.message, code: error.code }, error.status);
+			}
+			if (error instanceof SyntaxError) {
+				return json(res, { ok: false, error: "request body is not valid JSON", code: "invalid_json" }, 400);
+			}
+			ctx.logger.warn("[node-sched] browser authentication failed: %s", safeError(error));
+			return json(res, { ok: false, error: "browser authentication failed", code: "auth_error" }, 500);
+		};
 
 		startRefresher();
+
+		routeDisposers.push(
+			ctx.webServer.register({
+				kind: "prefix",
+				path: "/sched/api/auth",
+				handler: async (req, res) => {
+					let pathname;
+					try {
+						pathname = new URL(req.url ?? "/", "http://node-sched.invalid").pathname;
+					} catch {
+						return void json(res, { ok: false, error: "invalid request path" }, 400);
+					}
+					const knownPaths = new Set([
+						"/sched/api/auth/challenge",
+						"/sched/api/auth/verify",
+						"/sched/api/auth/pair",
+						"/sched/api/auth/session",
+						"/sched/api/auth/forget",
+						"/sched/api/auth/me",
+						"/sched/api/auth/list",
+					]);
+					if (!knownPaths.has(pathname)) {
+						return void json(res, { ok: false, error: "authentication endpoint not found" }, 404);
+					}
+					const bootstrap = pathname === "/sched/api/auth/challenge"
+						|| pathname === "/sched/api/auth/verify";
+					const masterOnly = pathname === "/sched/api/auth/pair"
+						|| pathname === "/sched/api/auth/session";
+					if (bootstrap) {
+						if (!guardSameOriginPostRequest(req, res)) return;
+					} else if (masterOnly) {
+						if (!guardMutationRequest(req, res, accessToken)) return;
+					} else if (!guardMutationRequest(req, res, browserAuth)) {
+						return;
+					}
+					const origin = requestCredentialOrigin(req);
+					try {
+						if (pathname === "/sched/api/auth/challenge") {
+							const body = exactObjectBody(await readBodyJson(req), ["clientId"]);
+							const challenge = browserAuth.createChallenge(body.clientId, origin);
+							return void json(res, { ok: true, ...challenge });
+						}
+						if (pathname === "/sched/api/auth/verify") {
+							const body = exactObjectBody(
+								await readBodyJson(req),
+								["clientId", "challengeId", "signature"],
+							);
+							const session = browserAuth.verifyChallenge(body, origin);
+							return void json(res, { ok: true, ...session });
+						}
+						if (pathname === "/sched/api/auth/pair") {
+							const body = exactObjectBody(
+								await readBodyJson(req),
+								["clientId", "publicKeyJwk", "label", "trustDays"],
+							);
+							const session = browserAuth.pair(body, origin);
+							return void json(res, { ok: true, ...session });
+						}
+						if (pathname === "/sched/api/auth/session") {
+							exactObjectBody(await readBodyJson(req), []);
+							const session = browserAuth.createMasterSession(origin);
+							return void json(res, { ok: true, ...session });
+						}
+						const principal = bearerPrincipal(req, browserAuth);
+						if (!principal) {
+							rejectUnauthorized(res);
+							return;
+						}
+						if (pathname === "/sched/api/auth/forget") {
+							const body = exactObjectBody(await readBodyJson(req), ["clientId"]);
+							const clientId = String(body.clientId ?? "").trim();
+							if (principal.kind !== "master" && principal.clientId !== clientId) {
+								return void json(res, { ok: false, error: "a browser session may only forget itself" }, 403);
+							}
+							const removed = browserAuth.revoke(clientId);
+							return void json(res, { ok: true, clientId, removed });
+						}
+						if (pathname === "/sched/api/auth/me") {
+							exactObjectBody(await readBodyJson(req), []);
+							return void json(res, {
+								ok: true,
+								kind: principal.kind,
+								clientId: principal.clientId,
+								expiresAt: principal.expiresAt,
+							});
+						}
+						exactObjectBody(await readBodyJson(req), []);
+						return void json(res, { ok: true, devices: browserAuth.list() });
+					} catch (error) {
+						return void await authError(res, error);
+					}
+				},
+			}),
+		);
 
 		routeDisposers.push(
 			ctx.webServer.register({
@@ -3140,14 +3307,13 @@ function apply(ctx, config) {
 			ctx.webServer.registerUpgrade({
 				path: "/sched/ws/events",
 				handler: (req, socket, head) => {
-					if (
-						!websocketRequestAllowed(req, accessToken)
-						|| clients.size >= 8
-					) {
+					const principal = websocketRequestPrincipal(req, browserAuth);
+					if (!principal || clients.size >= 8) {
 						socket.destroy();
 						return;
 					}
 					wss.handleUpgrade(req, socket, head, (ws) => {
+						browserAuth.trackConnection(ws, principal);
 						clients.add(ws);
 						authAudiences.set(ws, false);
 						try {
@@ -3452,7 +3618,8 @@ function apply(ctx, config) {
 				ctx.webServer.registerUpgrade({
 					path: "/sched/ws/ssh-terminal",
 					handler: (req, socket, head) => {
-						if (!websocketRequestAllowed(req, accessToken)) {
+						const principal = websocketRequestPrincipal(req, browserAuth);
+						if (!principal) {
 							socket.destroy();
 							return;
 						}
@@ -3480,6 +3647,7 @@ function apply(ctx, config) {
 								socket.off?.("close", releaseUnhanded);
 								socket.off?.("error", releaseUnhanded);
 								handedOff = true;
+								browserAuth.trackConnection(ws, principal);
 								const u = new URL(req.url, "http://x");
 								const alias = u.searchParams.get("alias") ?? "";
 								const cols = clamp(parseInt(u.searchParams.get("cols") || "80", 10) || 80, 20, 500);
@@ -3521,6 +3689,7 @@ function apply(ctx, config) {
 		clearInterval(heartbeat);
 		stopRefresher();
 		postApplyCleanup?.();
+		browserAuth?.close();
 	};
 }
 
@@ -3538,6 +3707,7 @@ export {
 	buildTaskCommand,
 	executeGenericSsh,
 	guardMutationRequest,
+	guardSameOriginPostRequest,
 	canonicalHistoryDocument,
 	canonicalStatusDocument,
 	isCanonicalStatusDocument,
@@ -3549,6 +3719,7 @@ export {
 	makeRunner,
 	loadOrCreateAccessToken,
 	websocketRequestAllowed,
+	websocketRequestPrincipal,
 	name,
 	operationHttpResult,
 	resolveMutationWriter,

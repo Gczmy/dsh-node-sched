@@ -6753,6 +6753,29 @@ async function collectHistoryPages(fetchPage, { maxPages = 100 } = {}) {
   }
   throw new Error("history paging limit exceeded");
 }
+var EnabledRequestEpoch = class {
+  constructor(enabled = false) {
+    this.enabled = Boolean(enabled);
+    this.generation = 0;
+  }
+  setEnabled(enabled) {
+    const next = Boolean(enabled);
+    if (next === this.enabled) return false;
+    this.enabled = next;
+    this.invalidate();
+    return true;
+  }
+  invalidate() {
+    this.generation += 1;
+    return this.generation;
+  }
+  issue() {
+    return this.generation;
+  }
+  isCurrent(generation) {
+    return this.enabled && generation === this.generation;
+  }
+};
 var PollGate = class {
   constructor({ ttlMs, now = Date.now } = {}) {
     if (!Number.isFinite(ttlMs) || ttlMs <= 0 || typeof now !== "function") {
@@ -6803,6 +6826,722 @@ var PollGate = class {
       return { ...this.value, ok: false, fresh: false, stale: true, lastError: this.error };
     }
     return { ...this.value, localAgeMs };
+  }
+};
+
+// packages/node-sched-ui/src/auth-gate.js
+var AUTH_API = Object.freeze({
+  challenge: "/sched/api/auth/challenge",
+  verify: "/sched/api/auth/verify",
+  pair: "/sched/api/auth/pair",
+  session: "/sched/api/auth/session",
+  forget: "/sched/api/auth/forget"
+});
+var SESSION_KEY = "node-sched:short-session";
+var LEGACY_MASTER_TOKEN_KEY = "node-sched:access-token";
+var DEVICE_RECORD_ID = "current";
+var EXPIRY_SKEW_MS = 5e3;
+var AuthRequiredError = class extends Error {
+  constructor(message = "node-sched authentication is required") {
+    super(message);
+    this.name = "AuthRequiredError";
+  }
+};
+function bytesToBase64Url(bytes) {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return globalThis.btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
+}
+function base64UrlToBytes(value) {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]+$/u.test(value)) {
+    throw new Error("\u8BA4\u8BC1 challenge \u683C\u5F0F\u65E0\u6548");
+  }
+  const padded = value.replaceAll("-", "+").replaceAll("_", "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+  const binary = globalThis.atob(padded);
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+function expirationMillis(value) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value < 1e10 ? value * 1e3 : value;
+  }
+  if (typeof value === "string" && value.trim()) {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) return expirationMillis(numeric);
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return NaN;
+}
+async function responsePayload(response) {
+  try {
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+function responseMessage(response, payload, fallback) {
+  const detail = payload?.error ?? payload?.message;
+  if (typeof detail === "string" && detail.trim()) return detail.trim().slice(0, 240);
+  return `${fallback} (HTTP ${response.status})`;
+}
+function requestPromise2(request) {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error ?? new Error("IndexedDB request failed"));
+  });
+}
+function transactionPromise(transaction) {
+  return new Promise((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error ?? new Error("IndexedDB transaction failed"));
+    transaction.onabort = () => reject(transaction.error ?? new Error("IndexedDB transaction aborted"));
+  });
+}
+function sameDeviceRecord(current, expected) {
+  if (expected == null) return current == null;
+  return Boolean(
+    current && current.clientId === expected.clientId && current.writeId === expected.writeId && current.createdAt === expected.createdAt && Boolean(current.pending) === Boolean(expected.pending)
+  );
+}
+function reusablePublicKey(record) {
+  const key = record?.publicKeyJwk;
+  return Boolean(
+    key && key.kty === "EC" && key.crv === "P-256" && /^[A-Za-z0-9_-]{43}$/u.test(key.x ?? "") && /^[A-Za-z0-9_-]{43}$/u.test(key.y ?? "")
+  );
+}
+function pairFailureIsDefinitelyPrecommit(response, payload) {
+  const status = Number(response?.status);
+  if (status === 401 || status === 403 || status === 405) return true;
+  if (status === 400 && ["invalid_json", "invalid_request"].includes(payload?.code)) return true;
+  return status === 409 && payload?.code === "device_limit";
+}
+function previousTrustedRecord(record) {
+  const seen = /* @__PURE__ */ new Set();
+  let previous = record?.previousRecord;
+  let fallback = null;
+  while (validTrustedRecord(previous) && !seen.has(previous) && seen.size < 16) {
+    seen.add(previous);
+    fallback = previous;
+    previous = previous.previousRecord;
+  }
+  return fallback;
+}
+var IndexedDbTrustedDeviceStore = class {
+  constructor(indexedDb = globalThis.indexedDB, {
+    databaseName = "node-sched-auth",
+    storeName = "trusted-device"
+  } = {}) {
+    this.indexedDb = indexedDb;
+    this.databaseName = databaseName;
+    this.storeName = storeName;
+    this.available = Boolean(indexedDb?.open);
+    this.openPromise = null;
+  }
+  async open() {
+    if (!this.available) throw new Error("\u5F53\u524D\u6D4F\u89C8\u5668\u4E0D\u652F\u6301 IndexedDB \u8BBE\u5907\u4FE1\u4EFB");
+    if (this.openPromise) return this.openPromise;
+    this.openPromise = new Promise((resolve, reject) => {
+      const request = this.indexedDb.open(this.databaseName, 1);
+      request.onupgradeneeded = () => {
+        const database = request.result;
+        if (!database.objectStoreNames.contains(this.storeName)) {
+          database.createObjectStore(this.storeName, { keyPath: "id" });
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error ?? new Error("\u65E0\u6CD5\u6253\u5F00\u8BBE\u5907\u4FE1\u4EFB\u5B58\u50A8"));
+      request.onblocked = () => reject(new Error("\u8BBE\u5907\u4FE1\u4EFB\u5B58\u50A8\u88AB\u5176\u4ED6\u9875\u9762\u963B\u585E"));
+    }).catch((error) => {
+      this.openPromise = null;
+      throw error;
+    });
+    return this.openPromise;
+  }
+  async load() {
+    const database = await this.open();
+    const transaction = database.transaction(this.storeName, "readonly");
+    return requestPromise2(transaction.objectStore(this.storeName).get(DEVICE_RECORD_ID));
+  }
+  async save(record, options = {}) {
+    const database = await this.open();
+    const transaction = database.transaction(this.storeName, "readwrite");
+    const store = transaction.objectStore(this.storeName);
+    let written = false;
+    if (Object.hasOwn(options, "expected")) {
+      const request = store.get(DEVICE_RECORD_ID);
+      request.onsuccess = () => {
+        if (!sameDeviceRecord(request.result, options.expected)) return;
+        store.put({ ...record, id: DEVICE_RECORD_ID });
+        written = true;
+      };
+    } else {
+      store.put({ ...record, id: DEVICE_RECORD_ID });
+      written = true;
+    }
+    await transactionPromise(transaction);
+    return written;
+  }
+  async clear(expectedClientId) {
+    if (!this.available) return;
+    const database = await this.open();
+    const transaction = database.transaction(this.storeName, "readwrite");
+    const store = transaction.objectStore(this.storeName);
+    let removed = false;
+    if (expectedClientId) {
+      const request = store.get(DEVICE_RECORD_ID);
+      request.onsuccess = () => {
+        const matches = typeof expectedClientId === "string" ? request.result?.clientId === expectedClientId : sameDeviceRecord(request.result, expectedClientId);
+        if (matches) {
+          store.delete(DEVICE_RECORD_ID);
+          removed = true;
+        }
+      };
+    } else {
+      store.delete(DEVICE_RECORD_ID);
+      removed = true;
+    }
+    await transactionPromise(transaction);
+    return removed;
+  }
+};
+function validTrustedRecord(record) {
+  return Boolean(
+    record && typeof record.clientId === "string" && /^[A-Za-z0-9_-]{16,128}$/u.test(record.clientId) && record.privateKey && record.privateKey.type === "private" && record.privateKey.extractable === false && record.privateKey.algorithm?.name === "ECDSA" && record.privateKey.algorithm?.namedCurve === "P-256"
+  );
+}
+var BrowserAuthGate = class {
+  constructor({
+    fetchImpl = globalThis.fetch?.bind(globalThis),
+    cryptoImpl = globalThis.crypto,
+    sessionStorage = globalThis.sessionStorage,
+    deviceStore = new IndexedDbTrustedDeviceStore(),
+    now = () => Date.now()
+  } = {}) {
+    if (typeof fetchImpl !== "function") throw new Error("fetch is required for node-sched authentication");
+    this.fetchImpl = fetchImpl;
+    this.crypto = cryptoImpl;
+    this.sessionStorage = sessionStorage;
+    this.deviceStore = deviceStore;
+    this.now = now;
+    this.listeners = /* @__PURE__ */ new Set();
+    this.credentialValue = null;
+    this.trustedRecord = null;
+    this.pending = null;
+    this.operationId = 0;
+    this.state = Object.freeze({
+      status: "idle",
+      message: "",
+      canTrust: Boolean(deviceStore?.available),
+      hasTrustedDevice: false,
+      trusted: false,
+      clientId: null,
+      expiresAt: null
+    });
+    try {
+      this.sessionStorage?.removeItem(LEGACY_MASTER_TOKEN_KEY);
+    } catch {
+    }
+  }
+  snapshot() {
+    return this.state;
+  }
+  subscribe(listener) {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+  _publish(patch) {
+    this.state = Object.freeze({ ...this.state, ...patch });
+    for (const listener of [...this.listeners]) {
+      try {
+        listener(this.state);
+      } catch {
+      }
+    }
+  }
+  _readSession() {
+    try {
+      const raw = this.sessionStorage?.getItem(SESSION_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      const expiresAt = expirationMillis(parsed?.expiresAt);
+      if (!validAccessToken(parsed?.accessToken) || !Number.isFinite(expiresAt)) return null;
+      return { ...parsed, expiresAt };
+    } catch {
+      return null;
+    }
+  }
+  _writeSession(session) {
+    try {
+      this.sessionStorage?.setItem(SESSION_KEY, JSON.stringify(session));
+    } catch {
+    }
+  }
+  _clearSession(expectedToken) {
+    try {
+      if (expectedToken) {
+        const current = this._readSession();
+        if (current?.accessToken !== expectedToken) return;
+      }
+      this.sessionStorage?.removeItem(SESSION_KEY);
+    } catch {
+    }
+  }
+  _installCredential(payload, { trusted, clientId }) {
+    const accessToken = payload?.accessToken;
+    const expiresAt = expirationMillis(payload?.expiresAt);
+    if (!validAccessToken(accessToken) || !Number.isFinite(expiresAt) || expiresAt <= this.now() + EXPIRY_SKEW_MS) {
+      throw new Error("\u670D\u52A1\u7AEF\u8FD4\u56DE\u7684\u77ED\u671F\u8BBF\u95EE\u51ED\u636E\u65E0\u6548");
+    }
+    const resolvedClientId = payload?.clientId ?? clientId ?? null;
+    const credential = Object.freeze({ accessToken, expiresAt, generation: Symbol("credential") });
+    this.credentialValue = credential;
+    this._writeSession({ accessToken, expiresAt, clientId: resolvedClientId, trusted: Boolean(trusted) });
+    this._publish({
+      status: "ready",
+      message: "",
+      trusted: Boolean(trusted),
+      clientId: resolvedClientId,
+      expiresAt,
+      hasTrustedDevice: Boolean(trusted || this.trustedRecord)
+    });
+    return credential;
+  }
+  requireCredential() {
+    const credential = this.credentialValue;
+    if (!credential || this.state.status !== "ready") throw new AuthRequiredError();
+    if (credential.expiresAt <= this.now() + EXPIRY_SKEW_MS) {
+      this.rejectCredential(credential, "\u77ED\u671F\u8BBF\u95EE\u51ED\u636E\u5DF2\u8FC7\u671F\uFF0C\u8BF7\u91CD\u65B0\u9A8C\u8BC1\u3002");
+      throw new AuthRequiredError("node-sched session expired");
+    }
+    return credential;
+  }
+  isReady() {
+    try {
+      this.requireCredential();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  rejectCredential(credential, message = "\u8BA4\u8BC1\u5DF2\u5931\u6548\uFF0C\u8BF7\u91CD\u65B0\u9A8C\u8BC1\u5F53\u524D\u8BBE\u5907\u3002") {
+    if (!credential || this.credentialValue !== credential) return false;
+    this.credentialValue = null;
+    this._clearSession(credential.accessToken);
+    this._publish({
+      status: "locked",
+      message,
+      trusted: false,
+      expiresAt: null,
+      hasTrustedDevice: Boolean(this.state.hasTrustedDevice || this.trustedRecord)
+    });
+    return true;
+  }
+  async authorizedFetch(input, init = {}) {
+    const credential = this.requireCredential();
+    const headers = new Headers(init.headers ?? {});
+    headers.set("authorization", `Bearer ${credential.accessToken}`);
+    const response = await this.fetchImpl(input, { ...init, headers });
+    if (response.status === 401) this.rejectCredential(credential);
+    return response;
+  }
+  webSocketProtocols() {
+    const credential = this.requireCredential();
+    return ["sched-auth", credential.accessToken];
+  }
+  _startOperation(status) {
+    this.cancelPending();
+    const operation = {
+      id: ++this.operationId,
+      controller: new AbortController(),
+      promise: null
+    };
+    this.pending = operation;
+    this._publish({ status, message: "" });
+    return operation;
+  }
+  _isCurrent(operation) {
+    return this.pending === operation && this.operationId === operation.id;
+  }
+  _finishOperation(operation) {
+    if (this.pending === operation) this.pending = null;
+  }
+  cancelPending() {
+    const pending = this.pending;
+    if (!pending) return false;
+    this.pending = null;
+    this.operationId += 1;
+    pending.controller.abort();
+    if (this.state.status !== "ready") this._publish({ status: "required", message: "" });
+    return true;
+  }
+  async _postJson(path, body, { bearer, signal } = {}) {
+    const headers = new Headers({ "content-type": "application/json" });
+    if (bearer) headers.set("authorization", `Bearer ${bearer}`);
+    const response = await this.fetchImpl(path, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal
+    });
+    const payload = await responsePayload(response);
+    return { response, payload };
+  }
+  async _loadTrustedRecord(operation) {
+    const isCurrent = () => !operation || this._isCurrent(operation);
+    if (!this.deviceStore?.available) {
+      if (isCurrent()) this._publish({ canTrust: false, hasTrustedDevice: false });
+      return null;
+    }
+    try {
+      const record = await this.deviceStore.load();
+      if (!isCurrent()) return null;
+      if (!record) {
+        this.trustedRecord = null;
+        this._publish({ hasTrustedDevice: false });
+        return null;
+      }
+      if (!validTrustedRecord(record)) {
+        const removed = await this.deviceStore.clear(record);
+        if (!isCurrent()) return null;
+        if (!removed) {
+          const replacement = await this._adoptCurrentDeviceRecord(operation);
+          if (!isCurrent()) return null;
+          if (replacement) {
+            this._publish({ canTrust: true, hasTrustedDevice: true, clientId: replacement.clientId });
+            return replacement;
+          }
+          throw new Error("\u8BBE\u5907\u8BB0\u5F55\u5DF2\u88AB\u5176\u4ED6\u9875\u9762\u66F4\u65B0\uFF0C\u8BF7\u91CD\u8BD5");
+        }
+        this.trustedRecord = null;
+        this._publish({ hasTrustedDevice: false });
+        return null;
+      }
+      this.trustedRecord = record;
+      this._publish({ canTrust: true, hasTrustedDevice: true, clientId: record.clientId });
+      return record;
+    } catch (error) {
+      if (!isCurrent()) return null;
+      this._publish({ canTrust: false, hasTrustedDevice: false });
+      throw new Error(`\u65E0\u6CD5\u8BFB\u53D6\u53D7\u4FE1\u8BBE\u5907\uFF1A${error?.message ?? error}`);
+    }
+  }
+  async _adoptCurrentDeviceRecord(operation) {
+    const record = await this.deviceStore.load();
+    if (!this._isCurrent(operation)) return false;
+    this.trustedRecord = validTrustedRecord(record) ? record : null;
+    return this.trustedRecord;
+  }
+  async _verifyTrustedRecord(record, operation) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (!this._isCurrent(operation)) return false;
+      const challengeResult = await this._postJson(AUTH_API.challenge, {
+        clientId: record.clientId
+      }, { signal: operation.controller.signal });
+      if (!this._isCurrent(operation)) return false;
+      if (!challengeResult.response.ok || !challengeResult.payload?.ok) {
+        if (challengeResult.payload?.code === "unknown_client") {
+          const removed = await this.deviceStore.clear(record);
+          if (!this._isCurrent(operation)) return false;
+          if (removed) this.trustedRecord = null;
+          else await this._adoptCurrentDeviceRecord(operation);
+          if (!this._isCurrent(operation)) return false;
+        }
+        throw new Error(responseMessage(challengeResult.response, challengeResult.payload, "\u53D7\u4FE1\u8BBE\u5907 challenge \u5931\u8D25"));
+      }
+      const { challengeId, challenge } = challengeResult.payload;
+      if (typeof challengeId !== "string" || !challengeId || typeof challenge !== "string" || !/^[A-Za-z0-9_-]{43}$/u.test(challenge)) {
+        throw new Error("\u670D\u52A1\u7AEF\u8FD4\u56DE\u7684\u8BA4\u8BC1 challenge \u65E0\u6548");
+      }
+      const challengeBytes = base64UrlToBytes(challenge);
+      if (challengeBytes.byteLength !== 32) throw new Error("\u670D\u52A1\u7AEF\u8BA4\u8BC1 challenge \u5FC5\u987B\u4E3A 32 \u5B57\u8282");
+      const signature = await this.crypto.subtle.sign(
+        { name: "ECDSA", hash: "SHA-256" },
+        record.privateKey,
+        challengeBytes
+      );
+      if (!this._isCurrent(operation)) return false;
+      const verifyResult = await this._postJson(AUTH_API.verify, {
+        clientId: record.clientId,
+        challengeId,
+        signature: bytesToBase64Url(new Uint8Array(signature))
+      }, { signal: operation.controller.signal });
+      if (!this._isCurrent(operation)) return false;
+      if (!verifyResult.response.ok || !verifyResult.payload?.ok) {
+        const code = verifyResult.payload?.code;
+        if (code === "invalid_challenge" && attempt === 0 && this._isCurrent(operation)) continue;
+        if (code === "invalid_signature" && record.pending === true && previousTrustedRecord(record)) {
+          const previous = previousTrustedRecord(record);
+          const restored = await this.deviceStore.save(previous, { expected: record });
+          if (!this._isCurrent(operation)) return false;
+          if (restored) this.trustedRecord = previous;
+          else await this._adoptCurrentDeviceRecord(operation);
+          if (!this._isCurrent(operation)) return false;
+        } else if (code === "unknown_client" || code === "invalid_signature") {
+          const removed = await this.deviceStore.clear(record);
+          if (!this._isCurrent(operation)) return false;
+          if (removed) this.trustedRecord = null;
+          else await this._adoptCurrentDeviceRecord(operation);
+          if (!this._isCurrent(operation)) return false;
+        }
+        throw new Error(responseMessage(verifyResult.response, verifyResult.payload, "\u53D7\u4FE1\u8BBE\u5907\u9A8C\u8BC1\u5931\u8D25"));
+      }
+      let finalizedRecord = record;
+      if (record.pending === true) {
+        const { previousRecord: _previousRecord, ...recordWithoutPrevious } = record;
+        const candidate = { ...recordWithoutPrevious, pending: false };
+        let saved = null;
+        try {
+          saved = await this.deviceStore.save(candidate, { expected: record });
+        } catch {
+        }
+        if (!this._isCurrent(operation)) return false;
+        if (saved === false) {
+          await this._adoptCurrentDeviceRecord(operation);
+          if (!this._isCurrent(operation)) return false;
+          throw new Error("\u8BBE\u5907\u8BB0\u5F55\u5DF2\u88AB\u5176\u4ED6\u9875\u9762\u66F4\u65B0\uFF0C\u8BF7\u91CD\u8BD5");
+        }
+        if (saved === true) finalizedRecord = candidate;
+      }
+      if (!this._isCurrent(operation)) return false;
+      this.trustedRecord = finalizedRecord;
+      this._installCredential(verifyResult.payload, { trusted: true, clientId: record.clientId });
+      return true;
+    }
+    return false;
+  }
+  async restore({ force = false } = {}) {
+    if (!force && this.isReady()) return true;
+    if (this.pending) return this.pending.promise;
+    const operation = this._startOperation("restoring");
+    operation.promise = (async () => {
+      try {
+        const session = this._readSession();
+        if (!force && session && session.expiresAt > this.now() + EXPIRY_SKEW_MS) {
+          if (session.trusted && this.deviceStore?.available) {
+            try {
+              await this._loadTrustedRecord(operation);
+            } catch {
+            }
+          }
+          if (!this._isCurrent(operation)) return false;
+          this._installCredential(session, {
+            trusted: Boolean(session.trusted),
+            clientId: session.clientId ?? null
+          });
+          return true;
+        }
+        this._clearSession();
+        this.credentialValue = null;
+        const record = await this._loadTrustedRecord(operation);
+        if (!this._isCurrent(operation)) return false;
+        if (!record) {
+          this._publish({ status: "required", message: "", trusted: false, expiresAt: null });
+          return false;
+        }
+        return await this._verifyTrustedRecord(record, operation);
+      } catch (error) {
+        if (!this._isCurrent(operation) || error?.name === "AbortError") return false;
+        this.credentialValue = null;
+        this._publish({
+          status: "required",
+          message: String(error?.message ?? error).slice(0, 240),
+          trusted: false,
+          expiresAt: null,
+          hasTrustedDevice: Boolean(this.trustedRecord)
+        });
+        return false;
+      } finally {
+        this._finishOperation(operation);
+      }
+    })();
+    return operation.promise;
+  }
+  async pair(masterToken, { remember = true, label = "\u6D4F\u89C8\u5668", trustDays = 30 } = {}) {
+    const master = String(masterToken ?? "").trim();
+    if (!validAccessToken(master)) {
+      this._publish({ status: "required", message: "\u672C\u673A\u4E3B\u4EE4\u724C\u683C\u5F0F\u65E0\u6548" });
+      throw new Error("\u672C\u673A\u4E3B\u4EE4\u724C\u683C\u5F0F\u65E0\u6548");
+    }
+    const operation = this._startOperation("pairing");
+    operation.promise = (async () => {
+      try {
+        if (!remember) {
+          const result2 = await this._postJson(AUTH_API.session, {}, {
+            bearer: master,
+            signal: operation.controller.signal
+          });
+          if (!this._isCurrent(operation)) return false;
+          if (!result2.response.ok || !result2.payload?.ok) {
+            throw new Error(responseMessage(result2.response, result2.payload, "\u521B\u5EFA\u4E34\u65F6\u4F1A\u8BDD\u5931\u8D25"));
+          }
+          this._installCredential(result2.payload, {
+            trusted: false,
+            clientId: result2.payload.clientId ?? null
+          });
+          return true;
+        }
+        if (!this.deviceStore?.available || !this.crypto?.subtle) {
+          throw new Error("\u5F53\u524D\u6D4F\u89C8\u5668\u65E0\u6CD5\u5B89\u5168\u4FDD\u5B58\u53D7\u4FE1\u8BBE\u5907\u5BC6\u94A5\uFF0C\u8BF7\u9009\u62E9\u4EC5\u672C\u6B21\u4F1A\u8BDD");
+        }
+        let storedRecord;
+        try {
+          storedRecord = await this.deviceStore.load();
+        } catch (error) {
+          throw new Error(`\u65E0\u6CD5\u8BFB\u53D6\u53D7\u4FE1\u8BBE\u5907\u79C1\u94A5\uFF1A${error?.message ?? error}`);
+        }
+        if (!this._isCurrent(operation)) return false;
+        if (storedRecord && !validTrustedRecord(storedRecord)) {
+          const removed = await this.deviceStore.clear(storedRecord);
+          if (!this._isCurrent(operation)) return false;
+          if (!removed) {
+            await this._adoptCurrentDeviceRecord(operation);
+            if (!this._isCurrent(operation)) return false;
+            throw new Error("\u8BBE\u5907\u8BB0\u5F55\u5DF2\u88AB\u5176\u4ED6\u9875\u9762\u66F4\u65B0\uFF0C\u8BF7\u91CD\u8BD5");
+          }
+          storedRecord = null;
+        }
+        let privateKey;
+        let publicKeyJwk;
+        if (storedRecord && reusablePublicKey(storedRecord)) {
+          privateKey = storedRecord.privateKey;
+          publicKeyJwk = storedRecord.publicKeyJwk;
+        } else {
+          const keyPair = await this.crypto.subtle.generateKey(
+            { name: "ECDSA", namedCurve: "P-256" },
+            false,
+            ["sign", "verify"]
+          );
+          if (!this._isCurrent(operation)) return false;
+          if (keyPair.privateKey.extractable !== false) throw new Error("\u6D4F\u89C8\u5668\u672A\u751F\u6210\u4E0D\u53EF\u5BFC\u51FA\u7684\u8BBE\u5907\u79C1\u94A5");
+          publicKeyJwk = await this.crypto.subtle.exportKey("jwk", keyPair.publicKey);
+          if (!this._isCurrent(operation)) return false;
+          privateKey = keyPair.privateKey;
+        }
+        const clientId = storedRecord?.clientId ?? this.crypto.randomUUID();
+        const writeId = this.crypto.randomUUID();
+        const record = {
+          clientId,
+          privateKey,
+          publicKeyJwk,
+          label: String(label || "\u6D4F\u89C8\u5668").trim().slice(0, 80) || "\u6D4F\u89C8\u5668",
+          createdAt: new Date(this.now()).toISOString(),
+          writeId,
+          pending: true
+        };
+        if (storedRecord) {
+          const earliest = previousTrustedRecord(storedRecord) ?? storedRecord;
+          const { previousRecord: _nestedPrevious, ...stableRecord } = earliest;
+          record.previousRecord = stableRecord;
+        }
+        try {
+          const saved = await this.deviceStore.save(record, { expected: storedRecord ?? null });
+          if (!this._isCurrent(operation)) {
+            if (saved) {
+              try {
+                if (storedRecord) await this.deviceStore.save(storedRecord, { expected: record });
+                else await this.deviceStore.clear(record);
+              } catch {
+              }
+            }
+            return false;
+          }
+          if (!saved) {
+            await this._adoptCurrentDeviceRecord(operation);
+            if (!this._isCurrent(operation)) return false;
+            throw new Error("\u8BBE\u5907\u8BB0\u5F55\u5DF2\u88AB\u5176\u4ED6\u9875\u9762\u66F4\u65B0\uFF0C\u8BF7\u91CD\u8BD5");
+          }
+        } catch (error) {
+          throw new Error(`\u65E0\u6CD5\u4FDD\u5B58\u53D7\u4FE1\u8BBE\u5907\u79C1\u94A5\uFF1A${error?.message ?? error}`);
+        }
+        this.trustedRecord = record;
+        const result = await this._postJson(AUTH_API.pair, {
+          clientId,
+          publicKeyJwk,
+          label: record.label,
+          trustDays
+        }, { bearer: master, signal: operation.controller.signal });
+        if (!this._isCurrent(operation)) return false;
+        if (!result.response.ok || !result.payload?.ok) {
+          if (pairFailureIsDefinitelyPrecommit(result.response, result.payload)) {
+            const reverted = storedRecord ? await this.deviceStore.save(storedRecord, { expected: record }) : await this.deviceStore.clear(record);
+            if (!this._isCurrent(operation)) return false;
+            if (!reverted) {
+              await this._adoptCurrentDeviceRecord(operation);
+              if (!this._isCurrent(operation)) return false;
+              throw new Error("\u8BBE\u5907\u8BB0\u5F55\u5DF2\u88AB\u5176\u4ED6\u9875\u9762\u66F4\u65B0\uFF0C\u8BF7\u91CD\u8BD5");
+            }
+            this.trustedRecord = storedRecord ?? null;
+          }
+          throw new Error(responseMessage(result.response, result.payload, "\u53D7\u4FE1\u8BBE\u5907\u914D\u5BF9\u5931\u8D25"));
+        }
+        const { previousRecord: _previousRecord, ...recordWithoutPrevious } = record;
+        const finalizedRecord = { ...recordWithoutPrevious, pending: false };
+        let finalizedSaved = null;
+        try {
+          finalizedSaved = await this.deviceStore.save(finalizedRecord, { expected: record });
+        } catch {
+        }
+        if (!this._isCurrent(operation)) return false;
+        if (finalizedSaved === false) {
+          await this._adoptCurrentDeviceRecord(operation);
+          if (!this._isCurrent(operation)) return false;
+          throw new Error("\u8BBE\u5907\u8BB0\u5F55\u5DF2\u88AB\u5176\u4ED6\u9875\u9762\u66F4\u65B0\uFF0C\u8BF7\u91CD\u8BD5");
+        }
+        if (finalizedSaved === true) this.trustedRecord = finalizedRecord;
+        this._installCredential(result.payload, { trusted: true, clientId });
+        return true;
+      } catch (error) {
+        if (!this._isCurrent(operation) || error?.name === "AbortError") return false;
+        this.credentialValue = null;
+        this._publish({
+          status: "required",
+          message: String(error?.message ?? error).slice(0, 240),
+          trusted: false,
+          expiresAt: null,
+          hasTrustedDevice: Boolean(this.trustedRecord)
+        });
+        throw error;
+      } finally {
+        this._finishOperation(operation);
+      }
+    })();
+    return operation.promise;
+  }
+  async forget() {
+    const credential = this.requireCredential();
+    const trusted = this.state.trusted;
+    const clientId = trusted ? this.state.clientId ?? this.trustedRecord?.clientId ?? null : null;
+    if (clientId) {
+      const result = await this._postJson(AUTH_API.forget, { clientId }, {
+        bearer: credential.accessToken
+      });
+      if (result.response.status === 401) this.rejectCredential(credential);
+      if (!result.response.ok || !result.payload?.ok) {
+        throw new Error(responseMessage(result.response, result.payload, "\u5FD8\u8BB0\u8BBE\u5907\u5931\u8D25"));
+      }
+    }
+    if (trusted) {
+      try {
+        await this.deviceStore?.clear(clientId);
+      } catch {
+      }
+    }
+    if (trusted) this.trustedRecord = null;
+    if (this.credentialValue === credential) this.credentialValue = null;
+    this._clearSession(credential.accessToken);
+    this._publish({
+      status: "required",
+      message: trusted ? "\u5F53\u524D\u8BBE\u5907\u5DF2\u64A4\u9500\u3002" : "\u672C\u6B21\u4F1A\u8BDD\u5DF2\u7ED3\u675F\u3002",
+      trusted: false,
+      clientId: null,
+      expiresAt: null,
+      hasTrustedDevice: Boolean(this.trustedRecord)
+    });
+    return true;
+  }
+  dispose() {
+    this.cancelPending();
+    this.listeners.clear();
   }
 };
 
@@ -6984,32 +7723,23 @@ function apply(cctx, config) {
   const bar = (pct) => ({ height: 6, background: "rgba(127,127,127,.2)", borderRadius: 3, overflow: "hidden", flex: 1, margin: "0 8px", display: "flex" });
   const barFill = (pct) => ({ height: "100%", width: `${Math.max(0, Math.min(100, pct))}%`, background: T.brand });
   const Badge = ({ s }) => j("span", { style: badge(s) }, s);
-  const ACCESS_TOKEN_KEY = "node-sched:access-token";
   const durableRequests = createIndexedDbRequestStore();
-  function accessToken() {
-    const stored = sessionStorage.getItem(ACCESS_TOKEN_KEY);
-    if (validAccessToken(stored)) return stored;
-    const entered = window.prompt(
-      "node-sched \u9700\u8981\u672C\u673A\u8BBF\u95EE\u4EE4\u724C\u3002\u8BF7\u7C98\u8D34 ~/.dsh/node-sched-access-token \u7684\u5185\u5BB9\uFF1A",
-      ""
-    );
-    const token = String(entered ?? "").trim();
-    if (!validAccessToken(token)) {
-      sessionStorage.removeItem(ACCESS_TOKEN_KEY);
-      throw new Error("\u672C\u673A\u8BBF\u95EE\u4EE4\u724C\u7F3A\u5931\u6216\u683C\u5F0F\u65E0\u6548");
-    }
-    sessionStorage.setItem(ACCESS_TOKEN_KEY, token);
-    return token;
-  }
+  const authGate = new BrowserAuthGate({
+    fetchImpl: globalThis.fetch.bind(globalThis),
+    cryptoImpl: globalThis.crypto,
+    sessionStorage: globalThis.sessionStorage,
+    deviceStore: new IndexedDbTrustedDeviceStore(globalThis.indexedDB)
+  });
   async function authFetch(input, init = {}) {
-    const headers = new Headers(init.headers ?? {});
-    headers.set("authorization", `Bearer ${accessToken()}`);
-    const response = await globalThis.fetch(input, { ...init, headers });
-    if (response.status === 401) sessionStorage.removeItem(ACCESS_TOKEN_KEY);
-    return response;
+    return authGate.authorizedFetch(input, init);
   }
   function authenticatedWebSocket(url) {
-    return new WebSocket(url, ["sched-auth", accessToken()]);
+    return new WebSocket(url, authGate.webSocketProtocols());
+  }
+  function useAuthGateState() {
+    const [state, setState] = useState(authGate.snapshot());
+    useEffect(() => authGate.subscribe(setState), []);
+    return state;
   }
   async function mutationPayloadKey(action, payload) {
     const bytes = new TextEncoder().encode(String(payload));
@@ -7087,7 +7817,7 @@ function apply(cctx, config) {
       let closed = false;
       let timer;
       const connect = () => {
-        if (closed) return;
+        if (closed || !authGate.isReady()) return;
         const proto = location.protocol === "https:" ? "wss://" : "ws://";
         try {
           ws = authenticatedWebSocket(`${proto}${location.host}/sched/ws/events`);
@@ -7122,7 +7852,7 @@ function apply(cctx, config) {
         };
         ws.onclose = () => {
           if (socketRef.current === ws) socketRef.current = null;
-          if (closed) return;
+          if (closed || !authGate.isReady()) return;
           setState((s) => ({ ...s, connected: false, authQueue: [] }));
           timer = setTimeout(connect, 3e3);
         };
@@ -7146,19 +7876,29 @@ function apply(cctx, config) {
     }, []);
     return [state, clearAuth];
   }
-  function useSnapshot(path, ms) {
+  function useSnapshot(path, ms, enabled = true) {
     const gateRef = useRef(null);
     if (gateRef.current === null) {
       gateRef.current = new PollGate({ ttlMs: Math.max(ms * 2, 3e4) });
     }
     const inFlightRef = useRef(null);
+    const requestEpochRef = useRef(null);
+    if (requestEpochRef.current === null) requestEpochRef.current = new EnabledRequestEpoch(enabled);
+    if (requestEpochRef.current.setEnabled(enabled)) {
+      inFlightRef.current = null;
+    }
     const [data, setData] = useState(null);
     const refresh = useCallback(() => {
-      if (inFlightRef.current) return inFlightRef.current;
+      if (!enabled) return Promise.resolve();
+      const generation = requestEpochRef.current.issue();
+      if (inFlightRef.current?.generation === generation) return inFlightRef.current.promise;
       const gate = gateRef.current;
       const sequence = gate.issue();
       let firstEnvelope;
-      const request = collectStatusPages(async ({ cursor, jobCursor }) => {
+      const entry = { generation, promise: null };
+      const isCurrent = () => requestEpochRef.current.isCurrent(generation);
+      entry.promise = collectStatusPages(async ({ cursor, jobCursor }) => {
+        if (!isCurrent()) throw new Error("status request superseded");
         const query = new URLSearchParams();
         if (cursor !== null) query.set("cursor", cursor);
         if (jobCursor !== null) query.set("job_cursor", jobCursor);
@@ -7171,7 +7911,7 @@ function apply(cctx, config) {
         firstEnvelope ??= envelope;
         return envelope.raw;
       }).then((raw) => {
-        gate.succeed(sequence, {
+        if (isCurrent()) gate.succeed(sequence, {
           ...firstEnvelope,
           ok: true,
           fresh: true,
@@ -7179,19 +7919,23 @@ function apply(cctx, config) {
           raw
         });
       }, (error) => {
-        gate.fail(sequence, error);
+        if (isCurrent()) gate.fail(sequence, error);
       }).finally(() => {
-        if (inFlightRef.current === request) inFlightRef.current = null;
-        setData(gate.snapshot());
+        if (inFlightRef.current === entry) inFlightRef.current = null;
+        if (isCurrent()) setData(gate.snapshot());
       });
-      inFlightRef.current = request;
-      return request;
-    }, [path]);
+      inFlightRef.current = entry;
+      return entry.promise;
+    }, [enabled, path]);
     useEffect(() => {
+      if (!enabled) {
+        setData(null);
+        return void 0;
+      }
       let alive = true;
-      const update = () => refresh().finally(() => {
-        if (alive) setData(gateRef.current.snapshot());
-      });
+      const update = () => {
+        void refresh();
+      };
       update();
       const pollTimer = setInterval(update, ms);
       const ttlTimer = setInterval(() => {
@@ -7199,10 +7943,12 @@ function apply(cctx, config) {
       }, Math.min(ms, 5e3));
       return () => {
         alive = false;
+        requestEpochRef.current.invalidate();
+        inFlightRef.current = null;
         clearInterval(pollTimer);
         clearInterval(ttlTimer);
       };
-    }, [ms, refresh]);
+    }, [enabled, ms, refresh]);
     return [data, refresh];
   }
   function parseProgress(p) {
@@ -7387,6 +8133,7 @@ function apply(cctx, config) {
     const [busy, setBusy] = useState("");
     const [msg, setMsg] = useState("");
     const [confirmAlias, setConfirmAlias] = useState(null);
+    const [pinDraft, setPinDraft] = useState(null);
     const [termAlias, setTermAlias] = useState(null);
     const [binding, setBinding] = useState(null);
     const load = useCallback(async () => {
@@ -7469,25 +8216,21 @@ function apply(cctx, config) {
         setBusy("");
       }
     };
-    const doPin = async (host) => {
-      const entered = window.prompt(
-        `\u7C98\u8D34 ${host.alias} \u7684 OpenSSH SHA256 host key \u6307\u7EB9\uFF1A`,
-        host.hostKey ?? "SHA256:"
-      );
-      if (entered === null) return;
-      const hostKey = entered.trim();
+    const doPin = async () => {
+      if (!pinDraft) return;
+      const hostKey = pinDraft.value.trim();
       if (!validHostKey(hostKey)) {
         setMsg("\u5931\u8D25: host pin \u5FC5\u987B\u662F OpenSSH SHA256: \u52A0 43 \u4F4D base64 \u6307\u7EB9");
         return;
       }
-      setBusy("pin:" + host.alias);
+      setBusy("pin:" + pinDraft.alias);
       try {
         const response = await authFetch("/sched/ssh/hosts", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
             action: "update",
-            alias: host.alias,
+            alias: pinDraft.alias,
             patch: { hostKey }
           })
         });
@@ -7495,7 +8238,8 @@ function apply(cctx, config) {
         if (!response.ok || !result.host) {
           throw new Error(result.error ?? `HTTP ${response.status}`);
         }
-        setMsg(`\u2705 ${host.alias} host key \u5DF2\u56FA\u5B9A`);
+        setMsg(`\u2705 ${pinDraft.alias} host key \u5DF2\u56FA\u5B9A`);
+        setPinDraft(null);
         await load();
       } catch (error) {
         setMsg("\u5931\u8D25: " + error.message);
@@ -7541,6 +8285,21 @@ function apply(cctx, config) {
         { style: { color: T.label2, fontSize: 13 } },
         "\u6682\u65E0\u4E3B\u673A \u2014\u2014 \u70B9\u4E0A\u65B9\u300C\u4ECE ~/.ssh/config \u5BFC\u5165\u300D\u4E00\u952E\u5BFC\u5165"
       ),
+      pinDraft && jsxs2("div", {
+        style: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", padding: "8px 10px", border: `1px solid ${T.warn}`, borderRadius: 8 }
+      }, [
+        j("label", { style: { flex: 1, minWidth: 260 } }, [
+          j("span", { style: { display: "block", color: T.label2, marginBottom: 4 } }, `${pinDraft.alias} \u7684 OpenSSH SHA256 host key \u6307\u7EB9`),
+          j("input", {
+            value: pinDraft.value,
+            onChange: (event) => setPinDraft((current) => ({ ...current, value: event.target.value })),
+            spellCheck: false,
+            style: { width: "100%", boxSizing: "border-box", padding: "7px 9px", borderRadius: 8, border: `1px solid ${T.border}`, fontFamily: "monospace" }
+          })
+        ]),
+        j("button", { onClick: doPin, disabled: !!busy, style: btn(T.warn, !!busy) }, busy === "pin:" + pinDraft.alias ? "\u4FDD\u5B58\u4E2D\u2026" : "\u4FDD\u5B58 pin"),
+        j("button", { onClick: () => setPinDraft(null), disabled: !!busy, style: ghostBtn }, "\u53D6\u6D88")
+      ]),
       hosts !== null && jsxs2("div", { style: { display: "flex", flexDirection: "column", gap: 6 } }, [
         ...hosts.map((h) => {
           const boundHere = binding?.alias === h.alias;
@@ -7577,7 +8336,7 @@ function apply(cctx, config) {
             }, busy === "bind:" + h.alias ? "\u7ED1\u5B9A\u4E2D\u2026" : "\u8BBE\u4E3ASCHED"),
             j("button", {
               key: "pin",
-              onClick: () => doPin(h),
+              onClick: () => setPinDraft({ alias: h.alias, value: h.hostKey ?? "SHA256:" }),
               disabled: !!busy,
               title: "\u56FA\u5B9A OpenSSH SHA256 host key \u6307\u7EB9\uFF1B\u672A\u56FA\u5B9A\u65F6\u62D2\u7EDD\u8FDE\u63A5",
               style: { ...ghostBtn, color: h.hostKeyReady ? T.label2 : T.warn, flexShrink: 0 }
@@ -7667,7 +8426,15 @@ function apply(cctx, config) {
           }
         });
         ro.observe(el);
-      })();
+      })().catch((error) => {
+        if (disposed) return;
+        try {
+          term?.write(`\r
+\x1B[31m\u25A0 \u7EC8\u7AEF\u8BA4\u8BC1\u4E0D\u53EF\u7528: ${String(error?.message ?? error).slice(0, 160)}\x1B[0m\r
+`);
+        } catch {
+        }
+      });
       return () => {
         disposed = true;
         try {
@@ -8425,7 +9192,109 @@ function apply(cctx, config) {
       ]))
     ]);
   }
-  function Dashboard({ onClose, visible }) {
+  function AuthenticationGate({ auth, onCancel }) {
+    const [token, setToken] = useState("");
+    const [remember, setRemember] = useState(auth.canTrust);
+    const [label, setLabel] = useState(() => {
+      const platform = String(globalThis.navigator?.platform ?? "").trim();
+      return platform ? `${platform} \u6D4F\u89C8\u5668` : "\u5F53\u524D\u6D4F\u89C8\u5668";
+    });
+    const restoring = auth.status === "idle" || auth.status === "restoring";
+    const busy = restoring || auth.status === "pairing";
+    useEffect(() => {
+      if (!auth.canTrust) setRemember(false);
+    }, [auth.canTrust]);
+    useEffect(() => {
+      const onKeyDown = (event) => {
+        if (event.key !== "Escape") return;
+        authGate.cancelPending();
+        setToken("");
+        onCancel();
+      };
+      window.addEventListener("keydown", onKeyDown);
+      return () => window.removeEventListener("keydown", onKeyDown);
+    }, [onCancel]);
+    const submit = async (event) => {
+      event.preventDefault();
+      if (busy || !token.trim()) return;
+      const masterToken = token;
+      setToken("");
+      try {
+        await authGate.pair(masterToken, { remember, label, trustDays: 30 });
+      } catch {
+      }
+    };
+    const cancel = () => {
+      authGate.cancelPending();
+      setToken("");
+      onCancel();
+    };
+    return jsxs2("div", { style: overlayStyle }, [
+      jsxs2("div", { style: { ...panelStyle, maxWidth: 560, justifyContent: "center" } }, [
+        j("form", {
+          onSubmit: submit,
+          style: {
+            background: T.bgLayer,
+            border: `1px solid ${T.border}`,
+            borderRadius: 12,
+            padding: 20,
+            display: "flex",
+            flexDirection: "column",
+            gap: 12
+          }
+        }, [
+          j("h2", { style: { ...boardTitleStyle, fontSize: 18 } }, "\u8FDE\u63A5 sched \u770B\u677F"),
+          j("div", { style: { color: T.label2 } }, busy ? restoring ? "\u6B63\u5728\u9A8C\u8BC1\u53D7\u4FE1\u8BBE\u5907\u2026" : "\u6B63\u5728\u521B\u5EFA\u77ED\u671F\u8BBF\u95EE\u4F1A\u8BDD\u2026" : "\u9996\u6B21\u8FDE\u63A5\u9700\u8981\u7C98\u8D34\u4E00\u6B21\u672C\u673A\u4E3B\u4EE4\u724C\u3002\u4E3B\u4EE4\u724C\u53EA\u7528\u4E8E\u672C\u6B21\u914D\u5BF9\uFF0C\u4E0D\u4F1A\u4FDD\u5B58\u5728\u6D4F\u89C8\u5668\u4E2D\u3002"),
+          auth.message && j("div", {
+            role: "alert",
+            style: { color: T.err, border: `1px solid ${T.err}`, borderRadius: 8, padding: "8px 10px" }
+          }, auth.message),
+          auth.hasTrustedDevice && !busy && j("button", {
+            type: "button",
+            onClick: () => {
+              void authGate.restore({ force: true });
+            },
+            style: btn(T.brand)
+          }, "\u4F7F\u7528\u53D7\u4FE1\u8BBE\u5907\u91CD\u65B0\u9A8C\u8BC1"),
+          !busy && j("label", { style: { display: "flex", flexDirection: "column", gap: 5 } }, [
+            j("span", null, "\u672C\u673A\u4E3B\u4EE4\u724C"),
+            j("input", {
+              type: "password",
+              value: token,
+              onChange: (event) => setToken(event.target.value),
+              autoComplete: "off",
+              spellCheck: false,
+              placeholder: "\u7C98\u8D34 ~/.dsh/node-sched-access-token \u7684\u5185\u5BB9",
+              style: { padding: "9px 10px", borderRadius: 8, border: `1px solid ${T.border}`, fontFamily: "monospace" }
+            })
+          ]),
+          !busy && j("label", { style: { display: "flex", gap: 8, alignItems: "center" } }, [
+            j("input", {
+              type: "checkbox",
+              checked: remember,
+              disabled: !auth.canTrust,
+              onChange: (event) => setRemember(event.target.checked)
+            }),
+            j("span", null, auth.canTrust ? "\u4FE1\u4EFB\u6B64\u6D4F\u89C8\u5668 30 \u5929\uFF08\u63A8\u8350\uFF09" : "\u6B64\u73AF\u5883\u4E0D\u652F\u6301\u6301\u4E45\u8BBE\u5907\u4FE1\u4EFB")
+          ]),
+          !busy && remember && j("label", { style: { display: "flex", flexDirection: "column", gap: 5 } }, [
+            j("span", null, "\u8BBE\u5907\u540D\u79F0"),
+            j("input", {
+              value: label,
+              onChange: (event) => setLabel(event.target.value),
+              maxLength: 80,
+              style: { padding: "8px 10px", borderRadius: 8, border: `1px solid ${T.border}` }
+            })
+          ]),
+          j("div", { style: { display: "flex", gap: 8, justifyContent: "flex-end" } }, [
+            j("button", { type: "button", onClick: cancel, style: ghostBtn }, "\u53D6\u6D88"),
+            !busy && j("button", { type: "submit", disabled: !token.trim(), style: btn(T.brand, !token.trim()) }, remember ? "\u914D\u5BF9\u5E76\u6253\u5F00" : "\u4EC5\u672C\u6B21\u4F1A\u8BDD")
+          ])
+        ])
+      ])
+    ]);
+  }
+  function Dashboard({ onClose, visible, auth }) {
     const [stream, clearAuth] = useSchedStream(visible);
     const [snap, refreshSnap] = useSnapshot("/sched/api/status", 2e4);
     const [tab, setTab] = useState("batches");
@@ -8468,6 +9337,13 @@ function apply(cctx, config) {
         setPendingOpsVersion((version) => version + 1);
       }
     };
+    const forgetDevice = async () => {
+      try {
+        await authGate.forget();
+      } catch (error) {
+        setOpMsg(`\u8BA4\u8BC1\u6E05\u7406\u5931\u8D25: ${String(error?.message ?? error).slice(0, 160)}`);
+      }
+    };
     return jsxs2("div", { style: overlayStyle }, [
       jsxs2("div", { style: panelStyle }, [
         jsxs2("div", { style: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" } }, [
@@ -8484,6 +9360,12 @@ function apply(cctx, config) {
           j("h2", { style: boardTitleStyle }, "sched \u770B\u677F"),
           j("span", { style: { color: stream.connected ? T.ok : T.err, fontSize: 13 } }, stream.connected ? "\u25CF live" : "\u25CB offline"),
           j("button", { onClick: refreshSnap, style: ghostBtn }, "refresh"),
+          j(ArmButton, {
+            label: auth.trusted ? "\u5FD8\u8BB0\u672C\u8BBE\u5907" : "\u7ED3\u675F\u4F1A\u8BDD",
+            confirmLabel: auth.trusted ? "\u786E\u8BA4\u5FD8\u8BB0?" : "\u786E\u8BA4\u7ED3\u675F?",
+            color: T.warn,
+            onConfirm: forgetDevice
+          }),
           j("select", {
             value: projFilter,
             onChange: (e) => setProjFilter(e.target.value),
@@ -8557,12 +9439,38 @@ function apply(cctx, config) {
   }
   function DashboardHost({ panel: panel2 }) {
     const [visible, setVisible] = useState(panel2.isOpen());
+    const auth = useAuthGateState();
+    const reportedOpen = useRef(false);
     useEffect(() => panel2.subscribe(() => setVisible(panel2.isOpen())), [panel2]);
-    return j(Dashboard, { visible, onClose: () => panel2.hide() });
+    useEffect(() => {
+      if (visible) void authGate.restore();
+      else authGate.cancelPending();
+    }, [visible]);
+    useEffect(() => {
+      if (visible && auth.status === "locked" && auth.hasTrustedDevice) {
+        void authGate.restore({ force: true });
+      }
+    }, [auth.hasTrustedDevice, auth.status, visible]);
+    useEffect(() => {
+      if (!visible || auth.status !== "ready" || reportedOpen.current) return;
+      reportedOpen.current = true;
+      authFetch("/sched/api/client-log", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ kind: "lifecycle", detail: "view-mounted ts=" + (/* @__PURE__ */ new Date()).toISOString(), ts: (/* @__PURE__ */ new Date()).toISOString() })
+      }).catch(() => {
+      });
+    }, [auth.status, visible]);
+    if (!visible) return null;
+    if (auth.status !== "ready") {
+      return j(AuthenticationGate, { auth, onCancel: () => panel2.hide() });
+    }
+    return j(Dashboard, { visible: true, auth, onClose: () => panel2.hide() });
   }
   function StatusCard() {
     const [open, setOpen] = useState(false);
-    const [snap] = useSnapshot("/sched/api/status", 3e4);
+    const auth = useAuthGateState();
+    const [snap] = useSnapshot("/sched/api/status", 3e4, open && auth.status === "ready");
     const raw = snap?.raw;
     const gpus = raw?.gpus ?? [];
     const batches = raw?.batches ?? [];
@@ -8731,6 +9639,7 @@ function apply(cctx, config) {
       this.emit();
     },
     hide() {
+      authGate.cancelPending();
       this.open = false;
       document.documentElement.removeAttribute(ACTIVE_ATTR);
       this.emit();
@@ -8752,15 +9661,6 @@ function apply(cctx, config) {
         col.appendChild(container);
         root = require("react-dom/client").createRoot(container);
         root.render(j(DashboardHost, { panel }));
-        try {
-          authFetch("/sched/api/client-log", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ kind: "lifecycle", detail: "view-mounted ts=" + (/* @__PURE__ */ new Date()).toISOString(), ts: (/* @__PURE__ */ new Date()).toISOString() })
-          }).catch(() => {
-          });
-        } catch (_) {
-        }
       } catch (e) {
         cctx.logger?.warn?.("[node-sched-ui] view mount failed:", e?.message);
       }
@@ -8865,6 +9765,7 @@ function apply(cctx, config) {
   }
   {
     const report = (kind, detail) => {
+      if (!panel.isOpen()) return;
       try {
         authFetch("/sched/api/client-log", {
           method: "POST",
@@ -8889,6 +9790,7 @@ function apply(cctx, config) {
   }
   const disposeSettings = cctx.slots.inject(SLOT_SETTINGS, () => cctx.slots.register({ name: SLOT_SETTINGS, id: NS, order: 90 }, StatusCard));
   disposersUI.push(disposeSettings);
+  disposersUI.push(() => authGate.dispose());
   return () => {
     for (const d of disposersUI) {
       try {

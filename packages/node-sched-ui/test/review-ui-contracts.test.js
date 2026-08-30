@@ -1,8 +1,54 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 
 const contractsUrl = new URL("../src/ui-contracts.js", import.meta.url);
 const loadContracts = () => import(contractsUrl.href);
+
+test("dashboard authentication stays dormant until the panel is visible and authenticated", async () => {
+	const source = await readFile(new URL("../src/client.jsx", import.meta.url), "utf8");
+	const hostStart = source.indexOf("\tfunction DashboardHost({ panel })");
+	const hostEnd = source.indexOf("\n\t// ── sidebar footer entry", hostStart);
+	const host = source.slice(hostStart, hostEnd);
+	const mountStart = source.indexOf("\t// 页面视图：centerCol");
+	const mountEnd = source.indexOf("\n\t\t// 外壳启动晚于插件 apply", mountStart);
+	const mount = source.slice(mountStart, mountEnd);
+	const telemetryStart = source.indexOf("\t// B25c: 渲染树异常遥测");
+	const telemetryEnd = source.indexOf("\n\tconst disposeSettings", telemetryStart);
+	const telemetry = source.slice(telemetryStart, telemetryEnd);
+	const statusCardStart = source.indexOf("\tfunction StatusCard()");
+	const statusCardEnd = source.indexOf("\n\t// ── sidebar footer entry", statusCardStart);
+	const statusCard = source.slice(statusCardStart, statusCardEnd);
+
+	assert.ok(hostStart >= 0 && hostEnd > hostStart);
+	assert.match(host, /if \(!visible\) return null;/);
+	assert.match(host, /if \(auth\.status !== "ready"\)/);
+	assert.match(host, /return j\(AuthenticationGate,/);
+	assert.match(host, /if \(visible\) void authGate\.restore\(\);/);
+	assert.match(host, /visible && auth\.status === "locked" && auth\.hasTrustedDevice/);
+	assert.match(host, /authGate\.restore\(\{ force: true \}\)/);
+	assert.match(host, /auth\.status !== "ready" \|\| reportedOpen\.current/);
+	assert.match(host, /authFetch\("\/sched\/api\/client-log"/);
+	assert.doesNotMatch(mount, /authFetch\(/);
+	assert.match(telemetry, /if \(!panel\.isOpen\(\)\) return;/);
+	assert.match(statusCard, /open && auth\.status === "ready"/);
+	assert.doesNotMatch(source, /window\.prompt\s*\(/);
+	assert.match(source, /authGate\.authorizedFetch\(input, init\)/);
+	assert.match(source, /authGate\.webSocketProtocols\(\)/);
+});
+
+test("snapshot polling isolates disabled and superseded requests", async () => {
+	const source = await readFile(new URL("../src/client.jsx", import.meta.url), "utf8");
+	const start = source.indexOf("\tfunction useSnapshot(path, ms, enabled = true)");
+	const end = source.indexOf("\n\tfunction parseProgress", start);
+	const hook = source.slice(start, end);
+	assert.ok(start >= 0 && end > start);
+	assert.match(hook, /new EnabledRequestEpoch\(enabled\)/);
+	assert.match(hook, /if \(requestEpochRef\.current\.setEnabled\(enabled\)\)/);
+	assert.match(hook, /inFlightRef\.current = null;/);
+	assert.match(hook, /if \(isCurrent\(\)\) setData\(gate\.snapshot\(\)\);/);
+	assert.match(hook, /requestEpochRef\.current\.invalidate\(\);/);
+});
 
 test("UI-L01: authentication submission failures produce user-visible server and network error text", async () => {
 	const { authAnswerErrorText } = await loadContracts();
@@ -408,6 +454,23 @@ test("poll gate ignores out-of-order responses and locally expires apparently fr
 	assert.equal(stale.stale, true);
 	assert.equal(stale.ok, false);
 	assert.match(stale.lastError, /local snapshot TTL/i);
+});
+
+test("disabled snapshot epochs reject old completions and re-enable with a fresh generation", async () => {
+	const { EnabledRequestEpoch } = await loadContracts();
+	const epoch = new EnabledRequestEpoch(true);
+	const first = epoch.issue();
+	assert.equal(epoch.isCurrent(first), true);
+	assert.equal(epoch.setEnabled(false), true);
+	assert.equal(epoch.isCurrent(first), false);
+	assert.equal(epoch.setEnabled(true), true);
+	const second = epoch.issue();
+	assert.notEqual(second, first);
+	assert.equal(epoch.isCurrent(first), false);
+	assert.equal(epoch.isCurrent(second), true);
+	assert.equal(epoch.setEnabled(true), false);
+	epoch.invalidate();
+	assert.equal(epoch.isCurrent(second), false);
 });
 
 test("UI validates local bearer tokens and OpenSSH SHA256 host pins", async () => {

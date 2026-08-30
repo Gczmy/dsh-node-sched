@@ -11,6 +11,7 @@
   },
   "files": [
     "lib/index.js",
+    "lib/device-auth.js",
     "lib/ssh-engine.js",
     "lib/transport.js",
     "lib/request-guard.js",
