@@ -122,11 +122,15 @@ const COLORS = {
 
 function injectStyles() {
 
-	if (typeof document === "undefined" || document.getElementById("ns-ui-style")) return;
+	if (typeof document === "undefined") return;
 
-	const el = document.createElement("style");
+	let el = document.getElementById("ns-ui-style");
 
-	el.id = "ns-ui-style";
+	if (!el) {
+		el = document.createElement("style");
+		el.id = "ns-ui-style";
+		document.head.appendChild(el);
+	}
 
 	el.textContent = [
 
@@ -166,9 +170,9 @@ function injectStyles() {
 
 		"/* --- bounded vertical resize grip for multiline text panels --- */",
 
-		".nsResizableTextBox { resize: vertical !important; overflow: auto !important; }",
+		".nsResizableTextBox { display: block; resize: vertical !important; overflow: auto !important; }",
 
-		".nsResizableTextBox::-webkit-resizer { background: linear-gradient(135deg, transparent 0 35%, var(--dsw-alias-label-secondary, #6b7280) 35% 43%, transparent 43% 56%, var(--dsw-alias-label-secondary, #6b7280) 56% 64%, transparent 64% 72%, var(--dsw-alias-label-secondary, #6b7280) 72% 80%, transparent 80%); }",
+		".nsResizableTextBox::-webkit-resizer { background: linear-gradient(135deg, transparent 0 35%, var(--dsw-alias-label-secondary, #6b7280) 35% 43%, transparent 43% 53%, var(--dsw-alias-label-secondary, #6b7280) 53% 61%, transparent 61% 71%, var(--dsw-alias-label-secondary, #6b7280) 71% 79%, transparent 79%) right bottom / 14px 14px no-repeat; }",
 
 		"",
 
@@ -179,8 +183,6 @@ function injectStyles() {
 		"[data-sidebar-collapsed] .nsEntryLabel { display: none; }",
 
 	].join("\n");
-
-	document.head.appendChild(el);
 
 }
 
@@ -728,7 +730,37 @@ function apply(cctx, config) {
 
 	// ── B23 组件：依赖 apply 作用域的 j/hooks/T/btn ──
 
-	// B24c: SSH 交互式身份认证弹窗 —— 将完整质询逐项回传引擎
+	function authPromptMethodLabel(req) {
+		return req?.method === "private-key-passphrase"
+			? "私钥口令"
+			: req?.method === "keyboard-interactive" ? "交互式身份验证" : String(req?.method || "身份验证");
+	}
+
+	function AuthPromptBanner({ req, pendingCount, onOpen }) {
+		if (!req) return null;
+		const methodLabel = authPromptMethodLabel(req);
+		return jsxs2("section", {
+			"aria-label": "SSH 验证请求",
+			style: {
+				display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap",
+				padding: "10px 12px", border: `1px solid ${T.warn}`, borderRadius: 10,
+				background: `color-mix(in srgb, ${T.warn} 8%, transparent)`,
+			},
+		}, [
+			jsxs2("div", { style: { flex: "1 1 320px", minWidth: 0 } }, [
+				jsxs2("div", { style: { display: "flex", gap: 7, alignItems: "baseline", flexWrap: "wrap" } }, [
+					j("b", null, `SSH ${methodLabel}等待输入`),
+					req.alias && j("span", { style: { color: T.brand, fontWeight: 700, overflowWrap: "anywhere" } }, req.alias),
+					pendingCount > 1 && j("span", { style: { color: T.label2 } }, `另有 ${pendingCount - 1} 个请求`),
+				]),
+				j("div", { role: "status", "aria-live": "polite", style: { color: T.label2, marginTop: 2 } },
+					"验证请求不会自动弹窗；点击按钮后再填写，180 秒未处理将自动取消连接。"),
+			]),
+			j("button", { type: "button", onClick: onOpen, style: btn(T.warn) }, "打开验证"),
+		]);
+	}
+
+	// B24c: SSH 交互式身份认证弹窗 —— 仅由横幅按钮显式打开，将完整质询逐项回传引擎
 	function AuthPromptModal({ req, onDone }) {
 		const [answers, setAnswers] = useState([]);
 		const [busy, setBusy] = useState(false);
@@ -788,9 +820,7 @@ function apply(cctx, config) {
 		const setAnswer = (index, value) => {
 			setAnswers((current) => current.map((answer, i2) => i2 === index ? value : answer));
 		};
-		const methodLabel = req.method === "private-key-passphrase"
-			? "私钥口令"
-			: req.method === "keyboard-interactive" ? "交互式身份验证" : String(req.method || "身份验证");
+		const methodLabel = authPromptMethodLabel(req);
 		const instructions = req.instructions || req.instr;
 
 		return j("div", { style: {
@@ -2657,9 +2687,62 @@ function apply(cctx, config) {
 		]);
 	}
 
+	function AuthenticationRequiredView({ auth, onClose }) {
+		const [dialogOpen, setDialogOpen] = useState(false);
+		const restoring = auth.status === "idle" || auth.status === "restoring";
+		const statusText = restoring
+			? "正在检查当前会话和受信设备。你可以继续查看页面，验证框不会自动弹出。"
+			: "实时调度数据与操作需要验证；验证框只会在你主动打开时出现。";
+
+		return jsxs2("div", { style: overlayStyle }, [
+			jsxs2("div", { style: panelStyle }, [
+				jsxs2("div", { style: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" } }, [
+					j("button", {
+						type: "button", onClick: onClose, style: backBtn,
+						title: "返回对话", "aria-label": "返回",
+					}, [
+						j("span", { "aria-hidden": true, style: { fontSize: 15 } }, "\u2039"),
+						j("span", null, "返回"),
+					]),
+					j("h2", { style: boardTitleStyle }, "sched 看板"),
+					j("span", { style: { color: T.warn, fontSize: 13 } }, restoring ? "\u25cb checking" : "\u25cb 未连接"),
+				]),
+				jsxs2("section", {
+					"aria-label": "sched 连接状态",
+					style: {
+						display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap",
+						padding: "12px 14px", border: `1px solid ${T.warn}`,
+						borderRadius: 10,
+						background: `color-mix(in srgb, ${T.warn} 8%, transparent)`,
+					},
+				}, [
+					jsxs2("div", { style: { flex: "1 1 320px", minWidth: 0 } }, [
+						j("b", null, restoring ? "正在自动检查连接" : "sched 尚未连接"),
+						j("div", { role: "status", "aria-live": "polite", style: { color: T.label2, marginTop: 2 } }, statusText),
+						auth.message && j("div", { role: "alert", style: { color: T.err, marginTop: 4, overflowWrap: "anywhere" } }, auth.message),
+					]),
+					j("button", {
+						type: "button",
+						onClick: () => setDialogOpen(true),
+						style: btn(T.brand),
+					}, restoring ? "查看验证进度" : "打开验证"),
+				]),
+				j("div", { style: { color: T.label2, padding: "4px 2px" } }, "尚未连接时不会请求远程调度数据。你仍可返回对话或浏览应用的其他区域。"),
+			]),
+			dialogOpen && j(AuthenticationGate, { auth, onCancel: () => setDialogOpen(false) }),
+		]);
+	}
+
 	function Dashboard({ onClose, visible, auth }) {
 
 		const [stream, clearAuth] = useSchedStream(visible);
+		const [openAuthPromptId, setOpenAuthPromptId] = useState(null);
+		const activeAuthPrompt = stream.authQueue?.[0] ?? null;
+		const activeAuthPromptId = activeAuthPrompt?.id ?? null;
+
+		useEffect(() => {
+			setOpenAuthPromptId((current) => current === activeAuthPromptId ? current : null);
+		}, [activeAuthPromptId]);
 
 		const [snap, refreshSnap] = useSnapshot("/sched/api/status", 20000);
 
@@ -2781,8 +2864,19 @@ function apply(cctx, config) {
 
 				]),
 
-				// B24c: SSH 交互式身份验证弹窗（引擎质询桥接到看板）
-				j(AuthPromptModal, { req: stream.authQueue?.[0], onDone: clearAuth }),
+				// B24c: SSH 交互式身份验证先显示横幅，用户主动打开后才挂载弹窗。
+				j(AuthPromptBanner, {
+					req: activeAuthPrompt,
+					pendingCount: stream.authQueue?.length ?? 0,
+					onOpen: () => setOpenAuthPromptId(activeAuthPromptId),
+				}),
+				openAuthPromptId === activeAuthPromptId && activeAuthPrompt && j(AuthPromptModal, {
+					req: activeAuthPrompt,
+					onDone: (id) => {
+						setOpenAuthPromptId(null);
+						clearAuth(id);
+					},
+				}),
 
 				opMsg && j("div", { style: { fontSize: 13, color: T.warn, marginBottom: 4 } }, opMsg),
 				!mutationAvailability.writable && j("div", {
@@ -2915,7 +3009,7 @@ function apply(cctx, config) {
 
 		if (!visible) return null;
 		if (auth.status !== "ready") {
-			return j(AuthenticationGate, { auth, onCancel: () => panel.hide() });
+			return j(AuthenticationRequiredView, { auth, onClose: () => panel.hide() });
 		}
 		return j(Dashboard, { visible: true, auth, onClose: () => panel.hide() });
 	}

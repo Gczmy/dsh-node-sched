@@ -5,6 +5,19 @@ import { readFile } from "node:fs/promises";
 const contractsUrl = new URL("../src/ui-contracts.js", import.meta.url);
 const loadContracts = () => import(contractsUrl.href);
 
+test("style injection refreshes the existing node during client hot reload", async () => {
+	const source = await readFile(new URL("../src/client.jsx", import.meta.url), "utf8");
+	const start = source.indexOf("function injectStyles()");
+	const end = source.indexOf("\n\n\n// ── B23", start);
+	const injection = source.slice(start, end);
+
+	assert.ok(start >= 0 && end > start);
+	assert.match(injection, /let el = document\.getElementById\("ns-ui-style"\);/);
+	assert.match(injection, /if \(!el\) \{/);
+	assert.match(injection, /el\.textContent = \[/);
+	assert.doesNotMatch(injection, /document\.getElementById\("ns-ui-style"\)\) return/);
+});
+
 test("dashboard authentication stays dormant until the panel is visible and authenticated", async () => {
 	const source = await readFile(new URL("../src/client.jsx", import.meta.url), "utf8");
 	const hostStart = source.indexOf("\tfunction DashboardHost({ panel })");
@@ -23,7 +36,8 @@ test("dashboard authentication stays dormant until the panel is visible and auth
 	assert.ok(hostStart >= 0 && hostEnd > hostStart);
 	assert.match(host, /if \(!visible\) return null;/);
 	assert.match(host, /if \(auth\.status !== "ready"\)/);
-	assert.match(host, /return j\(AuthenticationGate,/);
+	assert.match(host, /return j\(AuthenticationRequiredView,/);
+	assert.doesNotMatch(host, /return j\(AuthenticationGate,/);
 	assert.match(host, /if \(visible\) void authGate\.restore\(\);/);
 	assert.match(host, /visible && auth\.status === "locked" && auth\.hasTrustedDevice/);
 	assert.match(host, /authGate\.restore\(\{ force: true \}\)/);
@@ -35,6 +49,23 @@ test("dashboard authentication stays dormant until the panel is visible and auth
 	assert.doesNotMatch(source, /window\.prompt\s*\(/);
 	assert.match(source, /authGate\.authorizedFetch\(input, init\)/);
 	assert.match(source, /authGate\.webSocketProtocols\(\)/);
+});
+
+test("locked dashboard uses a non-blocking banner and opens authentication only on demand", async () => {
+	const source = await readFile(new URL("../src/client.jsx", import.meta.url), "utf8");
+	const start = source.indexOf("\tfunction AuthenticationRequiredView({ auth, onClose })");
+	const end = source.indexOf("\n\tfunction Dashboard({ onClose, visible, auth })", start);
+	const view = source.slice(start, end);
+
+	assert.ok(start >= 0 && end > start);
+	assert.match(view, /const \[dialogOpen, setDialogOpen\] = useState\(false\);/);
+	assert.match(view, /"aria-label": "sched 连接状态"/);
+	assert.match(view, /验证框不会自动弹出/);
+	assert.match(view, /onClick: \(\) => setDialogOpen\(true\)/);
+	assert.match(view, /dialogOpen && j\(AuthenticationGate,/);
+	assert.match(view, /onCancel: \(\) => setDialogOpen\(false\)/);
+	assert.match(view, /尚未连接时不会请求远程调度数据/);
+	assert.doesNotMatch(view, /authFetch\(|authGate\.pair\(/);
 });
 
 test("snapshot polling isolates disabled and superseded requests", async () => {
@@ -143,6 +174,28 @@ test("D-M07: every terminal authentication frame removes only its matching queue
 			state,
 		);
 	}
+});
+
+test("SSH authentication challenges stay in a banner until the user opens the modal", async () => {
+	const source = await readFile(new URL("../src/client.jsx", import.meta.url), "utf8");
+	const bannerStart = source.indexOf("\tfunction AuthPromptBanner({ req, pendingCount, onOpen })");
+	const bannerEnd = source.indexOf("\n\t// B24c: SSH 交互式身份认证弹窗", bannerStart);
+	const banner = source.slice(bannerStart, bannerEnd);
+	const dashboardStart = source.indexOf("\tfunction Dashboard({ onClose, visible, auth })");
+	const dashboardEnd = source.indexOf("\n\tfunction DashboardHost({ panel })", dashboardStart);
+	const dashboard = source.slice(dashboardStart, dashboardEnd);
+
+	assert.ok(bannerStart >= 0 && bannerEnd > bannerStart);
+	assert.ok(dashboardStart >= 0 && dashboardEnd > dashboardStart);
+	assert.match(banner, /"aria-label": "SSH 验证请求"/);
+	assert.match(banner, /验证请求不会自动弹窗/);
+	assert.match(banner, /onClick: onOpen/);
+	assert.doesNotMatch(banner, /AuthPromptModal/);
+	assert.match(dashboard, /const \[openAuthPromptId, setOpenAuthPromptId\] = useState\(null\);/);
+	assert.match(dashboard, /j\(AuthPromptBanner,/);
+	assert.match(dashboard, /onOpen: \(\) => setOpenAuthPromptId\(activeAuthPromptId\)/);
+	assert.match(dashboard, /openAuthPromptId === activeAuthPromptId && activeAuthPrompt && j\(AuthPromptModal,/);
+	assert.doesNotMatch(dashboard, /j\(AuthPromptModal, \{ req: stream\.authQueue/);
 });
 
 test("D-M06: authentication audience frames explicitly report both visible and hidden states", async () => {
@@ -505,6 +558,7 @@ test("every dashboard multiline text box has a bounded vertical resize grip", as
 
 	assert.ok(start >= 0 && end > start);
 	assert.match(source, /\.nsResizableTextBox::\-webkit-resizer/);
+	assert.match(source, /right bottom \/ 14px 14px no-repeat/);
 	assert.match(component, /className: \[className, "nsResizableTextBox"\]/);
 	assert.match(component, /boxSizing: "border-box"/);
 	assert.match(component, /minHeight/);

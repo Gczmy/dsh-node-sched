@@ -7588,9 +7588,13 @@ var COLORS = {
   queued: T.label2
 };
 function injectStyles() {
-  if (typeof document === "undefined" || document.getElementById("ns-ui-style")) return;
-  const el = document.createElement("style");
-  el.id = "ns-ui-style";
+  if (typeof document === "undefined") return;
+  let el = document.getElementById("ns-ui-style");
+  if (!el) {
+    el = document.createElement("style");
+    el.id = "ns-ui-style";
+    document.head.appendChild(el);
+  }
   el.textContent = [
     "/* --- center-column takeover (attribute-scoped) --- */",
     "[data-pane='conversation'], [class*='centerCol'] { position: relative; }",
@@ -7610,14 +7614,13 @@ function injectStyles() {
     ".nsEntryLabel { overflow: hidden; text-overflow: ellipsis; }",
     "",
     "/* --- bounded vertical resize grip for multiline text panels --- */",
-    ".nsResizableTextBox { resize: vertical !important; overflow: auto !important; }",
-    ".nsResizableTextBox::-webkit-resizer { background: linear-gradient(135deg, transparent 0 35%, var(--dsw-alias-label-secondary, #6b7280) 35% 43%, transparent 43% 56%, var(--dsw-alias-label-secondary, #6b7280) 56% 64%, transparent 64% 72%, var(--dsw-alias-label-secondary, #6b7280) 72% 80%, transparent 80%); }",
+    ".nsResizableTextBox { display: block; resize: vertical !important; overflow: auto !important; }",
+    ".nsResizableTextBox::-webkit-resizer { background: linear-gradient(135deg, transparent 0 35%, var(--dsw-alias-label-secondary, #6b7280) 35% 43%, transparent 43% 53%, var(--dsw-alias-label-secondary, #6b7280) 53% 61%, transparent 61% 71%, var(--dsw-alias-label-secondary, #6b7280) 71% 79%, transparent 79%) right bottom / 14px 14px no-repeat; }",
     "",
     "/* --- collapsed rail: icon-only --- */",
     "[data-sidebar-collapsed] .nsEntry { justify-content: center; padding: 0; width: 36px; height: 36px; margin: 0 auto 12px; border-radius: 50%; }",
     "[data-sidebar-collapsed] .nsEntryLabel { display: none; }"
   ].join("\n");
-  document.head.appendChild(el);
 }
 var xtermCssInjected = false;
 function injectXtermCss(cssText) {
@@ -8027,6 +8030,40 @@ function apply(cctx, config) {
       ])
     ]);
   }
+  function authPromptMethodLabel(req) {
+    return req?.method === "private-key-passphrase" ? "\u79C1\u94A5\u53E3\u4EE4" : req?.method === "keyboard-interactive" ? "\u4EA4\u4E92\u5F0F\u8EAB\u4EFD\u9A8C\u8BC1" : String(req?.method || "\u8EAB\u4EFD\u9A8C\u8BC1");
+  }
+  function AuthPromptBanner({ req, pendingCount, onOpen }) {
+    if (!req) return null;
+    const methodLabel = authPromptMethodLabel(req);
+    return jsxs2("section", {
+      "aria-label": "SSH \u9A8C\u8BC1\u8BF7\u6C42",
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 12,
+        flexWrap: "wrap",
+        padding: "10px 12px",
+        border: `1px solid ${T.warn}`,
+        borderRadius: 10,
+        background: `color-mix(in srgb, ${T.warn} 8%, transparent)`
+      }
+    }, [
+      jsxs2("div", { style: { flex: "1 1 320px", minWidth: 0 } }, [
+        jsxs2("div", { style: { display: "flex", gap: 7, alignItems: "baseline", flexWrap: "wrap" } }, [
+          j("b", null, `SSH ${methodLabel}\u7B49\u5F85\u8F93\u5165`),
+          req.alias && j("span", { style: { color: T.brand, fontWeight: 700, overflowWrap: "anywhere" } }, req.alias),
+          pendingCount > 1 && j("span", { style: { color: T.label2 } }, `\u53E6\u6709 ${pendingCount - 1} \u4E2A\u8BF7\u6C42`)
+        ]),
+        j(
+          "div",
+          { role: "status", "aria-live": "polite", style: { color: T.label2, marginTop: 2 } },
+          "\u9A8C\u8BC1\u8BF7\u6C42\u4E0D\u4F1A\u81EA\u52A8\u5F39\u7A97\uFF1B\u70B9\u51FB\u6309\u94AE\u540E\u518D\u586B\u5199\uFF0C180 \u79D2\u672A\u5904\u7406\u5C06\u81EA\u52A8\u53D6\u6D88\u8FDE\u63A5\u3002"
+        )
+      ]),
+      j("button", { type: "button", onClick: onOpen, style: btn(T.warn) }, "\u6253\u5F00\u9A8C\u8BC1")
+    ]);
+  }
   function AuthPromptModal({ req, onDone }) {
     const [answers, setAnswers] = useState([]);
     const [busy, setBusy] = useState(false);
@@ -8084,7 +8121,7 @@ function apply(cctx, config) {
     const setAnswer = (index, value) => {
       setAnswers((current) => current.map((answer, i2) => i2 === index ? value : answer));
     };
-    const methodLabel = req.method === "private-key-passphrase" ? "\u79C1\u94A5\u53E3\u4EE4" : req.method === "keyboard-interactive" ? "\u4EA4\u4E92\u5F0F\u8EAB\u4EFD\u9A8C\u8BC1" : String(req.method || "\u8EAB\u4EFD\u9A8C\u8BC1");
+    const methodLabel = authPromptMethodLabel(req);
     const instructions = req.instructions || req.instr;
     return j("div", { style: {
       position: "fixed",
@@ -9564,8 +9601,63 @@ function apply(cctx, config) {
       ])
     ]);
   }
+  function AuthenticationRequiredView({ auth, onClose }) {
+    const [dialogOpen, setDialogOpen] = useState(false);
+    const restoring = auth.status === "idle" || auth.status === "restoring";
+    const statusText = restoring ? "\u6B63\u5728\u68C0\u67E5\u5F53\u524D\u4F1A\u8BDD\u548C\u53D7\u4FE1\u8BBE\u5907\u3002\u4F60\u53EF\u4EE5\u7EE7\u7EED\u67E5\u770B\u9875\u9762\uFF0C\u9A8C\u8BC1\u6846\u4E0D\u4F1A\u81EA\u52A8\u5F39\u51FA\u3002" : "\u5B9E\u65F6\u8C03\u5EA6\u6570\u636E\u4E0E\u64CD\u4F5C\u9700\u8981\u9A8C\u8BC1\uFF1B\u9A8C\u8BC1\u6846\u53EA\u4F1A\u5728\u4F60\u4E3B\u52A8\u6253\u5F00\u65F6\u51FA\u73B0\u3002";
+    return jsxs2("div", { style: overlayStyle }, [
+      jsxs2("div", { style: panelStyle }, [
+        jsxs2("div", { style: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" } }, [
+          j("button", {
+            type: "button",
+            onClick: onClose,
+            style: backBtn,
+            title: "\u8FD4\u56DE\u5BF9\u8BDD",
+            "aria-label": "\u8FD4\u56DE"
+          }, [
+            j("span", { "aria-hidden": true, style: { fontSize: 15 } }, "\u2039"),
+            j("span", null, "\u8FD4\u56DE")
+          ]),
+          j("h2", { style: boardTitleStyle }, "sched \u770B\u677F"),
+          j("span", { style: { color: T.warn, fontSize: 13 } }, restoring ? "\u25CB checking" : "\u25CB \u672A\u8FDE\u63A5")
+        ]),
+        jsxs2("section", {
+          "aria-label": "sched \u8FDE\u63A5\u72B6\u6001",
+          style: {
+            display: "flex",
+            alignItems: "center",
+            gap: 14,
+            flexWrap: "wrap",
+            padding: "12px 14px",
+            border: `1px solid ${T.warn}`,
+            borderRadius: 10,
+            background: `color-mix(in srgb, ${T.warn} 8%, transparent)`
+          }
+        }, [
+          jsxs2("div", { style: { flex: "1 1 320px", minWidth: 0 } }, [
+            j("b", null, restoring ? "\u6B63\u5728\u81EA\u52A8\u68C0\u67E5\u8FDE\u63A5" : "sched \u5C1A\u672A\u8FDE\u63A5"),
+            j("div", { role: "status", "aria-live": "polite", style: { color: T.label2, marginTop: 2 } }, statusText),
+            auth.message && j("div", { role: "alert", style: { color: T.err, marginTop: 4, overflowWrap: "anywhere" } }, auth.message)
+          ]),
+          j("button", {
+            type: "button",
+            onClick: () => setDialogOpen(true),
+            style: btn(T.brand)
+          }, restoring ? "\u67E5\u770B\u9A8C\u8BC1\u8FDB\u5EA6" : "\u6253\u5F00\u9A8C\u8BC1")
+        ]),
+        j("div", { style: { color: T.label2, padding: "4px 2px" } }, "\u5C1A\u672A\u8FDE\u63A5\u65F6\u4E0D\u4F1A\u8BF7\u6C42\u8FDC\u7A0B\u8C03\u5EA6\u6570\u636E\u3002\u4F60\u4ECD\u53EF\u8FD4\u56DE\u5BF9\u8BDD\u6216\u6D4F\u89C8\u5E94\u7528\u7684\u5176\u4ED6\u533A\u57DF\u3002")
+      ]),
+      dialogOpen && j(AuthenticationGate, { auth, onCancel: () => setDialogOpen(false) })
+    ]);
+  }
   function Dashboard({ onClose, visible, auth }) {
     const [stream, clearAuth] = useSchedStream(visible);
+    const [openAuthPromptId, setOpenAuthPromptId] = useState(null);
+    const activeAuthPrompt = stream.authQueue?.[0] ?? null;
+    const activeAuthPromptId = activeAuthPrompt?.id ?? null;
+    useEffect(() => {
+      setOpenAuthPromptId((current) => current === activeAuthPromptId ? current : null);
+    }, [activeAuthPromptId]);
     const [snap, refreshSnap] = useSnapshot("/sched/api/status", 2e4);
     const [tab, setTab] = useState("batches");
     const [opMsg, setOpMsg] = useState("");
@@ -9646,8 +9738,19 @@ function apply(cctx, config) {
           ]),
           ...["batches", "history", "gpus", "events", "submit", "config", "incidents", "ssh"].map((t) => j("button", { key: t, onClick: () => setTab(t), style: tab === t ? btn(T.brand) : ghostBtn }, t))
         ]),
-        // B24c: SSH 交互式身份验证弹窗（引擎质询桥接到看板）
-        j(AuthPromptModal, { req: stream.authQueue?.[0], onDone: clearAuth }),
+        // B24c: SSH 交互式身份验证先显示横幅，用户主动打开后才挂载弹窗。
+        j(AuthPromptBanner, {
+          req: activeAuthPrompt,
+          pendingCount: stream.authQueue?.length ?? 0,
+          onOpen: () => setOpenAuthPromptId(activeAuthPromptId)
+        }),
+        openAuthPromptId === activeAuthPromptId && activeAuthPrompt && j(AuthPromptModal, {
+          req: activeAuthPrompt,
+          onDone: (id) => {
+            setOpenAuthPromptId(null);
+            clearAuth(id);
+          }
+        }),
         opMsg && j("div", { style: { fontSize: 13, color: T.warn, marginBottom: 4 } }, opMsg),
         !mutationAvailability.writable && j("div", {
           id: "sched-read-only-reason",
@@ -9744,7 +9847,7 @@ function apply(cctx, config) {
     }, [auth.status, visible]);
     if (!visible) return null;
     if (auth.status !== "ready") {
-      return j(AuthenticationGate, { auth, onCancel: () => panel2.hide() });
+      return j(AuthenticationRequiredView, { auth, onClose: () => panel2.hide() });
     }
     return j(Dashboard, { visible: true, auth, onClose: () => panel2.hide() });
   }
