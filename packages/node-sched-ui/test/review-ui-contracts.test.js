@@ -198,6 +198,78 @@ test("SSH authentication challenges stay in a banner until the user opens the mo
 	assert.doesNotMatch(dashboard, /j\(AuthPromptModal, \{ req: stream\.authQueue/);
 });
 
+test("SCHED can reuse an existing terminal OpenSSH ControlMaster without prompting for OTP", async () => {
+	const source = await readFile(new URL("../src/client.jsx", import.meta.url), "utf8");
+	const sshStart = source.indexOf("\tfunction SshTab()");
+	const sshEnd = source.indexOf("\n\tfunction SshTerminal", sshStart);
+	const sshTab = source.slice(sshStart, sshEnd);
+	const daemonStart = source.indexOf("\tfunction DaemonBar({ runOp })");
+	const daemonEnd = source.indexOf("\n\n\n\tconst IncidentsTab", daemonStart);
+	const daemonBar = source.slice(daemonStart, daemonEnd);
+	const terminalStart = source.indexOf("\tfunction SshTerminal(");
+	const terminalEnd = source.indexOf("\n\n\tconst GRID", terminalStart);
+	const terminal = source.slice(terminalStart, terminalEnd);
+
+	assert.ok(sshStart >= 0 && sshEnd > sshStart);
+	assert.ok(daemonStart >= 0 && daemonEnd > daemonStart);
+	assert.ok(terminalStart >= 0 && terminalEnd > terminalStart);
+	assert.match(sshTab, /binding\?\.mode === "system-openssh"/);
+	assert.match(sshTab, /setInterval\(load, 30_000\)/);
+	assert.match(sshTab, /authFetch\("\/sched\/ssh\/use-system"/);
+	assert.match(sshTab, /body: JSON\.stringify\(\{ sshEntry \}\)/);
+	assert.match(sshTab, /result\.code === "no_control_master"/);
+	assert.match(sshTab, /binding\?\.master\?\.ready === false/);
+	assert.match(sshTab, /"aria-label": "OpenSSH ControlMaster 未就绪"/);
+	assert.match(sshTab, /`ssh \$\{activeSystemNotice\.sshEntry\}`/);
+	assert.match(sshTab, /dsh 不会弹出 OTP 输入框，也不会读取或保存验证码/);
+	assert.match(sshTab, /doUseSystemOpenSsh\(h\.alias\)/);
+	assert.match(sshTab, /复用终端登录/);
+	assert.match(sshTab, /transport: systemBoundHere \? "system-openssh" : "engine"/);
+	assert.match(sshTab, /disabled: systemBoundHere \? !systemMasterReady : !trustReady/);
+	assert.match(sshTab, /alias: systemBoundHere \? binding\.sshEntry : h\.alias/);
+	assert.match(sshTab, /systemBoundHere \? doUseSystemOpenSsh\(binding\.sshEntry\) : doTest\(h\.alias\)/);
+	assert.match(sshTab, /只检测终端 ControlMaster，不发起新的 SSH 身份验证/);
+	assert.match(sshTab, /const engineMode = binding\?\.mode === "engine"/);
+	assert.match(sshTab, /engineMode && j\("button", \{ onClick: doUnbind/);
+	assert.match(sshTab, /const localMode = binding\?\.mode === "local"/);
+	assert.doesNotMatch(sshTab, /AuthPromptModal|\/sched\/ssh\/auth-answer/);
+	assert.match(terminal, /transport = "engine"/);
+	assert.match(terminal, /transport=\$\{encodeURIComponent\(transport\)\}&alias=\$\{encodeURIComponent\(alias\)\}/);
+	assert.match(terminal, /\[alias, transport\]/);
+	assert.match(terminal, /系统 OpenSSH · 复用终端 ControlMaster/);
+	assert.match(daemonBar, /channel\?\.mode === "system-openssh"/);
+	assert.match(daemonBar, /master\$\{systemMasterReady \? "✓" : "×"\}/);
+});
+
+test("a failed system OpenSSH candidate notice survives polling of the active alias", async () => {
+	const { reconcileSystemMasterNotice } = await loadContracts();
+	const candidate = {
+		source: "candidate",
+		sshEntry: "candidate-b",
+		error: "No active master for B",
+	};
+
+	assert.equal(reconcileSystemMasterNotice(candidate, {
+		mode: "system-openssh",
+		sshEntry: "active-a",
+		master: { ready: true },
+	}), candidate);
+	assert.deepEqual(reconcileSystemMasterNotice(null, {
+		mode: "system-openssh",
+		sshEntry: "active-a",
+		master: { ready: false },
+	}, "No active master for A"), {
+		source: "active",
+		sshEntry: "active-a",
+		error: "No active master for A",
+	});
+	assert.equal(reconcileSystemMasterNotice(candidate, {
+		mode: "system-openssh",
+		sshEntry: "candidate-b",
+		master: { ready: true },
+	}), null);
+});
+
 test("D-M06: authentication audience frames explicitly report both visible and hidden states", async () => {
 	const { authAudienceFrame } = await loadContracts();
 

@@ -22,14 +22,16 @@
     "lib/output-limit.js",
     "lib/redact.js",
     "lib/retry-policy.js",
-    "lib/entry-override.js"
+    "lib/entry-override.js",
+    "lib/system-openssh.js"
   ],
   "license": "MIT",
   "dependencies": {
     "@deepseek-ai/dsh-tools": "^0.1.0-rc.7",
     "@deepseek-ai/schemastery": "^3.18.1",
-    "ws": "^8.21.3",
-    "ssh2": "^1.17.0"
+    "node-pty": "1.2.0-beta.15",
+    "ssh2": "^1.17.0",
+    "ws": "^8.21.3"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1"

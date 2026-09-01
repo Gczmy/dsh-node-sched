@@ -16,6 +16,7 @@ import {
 	normalizeAuthPrompts,
 	PollGate,
 	reduceAuthQueue,
+	reconcileSystemMasterNotice,
 	schedulerMutationAvailability,
 	submitExampleForProject,
 	taskReference,
@@ -736,6 +737,12 @@ function apply(cctx, config) {
 			: req?.method === "keyboard-interactive" ? "交互式身份验证" : String(req?.method || "身份验证");
 	}
 
+	function sshMasterErrorText(error, fallback = "未检测到已认证的 OpenSSH ControlMaster 主连接") {
+		if (!error) return fallback;
+		if (typeof error === "string") return error;
+		return String(error.message || error.code || fallback);
+	}
+
 	function AuthPromptBanner({ req, pendingCount, onOpen }) {
 		if (!req) return null;
 		const methodLabel = authPromptMethodLabel(req);
@@ -882,6 +889,7 @@ function apply(cctx, config) {
 		const [busy, setBusy] = useState("");
 
 		const [msg, setMsg] = useState("");
+		const [systemMasterNotice, setSystemMasterNotice] = useState(null);
 
 		const [confirmAlias, setConfirmAlias] = useState(null);
 		const [pinDraft, setPinDraft] = useState(null);
@@ -890,11 +898,11 @@ function apply(cctx, config) {
 		const trustEpochRef = useRef(0);
 		const trustCommitRef = useRef(false);
 
-		const [termAlias, setTermAlias] = useState(null);
+		const [termTarget, setTermTarget] = useState(null); // {alias, transport: engine|system-openssh}
 
 
 
-		const [binding, setBinding] = useState(null); // {alias, mode, sshEntry}
+		const [binding, setBinding] = useState(null); // {alias, mode, sshEntry, master?}
 
 		const load = useCallback(async () => {
 
@@ -912,6 +920,11 @@ function apply(cctx, config) {
 				setHosts(nextHosts);
 
 				setBinding(b);
+				setSystemMasterNotice((current) => reconcileSystemMasterNotice(
+					current,
+					b,
+					sshMasterErrorText(b?.master?.error),
+				));
 				return { hosts: nextHosts, binding: b };
 
 			} catch { setHosts([]); return { hosts: [], binding: null }; }
@@ -919,6 +932,11 @@ function apply(cctx, config) {
 		}, []);
 
 		useEffect(() => { load(); }, [load]);
+		useEffect(() => {
+			if (binding?.mode !== "system-openssh") return undefined;
+			const timer = setInterval(load, 30_000);
+			return () => clearInterval(timer);
+		}, [binding?.mode, binding?.sshEntry, load]);
 		useEffect(() => () => {
 			trustEpochRef.current += 1;
 			trustAbortRef.current?.abort();
@@ -936,7 +954,10 @@ function apply(cctx, config) {
 
 				const r = await authFetch("/sched/ssh/bind", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ alias }) }).then((r) => r.json());
 
-				if (r.ok) setMsg(`✅ ${alias} 已设为 SCHED 主机 (${r.latencyMs}ms) · daemon: ${r.probeText || "?"}`);
+				if (r.ok) {
+					setSystemMasterNotice(null);
+					setMsg(`✅ ${alias} 已设为 SCHED 主机 (${r.latencyMs}ms) · daemon: ${r.probeText || "?"}`);
+				}
 
 				else setMsg(`绑定失败: ${r.error}`);
 
@@ -954,9 +975,14 @@ function apply(cctx, config) {
 
 			try {
 
-				await authFetch("/sched/ssh/unbind", { method: "POST" });
+				const response = await authFetch("/sched/ssh/unbind", { method: "POST" });
+				const result = await response.json().catch(() => ({}));
+				if (!response.ok || result.ok === false) {
+					throw new Error(sshMasterErrorText(result.error, `HTTP ${response.status}`));
+				}
 
-				setMsg(`已解绑，回到 CLI 模式 (sshEntry: ${binding?.sshEntry ?? "?"})`);
+				setSystemMasterNotice(null);
+				setMsg(`已解绑内置引擎；当前改用系统 OpenSSH (sshEntry: ${result.sshEntry ?? binding?.sshEntry ?? "?"})`);
 
 				await load();
 
@@ -964,6 +990,43 @@ function apply(cctx, config) {
 
 			setBusy("");
 
+		};
+
+		const doUseSystemOpenSsh = async (requestedEntry = binding?.sshEntry) => {
+			const sshEntry = String(requestedEntry ?? "").trim();
+			if (!sshEntry) {
+				setMsg("启用系统 OpenSSH 失败: 缺少 sshEntry");
+				return;
+			}
+			setBusy("use-system:" + sshEntry);
+			setMsg("");
+			try {
+				const response = await authFetch("/sched/ssh/use-system", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ sshEntry }),
+				});
+				const result = await response.json().catch(() => ({}));
+				if (!response.ok || result.ok === false) {
+					if (result.code === "no_control_master" || result.error?.code === "no_control_master") {
+						setSystemMasterNotice({
+							source: "candidate",
+							sshEntry,
+							error: sshMasterErrorText(result.error),
+						});
+						return;
+					}
+					throw new Error(sshMasterErrorText(result.error, `HTTP ${response.status}`));
+				}
+				setBinding(result.binding ?? result);
+				setSystemMasterNotice(null);
+				setMsg(`✅ 已通过系统 OpenSSH 复用 ${sshEntry} 的终端 ControlMaster；dsh 不会索取或保存 2FA 验证码`);
+				await load();
+			} catch (error) {
+				setMsg("启用系统 OpenSSH 失败: " + error.message);
+			} finally {
+				setBusy("");
+			}
 		};
 
 
@@ -1207,38 +1270,93 @@ function apply(cctx, config) {
 
 
 
-		if (termAlias) return j(SshTerminal, { alias: termAlias, onClose: () => { setTermAlias(null); } });
+		if (termTarget) return j(SshTerminal, {
+			alias: termTarget.alias,
+			transport: termTarget.transport,
+			onClose: () => { setTermTarget(null); },
+		});
 
 
 		const engineMode = binding?.mode === "engine";
+		const systemOpenSshMode = binding?.mode === "system-openssh";
 		const localMode = binding?.mode === "local";
+		const systemMasterReady = systemOpenSshMode && binding?.master?.ready === true;
+		const transportColor = engineMode || systemMasterReady ? T.ok : systemOpenSshMode ? T.warn : localMode ? T.brand : T.label2;
+		const activeSystemNotice = (systemOpenSshMode && binding?.master?.ready === false ? {
+				sshEntry: binding.sshEntry,
+				error: sshMasterErrorText(binding.master.error),
+			} : null) ?? systemMasterNotice;
 
 		return jsxs2("div", { style: { display: "flex", flexDirection: "column", gap: 10 } }, [
 
 			// B24: SCHED 绑定状态条
 
-			jsxs2("div", { style: { display: "flex", gap: 10, alignItems: "center", padding: "8px 12px", background: engineMode ? `color-mix(in srgb, ${T.ok} 10%, transparent)` : localMode ? `color-mix(in srgb, ${T.brand} 10%, transparent)` : T.bgLayer, borderRadius: 10, border: `1px solid ${engineMode ? `color-mix(in srgb, ${T.ok} 30%, transparent)` : localMode ? `color-mix(in srgb, ${T.brand} 30%, transparent)` : T.border}` } }, [
+			jsxs2("div", { style: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", padding: "8px 12px", background: engineMode || systemOpenSshMode || localMode ? `color-mix(in srgb, ${transportColor} 10%, transparent)` : T.bgLayer, borderRadius: 10, border: `1px solid ${engineMode || systemOpenSshMode || localMode ? `color-mix(in srgb, ${transportColor} 30%, transparent)` : T.border}` } }, [
 
 				j("span", { style: { fontSize: 13, fontWeight: 700 } }, "SCHED"),
 
 				j("span", {
 
-					style: { fontSize: 13, color: engineMode ? T.ok : localMode ? T.brand : T.label2, fontWeight: engineMode || localMode ? 700 : 400 },
+					style: { fontSize: 13, color: transportColor, fontWeight: engineMode || systemOpenSshMode || localMode ? 700 : 400 },
 
 				}, engineMode
 
-					? `→ ${binding.alias}（引擎模式，连接池复用）`
+					? `→ ${binding.alias}（内置引擎，连接池复用）`
+
+					: systemOpenSshMode
+						? `→ ${binding.sshEntry}（系统 OpenSSH，复用终端 ControlMaster${systemMasterReady ? "" : " · 未就绪"}）`
 
 					: localMode ? "→ 本地 transport（无需 SSH）"
 
-					: `→ sshEntry ${binding?.sshEntry ?? "?"}（CLI 模式）`),
+					: `→ sshEntry ${binding?.sshEntry ?? "?"}（通道未知）`),
 
 				j("span", { style: { flex: 1 } }),
 
-				engineMode && j("button", { onClick: doUnbind, disabled: !!busy, title: "回到传统 ssh CLI 模式", style: ghostBtn },
+				engineMode && j("button", {
+					onClick: () => doUseSystemOpenSsh(binding?.sshEntry),
+					disabled: !!busy || !binding?.sshEntry,
+					title: "复用本机终端已经通过密码/2FA 建立的 OpenSSH ControlMaster；不会在网页中请求验证码",
+					style: ghostBtn,
+				}, busy === "use-system:" + binding?.sshEntry ? "检测中…" : "复用终端登录"),
+
+				systemOpenSshMode && j("button", {
+					onClick: () => setTermTarget({ alias: binding.sshEntry, transport: "system-openssh" }),
+					disabled: !!busy || !systemMasterReady,
+					title: systemMasterReady
+						? "打开复用当前 ControlMaster 的系统 OpenSSH 终端"
+						: "请先按下方提示在本机终端建立 ControlMaster",
+					style: { ...ghostBtn, opacity: systemMasterReady ? 1 : 0.5 },
+				}, "终端"),
+
+				engineMode && j("button", { onClick: doUnbind, disabled: !!busy, title: "解除内置引擎绑定并使用系统 OpenSSH", style: ghostBtn },
 
 					busy === "unbind" ? "解绑中…" : "解绑"),
 
+			]),
+
+			activeSystemNotice && jsxs2("section", {
+				"aria-label": "OpenSSH ControlMaster 未就绪",
+				style: {
+					display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap",
+					padding: "10px 12px", border: `1px solid ${T.warn}`, borderRadius: 10,
+					background: `color-mix(in srgb, ${T.warn} 8%, transparent)`,
+				},
+			}, [
+				jsxs2("div", { style: { flex: "1 1 360px", minWidth: 0 } }, [
+					j("b", null, "请先在终端完成 SSH 登录"),
+					j("div", { role: "status", "aria-live": "polite", style: { color: T.label2, marginTop: 2, overflowWrap: "anywhere" } }, [
+						"未发现可复用的 OpenSSH ControlMaster。请在本机终端运行 ",
+						j("code", { style: { color: T.label, fontWeight: 700 } }, `ssh ${activeSystemNotice.sshEntry}`),
+						" 并完成密码/2FA，然后回来重新检测。dsh 不会弹出 OTP 输入框，也不会读取或保存验证码。",
+					]),
+					activeSystemNotice.error && j("div", { style: { color: T.warn, fontSize: 12, marginTop: 3, overflowWrap: "anywhere" } }, activeSystemNotice.error),
+				]),
+				j("button", {
+					type: "button",
+					onClick: () => doUseSystemOpenSsh(activeSystemNotice.sshEntry),
+					disabled: !!busy,
+					style: btn(T.warn, !!busy),
+				}, busy === "use-system:" + activeSystemNotice.sshEntry ? "检测中…" : "重新检测"),
 			]),
 
 			jsxs2("div", { style: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" } }, [
@@ -1309,7 +1427,9 @@ function apply(cctx, config) {
 
 					...hosts.map((h) => {
 
-						const boundHere = binding?.alias === h.alias;
+						const engineBoundHere = engineMode && binding?.alias === h.alias;
+						const systemBoundHere = systemOpenSshMode && binding?.sshEntry === h.alias;
+						const boundHere = engineBoundHere || systemBoundHere;
 						const trustSource = h.hostKeys?.[0]?.source;
 						const trustReady = h.hostKeyReady && h.chainReady !== false;
 
@@ -1323,9 +1443,9 @@ function apply(cctx, config) {
 
 							padding: "8px 12px", borderRadius: 10,
 
-							border: `1px solid ${boundHere ? `color-mix(in srgb, ${T.ok} 35%, transparent)` : T.border}`,
+							border: `1px solid ${boundHere ? `color-mix(in srgb, ${transportColor} 35%, transparent)` : T.border}`,
 
-							background: boundHere ? `color-mix(in srgb, ${T.ok} 7%, transparent)` : "transparent",
+							background: boundHere ? `color-mix(in srgb, ${transportColor} 7%, transparent)` : "transparent",
 
 						},
 
@@ -1335,7 +1455,7 @@ function apply(cctx, config) {
 
 						j("span", { style: { fontWeight: 700, fontSize: 13, flexShrink: 0 } }, h.alias),
 
-						boundHere && j("span", { style: { color: T.ok, fontWeight: 700, fontSize: 13, border: `1px solid ${T.ok}`, borderRadius: 999, padding: "1px 8px", flexShrink: 0 } }, "SCHED"),
+						boundHere && j("span", { style: { color: transportColor, fontWeight: 700, fontSize: 13, border: `1px solid ${transportColor}`, borderRadius: 999, padding: "1px 8px", flexShrink: 0 } }, "SCHED"),
 
 						j("span", { style: { color: T.label2, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 } }, [
 
@@ -1355,9 +1475,9 @@ function apply(cctx, config) {
 
 						// 右：操作区
 
-						(localMode || boundHere)
+						(localMode || engineBoundHere)
 
-							? j("span", { key: "sb", style: { color: localMode ? T.brand : T.ok, fontWeight: 700, fontSize: 13, flexShrink: 0 } }, localMode ? "本地运行" : "✔ 数据源")
+							? j("span", { key: "sb", style: { color: localMode ? T.brand : T.ok, fontWeight: 700, fontSize: 13, flexShrink: 0 } }, localMode ? "本地运行" : "✔ 内置引擎")
 
 							: j("button", {
 								key: "bnd",
@@ -1366,6 +1486,16 @@ function apply(cctx, config) {
 								title: trustReady ? "设为 sched 数据源主机（引擎模式）" : "先建立目标及完整 ProxyJump 链的主机信任",
 								style: { ...ghostBtn, color: T.brand, borderColor: `color-mix(in srgb, ${T.brand} 45%, transparent)`, flexShrink: 0, opacity: trustReady ? 1 : 0.5 },
 							}, busy === "bind:" + h.alias ? "绑定中…" : "设为SCHED"),
+
+						!localMode && (systemBoundHere
+							? j("span", { key: "system-sb", style: { color: systemMasterReady ? T.ok : T.warn, fontWeight: 700, fontSize: 13, flexShrink: 0 } }, systemMasterReady ? "✔ ControlMaster" : "⚠ ControlMaster")
+							: j("button", {
+								key: "system-sb",
+								onClick: () => doUseSystemOpenSsh(h.alias),
+								disabled: !!busy,
+								title: `复用终端中 ssh ${h.alias} 已建立的 OpenSSH ControlMaster；不会在网页中请求 2FA`,
+								style: { ...ghostBtn, color: T.brand, flexShrink: 0 },
+							}, busy === "use-system:" + h.alias ? "检测中…" : "复用终端")),
 
 						j("button", {
 							key: "trust",
@@ -1383,10 +1513,15 @@ function apply(cctx, config) {
 						}, "手动pin"),
 						j("button", {
 							key: "o",
-							onClick: () => setTermAlias(h.alias),
-							disabled: !trustReady,
-							title: trustReady ? "打开网页终端" : "先建立目标及完整 ProxyJump 链的主机信任",
-							style: { ...ghostBtn, flexShrink: 0, opacity: trustReady ? 1 : 0.5 },
+							onClick: () => setTermTarget({
+								alias: systemBoundHere ? binding.sshEntry : h.alias,
+								transport: systemBoundHere ? "system-openssh" : "engine",
+							}),
+							disabled: systemBoundHere ? !systemMasterReady : !trustReady,
+							title: systemBoundHere
+								? (systemMasterReady ? "打开复用当前 ControlMaster 的系统 OpenSSH 终端" : "请先在本机终端建立 ControlMaster")
+								: (trustReady ? "打开内置 SSH 引擎终端" : "先建立目标及完整 ProxyJump 链的主机信任"),
+							style: { ...ghostBtn, flexShrink: 0, opacity: (systemBoundHere ? systemMasterReady : trustReady) ? 1 : 0.5 },
 						}, "终端"),
 
 						confirmAlias === h.alias
@@ -1395,11 +1530,13 @@ function apply(cctx, config) {
 
 							: j("button", {
 								key: "t",
-								onClick: () => doTest(h.alias),
-								disabled: !!busy || !trustReady,
-								title: trustReady ? "连通性测试" : "先建立目标及完整 ProxyJump 链的主机信任",
-								style: { ...ghostBtn, flexShrink: 0, opacity: trustReady ? 1 : 0.5 },
-							}, busy === "test:" + h.alias ? "…" : "测试"),
+								onClick: () => systemBoundHere ? doUseSystemOpenSsh(binding.sshEntry) : doTest(h.alias),
+								disabled: !!busy || (!systemBoundHere && !trustReady),
+								title: systemBoundHere
+								? "只检测终端 ControlMaster，不发起新的 SSH 身份验证"
+								: (trustReady ? "测试内置 SSH 引擎连通性" : "先建立目标及完整 ProxyJump 链的主机信任"),
+								style: { ...ghostBtn, flexShrink: 0, opacity: (systemBoundHere || trustReady) ? 1 : 0.5 },
+							}, busy === (systemBoundHere ? "use-system:" : "test:") + h.alias ? "…" : "测试"),
 
 						confirmAlias === h.alias
 
@@ -1423,7 +1560,7 @@ function apply(cctx, config) {
 
 	// xterm.js WS 终端：帧协议 server->{ready|output|exit}, client->{input|resize}
 
-	function SshTerminal({ alias, onClose }) {
+	function SshTerminal({ alias, transport = "engine", onClose }) {
 
 		const boxRef = useRef(null);
 
@@ -1473,7 +1610,7 @@ function apply(cctx, config) {
 
 				const proto = location.protocol === "https:" ? "wss://" : "ws://";
 
-				ws = authenticatedWebSocket(`${proto}${location.host}/sched/ws/ssh-terminal?alias=${encodeURIComponent(alias)}&cols=${term.cols}&rows=${term.rows}`);
+				ws = authenticatedWebSocket(`${proto}${location.host}/sched/ws/ssh-terminal?transport=${encodeURIComponent(transport)}&alias=${encodeURIComponent(alias)}&cols=${term.cols}&rows=${term.rows}`);
 
 				ws.onmessage = (ev) => {
 
@@ -1522,7 +1659,7 @@ function apply(cctx, config) {
 
 			};
 
-		}, [alias]);
+		}, [alias, transport]);
 
 		return jsxs2("div", { style: { display: "flex", flexDirection: "column", gap: 8, flex: 1, minHeight: 0 } }, [
 
@@ -1537,6 +1674,9 @@ function apply(cctx, config) {
 				]),
 
 				j("h3", { style: { ...boardTitleStyle, fontSize: 14 } }, `终端 · ${alias}`),
+
+				j("span", { style: { color: transport === "system-openssh" ? T.ok : T.label2, fontSize: 13 } },
+					transport === "system-openssh" ? "系统 OpenSSH · 复用终端 ControlMaster" : "内置 SSH 引擎"),
 
 				j("span", { style: { color: T.label2, fontSize: 13 } }, "关闭页签即断开远端 shell"),
 
@@ -1745,7 +1885,10 @@ function apply(cctx, config) {
 
 		const running = status != null && status.includes("运行中");
 		const engineMode = channel?.mode === "engine";
+		const systemOpenSshMode = channel?.mode === "system-openssh";
 		const localMode = channel?.mode === "local";
+		const systemMasterReady = systemOpenSshMode && channel?.master?.ready === true;
+		const channelColor = engineMode || systemMasterReady ? T.ok : systemOpenSshMode ? T.warn : localMode ? T.brand : T.label2;
 
 		return jsxs2("div", { style: { marginBottom: 8, paddingBottom: 6, borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center" } }, [
 
@@ -1753,19 +1896,23 @@ function apply(cctx, config) {
 
 			j("span", {
 
-				title: "\u8fde\u63a5\u901a\u9053\u5728 ssh \u9875\u7ba1\u7406",
+				title: systemOpenSshMode
+					? "系统 OpenSSH 复用本机终端的 ControlMaster；连接失效时请到 ssh 页按提示重新检测"
+					: "\u8fde\u63a5\u901a\u9053\u5728 ssh \u9875\u7ba1\u7406",
 
 				style: { fontSize: 13, padding: "2px 8px", borderRadius: 999, flexShrink: 0,
 
-					color: engineMode ? T.ok : localMode ? T.brand : T.label2,
+					color: channelColor,
 
-					border: `1px solid ${engineMode ? `color-mix(in srgb, ${T.ok} 35%, transparent)` : localMode ? `color-mix(in srgb, ${T.brand} 35%, transparent)` : T.border}`,
+					border: `1px solid ${engineMode || systemOpenSshMode || localMode ? `color-mix(in srgb, ${channelColor} 35%, transparent)` : T.border}`,
 
-					background: engineMode ? `color-mix(in srgb, ${T.ok} 8%, transparent)` : localMode ? `color-mix(in srgb, ${T.brand} 8%, transparent)` : "transparent",
+					background: engineMode || systemOpenSshMode || localMode ? `color-mix(in srgb, ${channelColor} 8%, transparent)` : "transparent",
 
 					marginRight: 8, whiteSpace: "nowrap" },
 
 			}, engineMode ? `\u26a1 ${channel.alias}` :
+
+				systemOpenSshMode ? `ssh:${channel.sshEntry} · master${systemMasterReady ? "✓" : "×"}` :
 
 				localMode ? "local transport" :
 

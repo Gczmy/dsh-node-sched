@@ -185,6 +185,21 @@ export function validHostKey(hostKey) {
 	return typeof hostKey === "string" && /^SHA256:[A-Za-z0-9+/]{43}$/.test(hostKey);
 }
 
+export function reconcileSystemMasterNotice(current, binding, error = "") {
+	const systemMode = binding?.mode === "system-openssh";
+	const activeEntry = systemMode && typeof binding.sshEntry === "string"
+		? binding.sshEntry
+		: "";
+	// A failed attempt to select another alias is actionable on its own. Do not
+	// let polling of the still-active alias erase that candidate's instructions.
+	if (current?.source === "candidate" && current.sshEntry !== activeEntry) return current;
+	if (!systemMode || binding?.master?.ready === true) return null;
+	if (binding?.master?.ready === false) {
+		return { source: "active", sshEntry: activeEntry, error: String(error || "") };
+	}
+	return null;
+}
+
 export function schedulerMutationAvailability(snapshot) {
 	if (!snapshot || snapshot.ok !== true || snapshot.fresh !== true) {
 		return { writable: false, reason: "调度器状态不是最新快照，操作已切换为只读。" };

@@ -41,11 +41,40 @@ The design principle is **strict adapter architecture**: all scheduling intellig
 - **Dry-run-gated submit** — paste a `batch.json`, preview the expansion and SKIP verdicts before committing; destructive operations (cancel / resubmit / GPU free / daemon stop) require typed confirmation.
 - **Multi-project aware** — surfaces per-project GPU quotas, priorities, and hard-affinity isolation as configured by sched's B11c multi-project mode.
 
-### Query and mutation targets
+### Query transports and mutation targets
 
-Read-only queries and mutations are deliberately configured as separate paths. `transport` plus the current dashboard binding selects the query target; `mutationMode`, `mutationTarget`, `mutationSession`, and `mutationExpectedNode` select exactly one writer. Binding or unbinding a dashboard host never changes the writer, and `sshEntry` is only the explicit fallback query entry unless it is also named separately as the mutation target.
+Read-only queries and mutations are deliberately configured as separate paths. `transport` plus the current dashboard binding selects the query transport and target; `mutationMode`, `mutationTarget`, `mutationSession`, and `mutationExpectedNode` select exactly one writer. Changing a dashboard binding never changes the writer, and `sshEntry` is an explicit OpenSSH `Host` alias rather than a host discovered by fallback.
+
+The dashboard offers three query transports:
+
+- **System OpenSSH** (`system-openssh`) reuses an already-authenticated OpenSSH `ControlMaster` for `sshEntry`. It is the recommended mode on macOS and Linux when a terminal login already completed password or 2FA authentication.
+- **Embedded engine** (`engine`) keeps the existing ssh2 connection-pool, host-pin, and in-dashboard authentication path as an explicit alternative.
+- **Local** (`local`) runs the sched CLI directly when dsh and sched are on the same node.
 
 Mutations are disabled by default. The optional `screen` writer is a compatibility transport only: it has no built-in session name and cannot run until both its SSH target and session are explicitly configured. Operators should use the plugin or `sched` CLI rather than attaching to or typing into an infrastructure screen.
+
+### Reuse a terminal SSH login
+
+System OpenSSH mode deliberately reuses authentication; it does not copy or cache authentication material. Configure OpenSSH multiplexing for the same alias used by `sshEntry`, for example:
+
+```sshconfig
+Host my-cluster
+    ControlMaster auto
+    ControlPersist 30m
+    ControlPath ~/.ssh/cm-%C-%n
+```
+
+Run `ssh my-cluster` in a local terminal and complete its password/2FA flow once, then choose **Reuse terminal login** in the SSH panel. dsh checks the existing master with `ssh -O check`; it never reads, receives, or stores the password, private-key passphrase, or OTP. `ControlPersist` determines how long the login can be reused after the original terminal exits.
+
+The terminal and the dsh host process must run as the same local OS account and see the same `ControlPath` filesystem. A dsh instance running as another user, in an isolated container, or on another machine cannot reuse that socket.
+
+Keep the `ControlPath` unique per original Host alias (`%n` above), especially when two aliases reach the same final host through different gateways. Keep the resulting socket path short enough for the operating system's Unix-socket limit; an explicit short path per Host is also valid.
+
+Commands, live logs, and the Web terminal all use that same master in non-interactive `BatchMode`. If no matching master exists—or it expires—they fail closed, and the SSH panel shows a non-blocking banner asking the user to run `ssh <alias>` and recheck. They never silently open a fresh authentication flow, retry a mutation on another connection, or fall back to the embedded engine. Select the embedded engine explicitly when browser-mediated SSH authentication is required.
+
+The passenger sessions also disable local/remote/dynamic, agent, X11, and tunnel forwarding, reject local commands, and cannot detach themselves. Command and log sessions force TTY off; the Web terminal receives a PTY but disables OpenSSH escape commands, so browser input remains remote-shell input rather than a local SSH control channel.
+
+The system-OpenSSH path is supported on macOS and Linux. Windows OpenSSH does not provide the required `ControlMaster` multiplexing, so Windows users must select the embedded engine. The browser Web terminal uses the native `node-pty` dependency to give the system `ssh` process a real PTY; command and log reuse do not depend on terminal emulation.
 
 ## Getting Started
 
@@ -53,6 +82,7 @@ Mutations are disabled by default. The optional `screen` writer is a compatibili
 
 - Node.js ≥ 22
 - A reachable host running [sched](https://github.com/Gczmy/sched) with SSH access configured
+- macOS or Linux for system-OpenSSH `ControlMaster` reuse; use the embedded engine on Windows
 - dsh ≥ matching your installed version
 
 ### Install
@@ -86,7 +116,7 @@ Configure every deployment-facing value in `cordis.patch.yml` (see [`profile/cor
     - id: node-sched-proxy
       name: "@zzc/dsh-node-sched"
       config:
-        sshEntry: "my-cluster"       # explicit fallback query SSH Host alias
+        sshEntry: "my-cluster"       # explicit OpenSSH Host alias for remote queries
         schedBin: "$HOME/bin/sched"  # full path for non-interactive execution
         probeCommand: "status"
         connectTimeoutSec: 20
@@ -119,7 +149,7 @@ Immediately before every mutation, the selected writer runs `hostname` and `sche
 dsh --profile nodesched
 # open http://127.0.0.1:<port> and click the ⚡ sched entry in the sidebar footer
 ```
-Loading the surrounding DSH page does not authenticate, poll, or open a sched WebSocket. The first explicit dashboard open shows an in-panel connection form; cancel closes it and starts no dashboard work. Paste the master token from `~/.dsh/node-sched-access-token` once. By default the browser generates a non-exportable P-256 signing key, stores that private key in origin-scoped IndexedDB, and registers only its public key with the host for 30 days. Later opens reuse an unexpired short session or silently sign a one-time challenge to receive a new 15-minute bearer. The master token is never persisted in the browser. Uncheck **Trust this browser** to exchange it for a short session without registering a device.
+Loading the surrounding DSH page does not authenticate, poll, or open a sched WebSocket. Opening the dashboard without a usable browser session shows a non-blocking banner, so the rest of the page remains visible; only clicking its connection button opens the token form. Cancelling that form returns to the banner and starts no protected dashboard work. Paste the master token from `~/.dsh/node-sched-access-token` once. By default the browser generates a non-exportable P-256 signing key, stores that private key in origin-scoped IndexedDB, and registers only its public key with the host for 30 days. Later opens reuse an unexpired short session or silently sign a one-time challenge to receive a new 15-minute bearer. The master token is never persisted in the browser. Uncheck **Trust this browser** to exchange it for a short session without registering a device.
 
 Trusted-browser records are stored by the host in `~/.dsh/node-sched-trusted-browsers.json` with mode `0600` and are invalidated when the master token changes. **Forget this device** revokes its sessions and closes its authenticated WebSockets. Browser trust belongs to one browser profile and origin: changing between `localhost` and `127.0.0.1`, changing the port, using a private window, or clearing site data requires pairing again. A normal web page cannot read `~/.dsh/node-sched-access-token`, so the first pairing cannot safely be made silent without a separate trusted native/CLI hand-off.
 
@@ -127,9 +157,9 @@ Every protected HTTP request uses `Authorization: Bearer <master-or-short-sessio
 
 ### SSH server trust
 
-Browser/device trust and SSH server trust are separate. Browser trust controls access to the dashboard; SSH host-key trust proves which remote server the embedded engine reached; password, private-key, and agent authentication then prove who the user is. A client public key such as `id_ed25519.pub` or `kelvin2_key.pub` is therefore not a server host pin.
+Browser/device trust and SSH server trust are separate. Browser trust controls access to the dashboard. In system-OpenSSH mode, the local OpenSSH client applies `~/.ssh/config` and `known_hosts` while dsh only verifies and reuses the existing `ControlMaster`. In embedded-engine mode, dsh's host-key store proves which remote server the engine reached; password, private-key, and agent authentication then prove who the user is. A client public key such as `id_ed25519.pub` or `kelvin2_key.pub` is therefore not a server host pin.
 
-After importing `~/.ssh/config`, the SSH panel automatically reuses exact entries from the owned, non-writable `~/.ssh/known_hosts` or `known_hosts2` files. Plain, comma-separated, non-default-port, hashed OpenSSH host names and multiple host-key algorithms are supported. Matching `@revoked` entries fail closed; `@cert-authority`, wildcard, malformed, unsafe, or unsupported entries are never silently converted into exact pins.
+For the embedded engine, importing `~/.ssh/config` lets the SSH panel reuse exact entries from the owned, non-writable `~/.ssh/known_hosts` or `known_hosts2` files. Plain, comma-separated, non-default-port, hashed OpenSSH host names and multiple host-key algorithms are supported. Matching `@revoked` entries fail closed; `@cert-authority`, wildcard, malformed, unsafe, or unsupported entries are never silently converted into exact pins.
 
 If no reusable entry exists, **Establish trust** performs only SSH key exchange. The candidate receives no password, private key, passphrase, ssh-agent signature, or keyboard-interactive answer. The UI displays the observed algorithm, endpoint, and SHA256 fingerprint; only an explicit, short-lived, browser-bound confirmation writes it to `~/.dsh/dsh-ssh.json`. This is trust on first use (TOFU): it pins later connections but cannot independently prove that the first network path was uncompromised. Cancelling aborts an in-flight probe and invalidates any pending confirmation. Once **Confirm and trust** starts the synchronous durable commit, cancel is disabled so the UI never claims an already-authorized save was undone.
 
@@ -160,7 +190,11 @@ All endpoints are served by the host plugin under `/sched/api/*`. Read responses
 | `/sched/ssh/import` | POST | Import SSH config and safely reuse matching local known-host pins |
 | `/sched/ssh/host-key` | POST | Prepare, confirm, or cancel one browser-bound host-key trust operation |
 | `/sched/ssh/test` | POST | Run a normal, pinned and authenticated SSH connectivity test |
+| `/sched/ssh/binding` | GET | Inspect the selected query transport and current ControlMaster readiness |
+| `/sched/ssh/use-system` | POST | Select system OpenSSH only after a matching active ControlMaster is found |
+| `/sched/ssh/unbind` | POST | Clear the embedded-engine binding and return to the configured system-OpenSSH entry |
 | `/sched/ws/events` | WS | Live dispatcher event stream |
+| `/sched/ws/ssh-terminal` | WS | Bounded PTY terminal over the explicitly selected SSH transport |
 
 ### sched JSON contracts
 
@@ -169,13 +203,13 @@ All endpoints are served by the host plugin under `/sched/api/*`. Read responses
 
 ## Safety Model
 
-- **Explicit query target and SSH identity** — `sshEntry` is pinned in config; probe failures raise an error instead of silently switching hosts. A dashboard engine binding affects reads only. Every embedded SSH target and every ProxyJump hop must have an exact trusted OpenSSH SHA256 host key in the private `~/.dsh/dsh-ssh.json` store. Safe matching entries are imported from the local OpenSSH trust store; otherwise an explicit, credential-free TOFU confirmation is required. Multiple exact algorithms are retained, while absent, revoked, stale, or mismatched keys fail closed. Existing trust is never silently replaced.
+- **Explicit query target and SSH identity** — `sshEntry` is pinned in config; probe failures raise an error instead of silently switching hosts. System OpenSSH accepts only a live master for that exact alias and never falls back to new authentication. An explicit dashboard engine binding affects reads only. Every embedded-engine target and every ProxyJump hop must have an exact trusted OpenSSH SHA256 host key in the private `~/.dsh/dsh-ssh.json` store. Safe matching entries are imported from the local OpenSSH trust store; otherwise an explicit, credential-free TOFU confirmation is required. Multiple exact algorithms are retained, while absent, revoked, stale, or mismatched keys fail closed. Existing trust is never silently replaced.
 - **Concurrent host-store safety** — host edits carry per-host revisions. Durable writes take a private cross-process lock, securely reload the current document, compare the complete prior generation, and atomically replace it; stale writers receive a conflict and must reload instead of overwriting a newer pin. SSH routes refresh external generations and evict affected pooled connections before use.
 - **Verified, fail-closed writer** — mutations stay disabled until one local, engine, or SSH writer is fully configured. Immediately before every mutation, that writer is re-attested against the exact expected sched node; verification is never cached across operations. The screen compatibility writer cannot prove uploaded-command channel equivalence and therefore refuses upload-backed mutations.
 - **Durable at-most-once mutations** — writes are serialized through a single-flight gate. Browser tabs atomically claim unresolved request IDs in IndexedDB, so reloads, tab replacement, and concurrent tabs reuse the same binding. Every `sched request` includes `--expect-revision`; task requests also bind exact status/version, while GPU requests bind quarantine and the complete sorted assignment set. Unbound submit, daemon, and config mutations use revision zero. Codes `-1` (transport unknown) and `75` (scheduler outcome unknown) retain both the request binding and staged payload; only definitive outcomes remove them. Retained payloads are age-collected.
 - **Guarded sensitive routes** — every protected HTTP route requires either the private master bearer or an unexpired short browser session and a loopback peer. Browser pairing and session exchange require the master bearer; challenge verification requires the registered non-exportable browser key. Every POST, including authentication bootstrap, SSH host management/import/host-key confirmation/unbind, generic execution, authentication answers, and client logging, additionally requires a present, exact same-origin `Origin` matching `Host`; missing or foreign origins fail closed. Browser and host-key challenges are single-use, short-lived, rate/cap bounded, and bound to their exact principal and state. WebSockets require a bearer in their negotiated subprotocol, close when its short session expires or is revoked, cap payload/rate/client counts and buffered output, and never accept URL credentials.
 - **Bounded input, output, and staging** — JSON request bodies and uploaded batch/config objects are capped at 2 MiB and bounded by nesting/node counts. CLI and SSH stdout/stderr are capped at 2 MiB per stream with explicit byte-counted truncation markers; event-tail partial lines are byte-bounded and framed only after complete UTF-8 decoding. Local and remote staging use unique private temporary files, file `fsync`, atomic replacement, and directory `fsync`; remote mode-0700 directories and mode-0600 files are enforced before execution. CLI SSH processes receive TERM, a grace interval, then KILL only through their tracked process group, and settle from the close event.
-- **Authentication audience and lifecycle** — interactive SSH and every ProxyJump hop/`forwardOut` share one absolute connection deadline. Challenges require a visible dashboard audience and remain replayable across a short dashboard reconnect only while their SSH connection is alive. Explicit answers—including an explicit zero-answer response—are the only outcomes sent to ssh2; cancellation, expiry, connection failure, or abort destroys the client, clears the pending challenge, and emits one matching terminal frame without submitting answers.
+- **Authentication audience and lifecycle** — embedded-engine interactive SSH and every ProxyJump hop/`forwardOut` share one absolute connection deadline. Challenges require a visible dashboard audience and remain replayable across a short dashboard reconnect only while their SSH connection is alive. Explicit answers—including an explicit zero-answer response—are the only outcomes sent to ssh2; cancellation, expiry, connection failure, or abort destroys the client, clears the pending challenge, and emits one matching terminal frame without submitting answers. System OpenSSH has no browser challenge path: it accepts only a terminal-created master and uses `BatchMode` throughout.
 - **Typed confirmation** — cancel, artifact-clearing resubmit, GPU release, and daemon stop all require typing an explicit confirmation word.
 - **Audit log** — every forwarded operation is recorded with caller, arguments, and result; sensitive command material is redacted.
 - **Server and browser freshness** — status and daemon caches have finite server TTLs and report stale age plus the last refresh error. The browser additionally applies a local TTL, rejects out-of-order poll completions, and fails stale/error snapshots closed for mutations. Status/history views consume every stable cursor page; while a page is truncated, its row count is displayed only as “loaded” or “shown”, never as a total.

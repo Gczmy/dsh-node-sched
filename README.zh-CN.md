@@ -40,9 +40,40 @@
 - **dry-run 门控提交** — 粘贴 `batch.json`，先预览任务展开与 SKIP 判定再正式提交；高危操作（cancel / resubmit / GPU 释放 / daemon stop）需键入确认词。
 - **多项目感知** — 展示 sched B11c 多项目模式配置的每项目 GPU 配额、优先级与硬亲和隔离。
 
-### Screen 注入边界
+### 查询传输与写入目标
 
-插件的 `screen -X stuff` 仅是 host 侧受控传输实现，不是要求运维人员手工 attach 或向基础设施 screen 输入命令。它只用于白名单 sched 操作，并受 loopback/写操作门与审计日志保护，每个命令都有独立结果标记。运维人员**禁止** attach、注入命令或退出 `3323979.ambior1`；应使用插件或 `sched` CLI。sched 与插件同机部署时，**应**配置 `transport: "local"`，完全绕开 screen 注入。
+只读查询和写操作采用相互独立的路径。`transport` 与当前看板绑定共同选择查询通道和目标；`mutationMode`、`mutationTarget`、`mutationSession`、`mutationExpectedNode` 则只选择一个写入端。切换看板绑定不会改变写入端，`sshEntry` 是显式配置的 OpenSSH `Host` 别名，不会通过失败回退猜测另一台主机。
+
+看板提供三种查询通道：
+
+- **系统 OpenSSH**（`system-openssh`）复用 `sshEntry` 已完成认证的 OpenSSH `ControlMaster`。在 macOS/Linux 上，如果用户已经在终端完成密码或 2FA 登录，这是推荐模式。
+- **内置引擎**（`engine`）保留现有 ssh2 连接池、host pin 与网页内认证流程，作为显式可选方案。
+- **本地**（`local`）用于 dsh 与 sched 运行在同一节点的情况，直接执行 sched CLI。
+
+写操作默认禁用。可选的 `screen` writer 仅是兼容传输：它没有内置会话名，必须同时显式配置 SSH 目标与会话才能工作。运维人员应通过插件或 `sched` CLI 操作，不应手工向基础设施 screen 注入命令。
+
+### 复用终端 SSH 登录
+
+系统 OpenSSH 模式只复用认证结果，不复制或缓存任何认证材料。请为 `sshEntry` 使用的同一个别名配置 OpenSSH 多路复用，例如：
+
+```sshconfig
+Host my-cluster
+    ControlMaster auto
+    ControlPersist 30m
+    ControlPath ~/.ssh/cm-%C-%n
+```
+
+先在本机终端运行 `ssh my-cluster` 并完成一次密码/2FA，再到 SSH 面板点击**复用终端登录**。dsh 通过 `ssh -O check` 检测现有 master，不会读取、接收或保存密码、私钥 passphrase 或 OTP。原终端退出后还能复用多久由 `ControlPersist` 决定。
+
+终端与 dsh host 进程必须使用同一个本机操作系统账号，并能看到同一个 `ControlPath` 文件系统。若 dsh 以另一个用户运行、处于隔离容器中或运行在另一台机器上，就无法复用这个 socket。
+
+`ControlPath` 应按原始 Host 别名保持唯一（上例中的 `%n`），特别是两个别名通过不同网关到达同一个最终主机时；同时要让展开后的路径足够短，不超过系统 Unix socket 路径上限。也可以为每个 Host 手工指定不同的短路径。
+
+命令、实时日志和 Web 终端都以非交互 `BatchMode` 复用同一个 master。如果找不到匹配的 master 或它已经过期，相关操作会 fail-closed，SSH 面板显示不遮挡内容的横幅，提示先运行 `ssh <别名>` 再重新检测；不会静默发起新认证、换连接重试写操作或回退到内置引擎。需要在网页中进行 SSH 认证时，必须显式选择内置引擎。
+
+复用出的 passenger 会话还会禁用本地/远程/动态、agent、X11 和 tunnel 转发，禁止本地命令及自行转入后台。普通命令与日志强制关闭 TTY；Web 终端虽分配 PTY，但禁用 OpenSSH escape command，因此浏览器输入只会进入远端 shell，不能变成本机 SSH 控制命令。
+
+系统 OpenSSH 通道支持 macOS 和 Linux。Windows OpenSSH 不支持这里依赖的 `ControlMaster` 多路复用，因此 Windows 用户应选择内置引擎。Web 终端通过原生依赖 `node-pty` 为系统 `ssh` 提供真实 PTY；普通命令和日志复用不依赖终端模拟。
 
 ## 快速开始
 
@@ -50,6 +81,7 @@
 
 - Node.js ≥ 22
 - 一台可经 SSH 访问、已部署 [sched](https://github.com/Gczmy/sched) 的主机
+- 系统 OpenSSH `ControlMaster` 复用需要 macOS 或 Linux；Windows 请使用内置引擎
 - 版本匹配的 dsh
 
 ### 安装
@@ -83,9 +115,17 @@ dsh plugin --profile nodesched add ./packages/node-sched ./packages/node-sched-u
     - id: node-sched-proxy
       name: "@zzc/dsh-node-sched"
       config:
-        sshEntry: "my-cluster"      # ssh config 的 Host 别名——显式配置，绝不自动切换
+        sshEntry: "my-cluster"      # 远程查询使用的显式 OpenSSH Host 别名
+        schedBin: "$HOME/bin/sched" # 非交互执行使用的完整路径
+        probeCommand: "status"
         connectTimeoutSec: 20
         pollFallbackSec: 30
+        transport: "auto"           # auto；dsh 与 sched 同节点时设为 local
+
+        mutationMode: "disabled"    # 选择并完整配置 writer 前保持 fail-closed
+        mutationTarget: ""
+        mutationSession: ""
+        mutationExpectedNode: ""
 
     - id: node-sched-ui
       name: "@zzc/dsh-node-sched-ui"
@@ -97,6 +137,8 @@ dsh plugin --profile nodesched add ./packages/node-sched ./packages/node-sched-u
 dsh --profile nodesched
 # 打开 http://127.0.0.1:<端口>，点击侧栏底部的 ⚡ sched 入口
 ```
+
+加载外围 DSH 页面不会触发 sched 认证、轮询或 WebSocket。打开看板但没有可用浏览器会话时，只显示不遮挡内容的横幅；点击横幅上的连接按钮后才打开令牌表单。取消表单会回到横幅，并且不会启动受保护的看板请求。首次连接从 `~/.dsh/node-sched-access-token` 粘贴 master token；默认情况下浏览器只持久化 origin 内不可导出的 P-256 设备密钥，后续可在设备信任有效期内静默换取短期会话，master token 本身不会保存在浏览器中。
 
 ## HTTP API
 
@@ -114,21 +156,28 @@ dsh --profile nodesched
 | `/sched/ssh/import` | POST | 导入 `~/.ssh/config` 并安全复用本机 known_hosts |
 | `/sched/ssh/host-key` | POST | 准备、确认或取消服务器 host key 信任 |
 | `/sched/ssh/test` | POST | 使用已固定服务器身份执行正常 SSH 连通测试 |
+| `/sched/ssh/binding` | GET | 查看当前查询通道及 ControlMaster 就绪状态 |
+| `/sched/ssh/use-system` | POST | 仅在找到匹配的活动 ControlMaster 后选择系统 OpenSSH |
+| `/sched/ssh/unbind` | POST | 清除内置引擎绑定并回到配置的系统 OpenSSH 入口 |
 | `/sched/ws/events` | WS | dispatcher 实时事件流 |
+| `/sched/ws/ssh-terminal` | WS | 使用显式选择的 SSH 通道打开有界 PTY 终端 |
 
 ### SSH 服务器信任
 
-浏览器设备信任、SSH 服务器身份和 SSH 用户认证是三件不同的事；`kelvin2_key.pub` 这类客户端公钥不能作为服务器 host pin。SSH 面板会先从 owned、非 group/other writable 的 `~/.ssh/known_hosts`/`known_hosts2` 复用精确匹配（包括 hashed host、多算法和 `HostKeyAlias`）。当前 pin 若与 `@revoked` 指纹精确相交则拒绝继续；CA、通配符、畸形或不安全文件不会被静默信任。
+浏览器设备信任、SSH 服务器身份和 SSH 用户认证是三件不同的事。系统 OpenSSH 模式由本机 OpenSSH 应用 `~/.ssh/config` 与 `known_hosts`，dsh 只检测并复用已有 `ControlMaster`。内置引擎模式则由 dsh 的 host-key 存储确认远端服务器身份；`kelvin2_key.pub` 这类客户端公钥不能作为服务器 host pin。
+
+内置引擎从 owned、非 group/other writable 的 `~/.ssh/known_hosts`/`known_hosts2` 复用精确匹配（包括 hashed host、多算法和 `HostKeyAlias`）。当前 pin 若与 `@revoked` 指纹精确相交则拒绝继续；CA、通配符、畸形或不安全文件不会被静默信任。
 
 没有可复用记录时，“建立信任”只做 SSH 密钥交换，待确认节点不会收到密码、私钥、passphrase、agent 签名或动态验证码。页面显示端点、算法和 SHA256 指纹，用户确认后才持久化；这是 TOFU，不能独立证明第一次网络路径未被劫持。取消会终止当前探测并撤销短期 challenge；点击“确认并信任”进入同步耐久写入后，取消按钮会禁用。ProxyJump 按目标上的显式扁平 alias 链逐段确认，嵌套链 fail-closed。
 
 ## 安全模型
 
-- **SSH 入口与身份显式化** — 集群别名固定写在配置中；每个目标和 ProxyJump hop 都必须有精确服务器 host key，缺失、撤销或不匹配时 fail-closed。
+- **SSH 入口与身份显式化** — 集群别名固定写在配置中；系统 OpenSSH 只接受该精确别名的活动 master，绝不回退到新认证。内置引擎的每个目标和 ProxyJump hop 都必须有精确服务器 host key，缺失、撤销或不匹配时 fail-closed。
 - **并发安全的主机存储** — 主机编辑携带 per-host revision；写入持有跨进程私有锁，在锁内安全 reload 并比较完整旧 generation，过期进程只能得到冲突，不能覆盖新 pin。
 - **写操作门** — 写操作经单飞（single-flight）门串行执行；结果未知时不自动重试。
 - **键入确认** — cancel、清产物的 resubmit、GPU 释放、daemon stop 均需键入显式确认词。
 - **审计日志** — 每条转发操作记录调用方、参数与结果。
+- **认证生命周期** — 内置引擎只有在可见网页中才接受显式认证回答；取消、超时或断线会销毁连接并清除 challenge。系统 OpenSSH 不提供网页认证通道，只复用终端创建的 master，并始终使用 `BatchMode`。
 - **服务端缓存** — 读路径由后台刷新器供数；SSH 链路抖动只会增加数据陈旧度，不会破坏既有观测的正确性。
 
 ## 开发

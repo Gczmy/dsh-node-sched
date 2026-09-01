@@ -68,6 +68,7 @@ function requestFor(url, {
 	method = "GET",
 	origin,
 	body,
+	bodyGate,
 	authorization,
 } = {}) {
 	const headers = { host: "127.0.0.1:3000" };
@@ -79,6 +80,7 @@ function requestFor(url, {
 		headers,
 		socket: { remoteAddress: "127.0.0.1" },
 		async *[Symbol.asyncIterator]() {
+			if (bodyGate) await bodyGate;
 			if (body !== undefined) yield Buffer.from(JSON.stringify(body));
 		},
 	});
@@ -145,7 +147,14 @@ async function withBackendRoutes(statusDocument, callback, { beforeApply } = {})
 	const previousHome = process.env.HOME;
 	const home = mkdtempSync(path.join(tmpdir(), "nodesched-review-"));
 	const routes = new Map();
-	const state = { commands: [], statusOutage: false };
+	const state = {
+		commands: [],
+		statusOutage: false,
+		masterOutage: false,
+		masterOutageAliases: new Set(),
+		hangMasterAliases: new Set(),
+		spawnCalls: [],
+	};
 	let dispose;
 	process.env.HOME = home;
 	beforeApply?.({ home });
@@ -153,10 +162,24 @@ async function withBackendRoutes(statusDocument, callback, { beforeApply } = {})
 		const remoteCommand = String(args.at(-1));
 		state.commands.push(remoteCommand);
 		const child = new FakeChild();
+		state.spawnCalls.push({ args: [...args], child });
 		let code = 0;
 		let stdout = "ok\n";
 		let stderr = "";
-		if (remoteCommand.includes(" status --json")) {
+		if (args.includes("-G")) {
+			const alias = String(args.at(-1)).replace(/[^A-Za-z0-9_.-]/g, "_");
+			stdout = `host ${alias}\ncontrolpath /tmp/dsh-review-${alias}.sock\n`;
+			stderr = "";
+		} else if (args.includes("-O") && args.includes("check")) {
+			if (state.masterOutage || state.masterOutageAliases.has(String(args.at(-1)))) {
+				code = 255;
+				stdout = "";
+				stderr = "Control socket connect: No such file or directory";
+			} else {
+				stdout = "";
+				stderr = "Master running (pid=1234)";
+			}
+		} else if (remoteCommand.includes(" status --json")) {
 			if (state.statusOutage) {
 				code = 255;
 				stdout = "";
@@ -191,7 +214,10 @@ async function withBackendRoutes(statusDocument, callback, { beforeApply } = {})
 		} else if (remoteCommand.includes("hostname &&") && remoteCommand.includes(" config get")) {
 			stdout = "compute-01\n{\"node\":\"compute-01\"}\n";
 		}
-		queueMicrotask(() => {
+		const hangingMasterCheck = args.includes("-O")
+			&& args.includes("check")
+			&& state.hangMasterAliases.has(String(args.at(-1)));
+		if (!hangingMasterCheck) queueMicrotask(() => {
 			if (stdout) child.stdout.emit("data", Buffer.from(stdout));
 			if (stderr) child.stderr.emit("data", Buffer.from(stderr));
 			child.emit("close", code);
@@ -239,6 +265,10 @@ async function withBackendRoutes(statusDocument, callback, { beforeApply } = {})
 				body: response.body ? JSON.parse(response.body) : undefined,
 			};
 		};
+		// apply() launches its read-only activation probe/refresher in the
+		// background. system-openssh first performs a local mux check, so allow
+		// that promise chain to settle before an assertion resets command history.
+		await new Promise((resolve) => setImmediate(resolve));
 		await callback({ request, state, home });
 	} finally {
 		try {
@@ -662,6 +692,49 @@ test("terminal ready precedes synchronously replayed shell output", async () => 
 	});
 	assert.deepEqual(ws.sent.map(({ type }) => type), ["ready", "output"]);
 	assert.equal(ws.sent[1].data, "early prompt");
+	ws.close();
+});
+
+test("terminal output preserves UTF-8 across source chunks and 64 KiB websocket frames", async () => {
+	const serveTerminalWebSocket = await exported(INDEX, "serveTerminalWebSocket");
+	const ws = new EventEmitter();
+	ws.OPEN = 1;
+	ws.readyState = ws.OPEN;
+	ws.bufferedAmount = 0;
+	ws.sent = [];
+	ws.send = (value) => ws.sent.push(JSON.parse(value));
+	ws.close = () => {
+		ws.readyState = 3;
+		ws.emit("close");
+	};
+	const expected = `${"a".repeat(65_535)}你z`;
+	const bytes = Buffer.from(expected, "utf8");
+	const session = {
+		close() {},
+		set onData(handler) {
+			handler(bytes.subarray(0, 65_536));
+			handler(bytes.subarray(65_536));
+		},
+		set onExit(handler) {
+			this.exitHandler = handler;
+		},
+	};
+
+	await serveTerminalWebSocket({
+		ws,
+		clients: new Set(),
+		slots: new Set(),
+		maxSlots: 1,
+		openShell: async () => session,
+		openDeadlineAt: Date.now() + 1_000,
+		alias: "compute",
+		cols: 80,
+		rows: 24,
+	});
+	const outputFrames = ws.sent.filter(({ type }) => type === "output");
+	assert.equal(outputFrames.map(({ data }) => data).join(""), expected);
+	assert.equal(outputFrames.some(({ data }) => data.includes("�")), false);
+	assert.equal(outputFrames.every(({ data }) => Buffer.byteLength(data, "utf8") <= 64 * 1024), true);
 	ws.close();
 });
 
@@ -1725,6 +1798,7 @@ test("D-H02 mutation guard requires same-origin POST for every mutation route", 
 		"/sched/ssh/host-key",
 		"/sched/ssh/test",
 		"/sched/ssh/exec",
+		"/sched/ssh/use-system",
 		"/sched/ssh/bind",
 		"/sched/ssh/unbind",
 		"/sched/api/client-log",
@@ -1769,6 +1843,7 @@ test("D-H02 mutation-only HTTP routes enforce the shared POST and Origin guard",
 			"/sched/ssh/host-key",
 			"/sched/ssh/test",
 			"/sched/ssh/exec",
+			"/sched/ssh/use-system",
 			"/sched/ssh/bind",
 			"/sched/ssh/unbind",
 			"/sched/api/client-log",
@@ -2622,6 +2697,194 @@ test("ssh unbind persists before publishing or dropping the active alias", async
 			writeFileSync(path.join(directory, "nodesched_entry.json"), JSON.stringify({
 				sshEntry: "gateway",
 				schedAlias: "compute",
+			}), { mode: 0o600 });
+		},
+	});
+});
+
+test("system OpenSSH mode switches only after a live ControlMaster check and persists atomically", async () => {
+	await withBackendRoutes(statusFixture(), async ({ request, state, home }) => {
+		const overrideFile = path.join(home, ".dsh", "nodesched_entry.json");
+		state.masterOutage = true;
+		const failed = await request("/sched/ssh/use-system", {
+			method: "POST",
+			origin: "http://127.0.0.1:3000",
+			body: { sshEntry: "HPDC_outside" },
+		});
+		assert.equal(failed.status, 409);
+		assert.equal(failed.body?.ok, false);
+		assert.equal(failed.body?.code, "no_control_master");
+		assert.match(failed.body?.error, /ssh HPDC_outside/i);
+		assert.deepEqual(JSON.parse(readFileSync(overrideFile, "utf8")), {
+			sshEntry: "gateway",
+			schedAlias: "compute",
+		});
+		const legacyUpdate = await request("/sched/api/entry", {
+			method: "POST",
+			origin: "http://127.0.0.1:3000",
+			body: { entry: "HPDC_outside" },
+		});
+		assert.equal(legacyUpdate.status, 410);
+		assert.equal(legacyUpdate.body?.code, "entry_update_moved");
+		assert.deepEqual(JSON.parse(readFileSync(overrideFile, "utf8")), {
+			sshEntry: "gateway",
+			schedAlias: "compute",
+		}, "the legacy entry endpoint must not bypass the candidate master check");
+
+		state.masterOutage = false;
+		const switched = await request("/sched/ssh/use-system", {
+			method: "POST",
+			origin: "http://127.0.0.1:3000",
+			body: { sshEntry: "HPDC_outside" },
+		});
+		assert.equal(switched.status, 200);
+		assert.equal(switched.body?.ok, true);
+		assert.equal(switched.body?.mode, "system-openssh");
+		assert.equal(switched.body?.sshEntry, "HPDC_outside");
+		assert.equal(switched.body?.master?.ready, true);
+		assert.deepEqual(JSON.parse(readFileSync(overrideFile, "utf8")), {
+			sshEntry: "HPDC_outside",
+			schedAlias: null,
+		});
+
+		await new Promise((resolve) => setImmediate(resolve));
+		state.hangMasterAliases.add("HPDC_outside");
+		const activeCheckBoundary = state.spawnCalls.length;
+		const activeBindingRequest = request("/sched/ssh/binding");
+		await new Promise((resolve) => setImmediate(resolve));
+		const activeMasterCheck = state.spawnCalls.slice(activeCheckBoundary).filter(({ args }) => (
+			args.includes("-O")
+			&& args.includes("check")
+			&& args.at(-1) === "HPDC_outside"
+		)).at(-1);
+		assert.ok(activeMasterCheck, "active ControlMaster check must be in flight");
+
+		state.masterOutageAliases.add("missing-master");
+		const rejectedCandidate = await request("/sched/ssh/use-system", {
+			method: "POST",
+			origin: "http://127.0.0.1:3000",
+			body: { sshEntry: "missing-master" },
+		});
+		assert.equal(rejectedCandidate.status, 409);
+		assert.equal(rejectedCandidate.body?.code, "no_control_master");
+		assert.deepEqual(JSON.parse(readFileSync(overrideFile, "utf8")), {
+			sshEntry: "HPDC_outside",
+			schedAlias: null,
+		}, "a rejected candidate must not replace the active system transport");
+		assert.deepEqual(
+			activeMasterCheck.child.killCalls,
+			[],
+			"a rejected candidate must not dispose or abort an active system transport",
+		);
+		state.hangMasterAliases.delete("HPDC_outside");
+		activeMasterCheck.child.emit("close", 0);
+		const activeBinding = await activeBindingRequest;
+		assert.equal(activeBinding.body?.sshEntry, "HPDC_outside");
+		assert.equal(activeBinding.body?.master?.ready, true);
+
+		const binding = await request("/sched/ssh/binding");
+		assert.equal(binding.body?.mode, "system-openssh");
+		assert.equal(binding.body?.sshEntry, "HPDC_outside");
+		assert.equal(binding.body?.master?.ready, true);
+	}, {
+		beforeApply({ home }) {
+			const directory = path.join(home, ".dsh");
+			mkdirSync(directory, { recursive: true, mode: 0o700 });
+			writeFileSync(path.join(directory, "nodesched_entry.json"), JSON.stringify({
+				sshEntry: "gateway",
+				schedAlias: "compute",
+			}), { mode: 0o600 });
+		},
+	});
+});
+
+test("a request captured on system alias A never reacquires A after switching to B", async () => {
+	await withBackendRoutes(statusFixture(), async ({ request, state }) => {
+		const select = async (sshEntry) => request("/sched/ssh/use-system", {
+			method: "POST",
+			origin: "http://127.0.0.1:3000",
+			body: { sshEntry },
+		});
+		assert.equal((await select("system-a")).body?.ok, true);
+
+		let releaseBody;
+		const bodyGate = new Promise((resolve) => { releaseBody = resolve; });
+		const staleDryRun = request("/sched/api/dryrun", {
+			method: "POST",
+			origin: "http://127.0.0.1:3000",
+			body: { content: "{}" },
+			bodyGate,
+		});
+		await Promise.resolve();
+
+		assert.equal((await select("system-b")).body?.ok, true);
+		await new Promise((resolve) => setImmediate(resolve));
+		const switchBoundary = state.spawnCalls.length;
+		state.hangMasterAliases.add("system-b");
+		const activeCheckBoundary = state.spawnCalls.length;
+		const activeBindingRequest = request("/sched/ssh/binding");
+		await new Promise((resolve) => setImmediate(resolve));
+		const activeMasterCheck = state.spawnCalls.slice(activeCheckBoundary).filter(({ args }) => (
+			args.includes("-O")
+			&& args.includes("check")
+			&& args.at(-1) === "system-b"
+		)).at(-1);
+		assert.ok(activeMasterCheck);
+
+		releaseBody();
+		const staleResult = await staleDryRun;
+		assert.equal(staleResult.body?.ok, false);
+		assert.deepEqual(activeMasterCheck.child.killCalls, []);
+		assert.equal(
+			state.spawnCalls.slice(switchBoundary).some(({ args }) => args.at(-1) === "system-a"),
+			false,
+			"stale cleanup must not recreate or spawn the old alias",
+		);
+
+		state.hangMasterAliases.delete("system-b");
+		activeMasterCheck.child.emit("close", 0);
+		const activeBinding = await activeBindingRequest;
+		assert.equal(activeBinding.body?.sshEntry, "system-b");
+		assert.equal(activeBinding.body?.master?.ready, true);
+	}, {
+		beforeApply({ home }) {
+			const directory = path.join(home, ".dsh");
+			mkdirSync(directory, { recursive: true, mode: 0o700 });
+			writeFileSync(path.join(directory, "nodesched_entry.json"), JSON.stringify({
+				sshEntry: "gateway",
+				schedAlias: "compute",
+			}), { mode: 0o600 });
+		},
+	});
+});
+
+test("an invalid persisted system entry degrades without blocking recovery to a valid alias", async () => {
+	await withBackendRoutes(statusFixture(), async ({ request, home }) => {
+		const initial = await request("/sched/ssh/binding");
+		assert.equal(initial.body?.mode, "system-openssh");
+		assert.equal(initial.body?.sshEntry, "-invalid-entry");
+		assert.equal(initial.body?.master?.ready, false);
+		assert.equal(initial.body?.master?.code, "system_openssh_unavailable");
+
+		const recovered = await request("/sched/ssh/use-system", {
+			method: "POST",
+			origin: "http://127.0.0.1:3000",
+			body: { sshEntry: "recovered-entry" },
+		});
+		assert.equal(recovered.status, 200);
+		assert.equal(recovered.body?.ok, true);
+		assert.equal(recovered.body?.sshEntry, "recovered-entry");
+		assert.deepEqual(JSON.parse(readFileSync(path.join(home, ".dsh", "nodesched_entry.json"), "utf8")), {
+			sshEntry: "recovered-entry",
+			schedAlias: null,
+		});
+	}, {
+		beforeApply({ home }) {
+			const directory = path.join(home, ".dsh");
+			mkdirSync(directory, { recursive: true, mode: 0o700 });
+			writeFileSync(path.join(directory, "nodesched_entry.json"), JSON.stringify({
+				sshEntry: "-invalid-entry",
+				schedAlias: null,
 			}), { mode: 0o600 });
 		},
 	});

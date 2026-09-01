@@ -18,7 +18,7 @@
         probeCommand: "status"
         connectTimeoutSec: 20
         pollFallbackSec: 30
-        transport: "auto"              # "auto"（SSH/engine）或 "local"
+        transport: "auto"              # "auto"（系统 OpenSSH/内置 engine）或 "local"
 
         # 写通道默认关闭（fail closed）。启用时必须一次替换以下四项。
         mutationMode: "disabled"

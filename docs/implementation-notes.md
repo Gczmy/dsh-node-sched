@@ -60,6 +60,31 @@
   覆盖。SSH 路由使用前刷新外部 generation 并清理连接池。ProxyJump 契约保持显式扁平链；
   hop 自身再配置 ProxyJump 会 fail-closed，不能静默绕过中间节点。
 
+### 复用终端 OpenSSH 认证（2026-09-01）
+
+- 系统通道只复用用户已在终端完成密码/2FA 的 OpenSSH `ControlMaster`，不接收、复制或
+  保存密码、passphrase、OTP。先用 `ssh -O check <alias>` 做有界检测，master 不存在时只返回
+  `no_control_master`，由 SSH 页显示非阻塞横幅。
+- dsh 先用有界、限量输出的 `ssh -G <alias>` 在本机解析 OpenSSH 最终配置，并只接受唯一、
+  已展开且为绝对路径的 `ControlPath`；随后检测和 passenger 都显式传入该路径（`-S`）。
+  resolver 不加入会改变 `%C` 结果的连接覆盖项；`ssh -G` 不建立 SSH 传输、也不进行远端
+  身份认证，但用户配置中的 `Match exec` 仍可能执行本地命令，启用 hostname canonicalization
+  时也可能进行 DNS 查询，因此同样受进程组超时与清理约束。
+- `ControlMaster=no` 本身仍可能在 mux socket 不可用时建立新连接，因此命令、日志流和 PTY
+  都额外固定 `BatchMode=yes`、`ProxyCommand=false`、`ClearAllForwardings=yes`。由于复用时
+  已显式指定解析出的 socket，`ProxyCommand=false` 不会扰动 `%C` 查找；一旦复用失败就直接
+  失败，不进入网络认证或内置 ssh2 回退。
+- 同一 alias 的并发 master 探测在 transport 内合并；`no_control_master` 结果负缓存 30 秒，
+  供 status、daemon、binding 与 event tail 共用，避免多个轮询同时 fork。用户点击“重新检测”
+  会强制绕过负缓存，因此刚在终端完成 2FA 后无需等待缓存自然过期。
+- passenger 还固定关闭 agent/X11/tunnel 转发、本地命令和后台脱离；命令/日志使用 `-T`，
+  Web PTY 使用 `-e none` 禁用 `~C`/`~!`/`~^Z` 等 OpenSSH escape，避免浏览器输入升级成
+  本地转发或本地命令控制面。
+- 切换别名先用独立候选 transport 检测；只有检测与入口文件耐久写入都成功后才发布新通道。
+  候选失败不得 dispose 当前 transport，也不得中断其查询、日志流或 Web 终端。
+- Web 终端需要真实 PTY，使用懒加载的 `node-pty`；普通命令、上传和日志流不依赖它。
+  系统复用限 macOS/Linux，Windows 保留显式内置 engine 路径。
+
 ### sched CLI 事实核实（ambiorix 实测）
 
 - `list-gpus` **不支持** `--json`（文本输出）

@@ -6498,6 +6498,16 @@ function validAccessToken(token) {
 function validHostKey(hostKey) {
   return typeof hostKey === "string" && /^SHA256:[A-Za-z0-9+/]{43}$/.test(hostKey);
 }
+function reconcileSystemMasterNotice(current, binding, error = "") {
+  const systemMode = binding?.mode === "system-openssh";
+  const activeEntry = systemMode && typeof binding.sshEntry === "string" ? binding.sshEntry : "";
+  if (current?.source === "candidate" && current.sshEntry !== activeEntry) return current;
+  if (!systemMode || binding?.master?.ready === true) return null;
+  if (binding?.master?.ready === false) {
+    return { source: "active", sshEntry: activeEntry, error: String(error || "") };
+  }
+  return null;
+}
 function schedulerMutationAvailability(snapshot) {
   if (!snapshot || snapshot.ok !== true || snapshot.fresh !== true) {
     return { writable: false, reason: "\u8C03\u5EA6\u5668\u72B6\u6001\u4E0D\u662F\u6700\u65B0\u5FEB\u7167\uFF0C\u64CD\u4F5C\u5DF2\u5207\u6362\u4E3A\u53EA\u8BFB\u3002" };
@@ -8033,6 +8043,11 @@ function apply(cctx, config) {
   function authPromptMethodLabel(req) {
     return req?.method === "private-key-passphrase" ? "\u79C1\u94A5\u53E3\u4EE4" : req?.method === "keyboard-interactive" ? "\u4EA4\u4E92\u5F0F\u8EAB\u4EFD\u9A8C\u8BC1" : String(req?.method || "\u8EAB\u4EFD\u9A8C\u8BC1");
   }
+  function sshMasterErrorText(error, fallback = "\u672A\u68C0\u6D4B\u5230\u5DF2\u8BA4\u8BC1\u7684 OpenSSH ControlMaster \u4E3B\u8FDE\u63A5") {
+    if (!error) return fallback;
+    if (typeof error === "string") return error;
+    return String(error.message || error.code || fallback);
+  }
   function AuthPromptBanner({ req, pendingCount, onOpen }) {
     if (!req) return null;
     const methodLabel = authPromptMethodLabel(req);
@@ -8206,13 +8221,14 @@ function apply(cctx, config) {
     const [hosts, setHosts] = useState(null);
     const [busy, setBusy] = useState("");
     const [msg, setMsg] = useState("");
+    const [systemMasterNotice, setSystemMasterNotice] = useState(null);
     const [confirmAlias, setConfirmAlias] = useState(null);
     const [pinDraft, setPinDraft] = useState(null);
     const [trustDraft, setTrustDraft] = useState(null);
     const trustAbortRef = useRef(null);
     const trustEpochRef = useRef(0);
     const trustCommitRef = useRef(false);
-    const [termAlias, setTermAlias] = useState(null);
+    const [termTarget, setTermTarget] = useState(null);
     const [binding, setBinding] = useState(null);
     const load = useCallback(async () => {
       try {
@@ -8223,6 +8239,11 @@ function apply(cctx, config) {
         const nextHosts = h.hosts ?? [];
         setHosts(nextHosts);
         setBinding(b);
+        setSystemMasterNotice((current) => reconcileSystemMasterNotice(
+          current,
+          b,
+          sshMasterErrorText(b?.master?.error)
+        ));
         return { hosts: nextHosts, binding: b };
       } catch {
         setHosts([]);
@@ -8232,6 +8253,11 @@ function apply(cctx, config) {
     useEffect(() => {
       load();
     }, [load]);
+    useEffect(() => {
+      if (binding?.mode !== "system-openssh") return void 0;
+      const timer = setInterval(load, 3e4);
+      return () => clearInterval(timer);
+    }, [binding?.mode, binding?.sshEntry, load]);
     useEffect(() => () => {
       trustEpochRef.current += 1;
       trustAbortRef.current?.abort();
@@ -8240,8 +8266,10 @@ function apply(cctx, config) {
       setBusy("bind:" + alias);
       try {
         const r = await authFetch("/sched/ssh/bind", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ alias }) }).then((r2) => r2.json());
-        if (r.ok) setMsg(`\u2705 ${alias} \u5DF2\u8BBE\u4E3A SCHED \u4E3B\u673A (${r.latencyMs}ms) \xB7 daemon: ${r.probeText || "?"}`);
-        else setMsg(`\u7ED1\u5B9A\u5931\u8D25: ${r.error}`);
+        if (r.ok) {
+          setSystemMasterNotice(null);
+          setMsg(`\u2705 ${alias} \u5DF2\u8BBE\u4E3A SCHED \u4E3B\u673A (${r.latencyMs}ms) \xB7 daemon: ${r.probeText || "?"}`);
+        } else setMsg(`\u7ED1\u5B9A\u5931\u8D25: ${r.error}`);
         await load();
       } catch (e) {
         setMsg("\u7ED1\u5B9A\u5931\u8D25: " + e.message);
@@ -8251,13 +8279,54 @@ function apply(cctx, config) {
     const doUnbind = async () => {
       setBusy("unbind");
       try {
-        await authFetch("/sched/ssh/unbind", { method: "POST" });
-        setMsg(`\u5DF2\u89E3\u7ED1\uFF0C\u56DE\u5230 CLI \u6A21\u5F0F (sshEntry: ${binding?.sshEntry ?? "?"})`);
+        const response = await authFetch("/sched/ssh/unbind", { method: "POST" });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok || result.ok === false) {
+          throw new Error(sshMasterErrorText(result.error, `HTTP ${response.status}`));
+        }
+        setSystemMasterNotice(null);
+        setMsg(`\u5DF2\u89E3\u7ED1\u5185\u7F6E\u5F15\u64CE\uFF1B\u5F53\u524D\u6539\u7528\u7CFB\u7EDF OpenSSH (sshEntry: ${result.sshEntry ?? binding?.sshEntry ?? "?"})`);
         await load();
       } catch (e) {
         setMsg("\u89E3\u7ED1\u5931\u8D25: " + e.message);
       }
       setBusy("");
+    };
+    const doUseSystemOpenSsh = async (requestedEntry = binding?.sshEntry) => {
+      const sshEntry = String(requestedEntry ?? "").trim();
+      if (!sshEntry) {
+        setMsg("\u542F\u7528\u7CFB\u7EDF OpenSSH \u5931\u8D25: \u7F3A\u5C11 sshEntry");
+        return;
+      }
+      setBusy("use-system:" + sshEntry);
+      setMsg("");
+      try {
+        const response = await authFetch("/sched/ssh/use-system", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ sshEntry })
+        });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok || result.ok === false) {
+          if (result.code === "no_control_master" || result.error?.code === "no_control_master") {
+            setSystemMasterNotice({
+              source: "candidate",
+              sshEntry,
+              error: sshMasterErrorText(result.error)
+            });
+            return;
+          }
+          throw new Error(sshMasterErrorText(result.error, `HTTP ${response.status}`));
+        }
+        setBinding(result.binding ?? result);
+        setSystemMasterNotice(null);
+        setMsg(`\u2705 \u5DF2\u901A\u8FC7\u7CFB\u7EDF OpenSSH \u590D\u7528 ${sshEntry} \u7684\u7EC8\u7AEF ControlMaster\uFF1Bdsh \u4E0D\u4F1A\u7D22\u53D6\u6216\u4FDD\u5B58 2FA \u9A8C\u8BC1\u7801`);
+        await load();
+      } catch (error) {
+        setMsg("\u542F\u7528\u7CFB\u7EDF OpenSSH \u5931\u8D25: " + error.message);
+      } finally {
+        setBusy("");
+      }
     };
     const doImport = async () => {
       setBusy("import");
@@ -8470,24 +8539,76 @@ function apply(cctx, config) {
         setBusy("");
       }
     };
-    if (termAlias) return j(SshTerminal, { alias: termAlias, onClose: () => {
-      setTermAlias(null);
-    } });
+    if (termTarget) return j(SshTerminal, {
+      alias: termTarget.alias,
+      transport: termTarget.transport,
+      onClose: () => {
+        setTermTarget(null);
+      }
+    });
     const engineMode = binding?.mode === "engine";
+    const systemOpenSshMode = binding?.mode === "system-openssh";
     const localMode = binding?.mode === "local";
+    const systemMasterReady = systemOpenSshMode && binding?.master?.ready === true;
+    const transportColor = engineMode || systemMasterReady ? T.ok : systemOpenSshMode ? T.warn : localMode ? T.brand : T.label2;
+    const activeSystemNotice = (systemOpenSshMode && binding?.master?.ready === false ? {
+      sshEntry: binding.sshEntry,
+      error: sshMasterErrorText(binding.master.error)
+    } : null) ?? systemMasterNotice;
     return jsxs2("div", { style: { display: "flex", flexDirection: "column", gap: 10 } }, [
       // B24: SCHED 绑定状态条
-      jsxs2("div", { style: { display: "flex", gap: 10, alignItems: "center", padding: "8px 12px", background: engineMode ? `color-mix(in srgb, ${T.ok} 10%, transparent)` : localMode ? `color-mix(in srgb, ${T.brand} 10%, transparent)` : T.bgLayer, borderRadius: 10, border: `1px solid ${engineMode ? `color-mix(in srgb, ${T.ok} 30%, transparent)` : localMode ? `color-mix(in srgb, ${T.brand} 30%, transparent)` : T.border}` } }, [
+      jsxs2("div", { style: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", padding: "8px 12px", background: engineMode || systemOpenSshMode || localMode ? `color-mix(in srgb, ${transportColor} 10%, transparent)` : T.bgLayer, borderRadius: 10, border: `1px solid ${engineMode || systemOpenSshMode || localMode ? `color-mix(in srgb, ${transportColor} 30%, transparent)` : T.border}` } }, [
         j("span", { style: { fontSize: 13, fontWeight: 700 } }, "SCHED"),
         j("span", {
-          style: { fontSize: 13, color: engineMode ? T.ok : localMode ? T.brand : T.label2, fontWeight: engineMode || localMode ? 700 : 400 }
-        }, engineMode ? `\u2192 ${binding.alias}\uFF08\u5F15\u64CE\u6A21\u5F0F\uFF0C\u8FDE\u63A5\u6C60\u590D\u7528\uFF09` : localMode ? "\u2192 \u672C\u5730 transport\uFF08\u65E0\u9700 SSH\uFF09" : `\u2192 sshEntry ${binding?.sshEntry ?? "?"}\uFF08CLI \u6A21\u5F0F\uFF09`),
+          style: { fontSize: 13, color: transportColor, fontWeight: engineMode || systemOpenSshMode || localMode ? 700 : 400 }
+        }, engineMode ? `\u2192 ${binding.alias}\uFF08\u5185\u7F6E\u5F15\u64CE\uFF0C\u8FDE\u63A5\u6C60\u590D\u7528\uFF09` : systemOpenSshMode ? `\u2192 ${binding.sshEntry}\uFF08\u7CFB\u7EDF OpenSSH\uFF0C\u590D\u7528\u7EC8\u7AEF ControlMaster${systemMasterReady ? "" : " \xB7 \u672A\u5C31\u7EEA"}\uFF09` : localMode ? "\u2192 \u672C\u5730 transport\uFF08\u65E0\u9700 SSH\uFF09" : `\u2192 sshEntry ${binding?.sshEntry ?? "?"}\uFF08\u901A\u9053\u672A\u77E5\uFF09`),
         j("span", { style: { flex: 1 } }),
+        engineMode && j("button", {
+          onClick: () => doUseSystemOpenSsh(binding?.sshEntry),
+          disabled: !!busy || !binding?.sshEntry,
+          title: "\u590D\u7528\u672C\u673A\u7EC8\u7AEF\u5DF2\u7ECF\u901A\u8FC7\u5BC6\u7801/2FA \u5EFA\u7ACB\u7684 OpenSSH ControlMaster\uFF1B\u4E0D\u4F1A\u5728\u7F51\u9875\u4E2D\u8BF7\u6C42\u9A8C\u8BC1\u7801",
+          style: ghostBtn
+        }, busy === "use-system:" + binding?.sshEntry ? "\u68C0\u6D4B\u4E2D\u2026" : "\u590D\u7528\u7EC8\u7AEF\u767B\u5F55"),
+        systemOpenSshMode && j("button", {
+          onClick: () => setTermTarget({ alias: binding.sshEntry, transport: "system-openssh" }),
+          disabled: !!busy || !systemMasterReady,
+          title: systemMasterReady ? "\u6253\u5F00\u590D\u7528\u5F53\u524D ControlMaster \u7684\u7CFB\u7EDF OpenSSH \u7EC8\u7AEF" : "\u8BF7\u5148\u6309\u4E0B\u65B9\u63D0\u793A\u5728\u672C\u673A\u7EC8\u7AEF\u5EFA\u7ACB ControlMaster",
+          style: { ...ghostBtn, opacity: systemMasterReady ? 1 : 0.5 }
+        }, "\u7EC8\u7AEF"),
         engineMode && j(
           "button",
-          { onClick: doUnbind, disabled: !!busy, title: "\u56DE\u5230\u4F20\u7EDF ssh CLI \u6A21\u5F0F", style: ghostBtn },
+          { onClick: doUnbind, disabled: !!busy, title: "\u89E3\u9664\u5185\u7F6E\u5F15\u64CE\u7ED1\u5B9A\u5E76\u4F7F\u7528\u7CFB\u7EDF OpenSSH", style: ghostBtn },
           busy === "unbind" ? "\u89E3\u7ED1\u4E2D\u2026" : "\u89E3\u7ED1"
         )
+      ]),
+      activeSystemNotice && jsxs2("section", {
+        "aria-label": "OpenSSH ControlMaster \u672A\u5C31\u7EEA",
+        style: {
+          display: "flex",
+          alignItems: "center",
+          gap: 12,
+          flexWrap: "wrap",
+          padding: "10px 12px",
+          border: `1px solid ${T.warn}`,
+          borderRadius: 10,
+          background: `color-mix(in srgb, ${T.warn} 8%, transparent)`
+        }
+      }, [
+        jsxs2("div", { style: { flex: "1 1 360px", minWidth: 0 } }, [
+          j("b", null, "\u8BF7\u5148\u5728\u7EC8\u7AEF\u5B8C\u6210 SSH \u767B\u5F55"),
+          j("div", { role: "status", "aria-live": "polite", style: { color: T.label2, marginTop: 2, overflowWrap: "anywhere" } }, [
+            "\u672A\u53D1\u73B0\u53EF\u590D\u7528\u7684 OpenSSH ControlMaster\u3002\u8BF7\u5728\u672C\u673A\u7EC8\u7AEF\u8FD0\u884C ",
+            j("code", { style: { color: T.label, fontWeight: 700 } }, `ssh ${activeSystemNotice.sshEntry}`),
+            " \u5E76\u5B8C\u6210\u5BC6\u7801/2FA\uFF0C\u7136\u540E\u56DE\u6765\u91CD\u65B0\u68C0\u6D4B\u3002dsh \u4E0D\u4F1A\u5F39\u51FA OTP \u8F93\u5165\u6846\uFF0C\u4E5F\u4E0D\u4F1A\u8BFB\u53D6\u6216\u4FDD\u5B58\u9A8C\u8BC1\u7801\u3002"
+          ]),
+          activeSystemNotice.error && j("div", { style: { color: T.warn, fontSize: 12, marginTop: 3, overflowWrap: "anywhere" } }, activeSystemNotice.error)
+        ]),
+        j("button", {
+          type: "button",
+          onClick: () => doUseSystemOpenSsh(activeSystemNotice.sshEntry),
+          disabled: !!busy,
+          style: btn(T.warn, !!busy)
+        }, busy === "use-system:" + activeSystemNotice.sshEntry ? "\u68C0\u6D4B\u4E2D\u2026" : "\u91CD\u65B0\u68C0\u6D4B")
       ]),
       jsxs2("div", { style: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" } }, [
         j(
@@ -8567,7 +8688,9 @@ function apply(cctx, config) {
       ]),
       hosts !== null && jsxs2("div", { style: { display: "flex", flexDirection: "column", gap: 6 } }, [
         ...hosts.map((h) => {
-          const boundHere = binding?.alias === h.alias;
+          const engineBoundHere = engineMode && binding?.alias === h.alias;
+          const systemBoundHere = systemOpenSshMode && binding?.sshEntry === h.alias;
+          const boundHere = engineBoundHere || systemBoundHere;
           const trustSource = h.hostKeys?.[0]?.source;
           const trustReady = h.hostKeyReady && h.chainReady !== false;
           return jsxs2("div", {
@@ -8578,13 +8701,13 @@ function apply(cctx, config) {
               gap: 12,
               padding: "8px 12px",
               borderRadius: 10,
-              border: `1px solid ${boundHere ? `color-mix(in srgb, ${T.ok} 35%, transparent)` : T.border}`,
-              background: boundHere ? `color-mix(in srgb, ${T.ok} 7%, transparent)` : "transparent"
+              border: `1px solid ${boundHere ? `color-mix(in srgb, ${transportColor} 35%, transparent)` : T.border}`,
+              background: boundHere ? `color-mix(in srgb, ${transportColor} 7%, transparent)` : "transparent"
             }
           }, [
             // 左：身份区（一行一条 ssh 配置）
             j("span", { style: { fontWeight: 700, fontSize: 13, flexShrink: 0 } }, h.alias),
-            boundHere && j("span", { style: { color: T.ok, fontWeight: 700, fontSize: 13, border: `1px solid ${T.ok}`, borderRadius: 999, padding: "1px 8px", flexShrink: 0 } }, "SCHED"),
+            boundHere && j("span", { style: { color: transportColor, fontWeight: 700, fontSize: 13, border: `1px solid ${transportColor}`, borderRadius: 999, padding: "1px 8px", flexShrink: 0 } }, "SCHED"),
             j("span", { style: { color: T.label2, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 } }, [
               h.user !== "root" ? `${h.user}@${h.host}` : h.host,
               `:${h.port}`,
@@ -8595,13 +8718,20 @@ function apply(cctx, config) {
               h.chainReady === false ? " \xB7 \u26A0\u8DF3\u677F\u94FE\u672A\u4FE1\u4EFB" : ""
             ].join("")),
             // 右：操作区
-            localMode || boundHere ? j("span", { key: "sb", style: { color: localMode ? T.brand : T.ok, fontWeight: 700, fontSize: 13, flexShrink: 0 } }, localMode ? "\u672C\u5730\u8FD0\u884C" : "\u2714 \u6570\u636E\u6E90") : j("button", {
+            localMode || engineBoundHere ? j("span", { key: "sb", style: { color: localMode ? T.brand : T.ok, fontWeight: 700, fontSize: 13, flexShrink: 0 } }, localMode ? "\u672C\u5730\u8FD0\u884C" : "\u2714 \u5185\u7F6E\u5F15\u64CE") : j("button", {
               key: "bnd",
               onClick: () => doBind(h.alias),
               disabled: !!busy || !trustReady,
               title: trustReady ? "\u8BBE\u4E3A sched \u6570\u636E\u6E90\u4E3B\u673A\uFF08\u5F15\u64CE\u6A21\u5F0F\uFF09" : "\u5148\u5EFA\u7ACB\u76EE\u6807\u53CA\u5B8C\u6574 ProxyJump \u94FE\u7684\u4E3B\u673A\u4FE1\u4EFB",
               style: { ...ghostBtn, color: T.brand, borderColor: `color-mix(in srgb, ${T.brand} 45%, transparent)`, flexShrink: 0, opacity: trustReady ? 1 : 0.5 }
             }, busy === "bind:" + h.alias ? "\u7ED1\u5B9A\u4E2D\u2026" : "\u8BBE\u4E3ASCHED"),
+            !localMode && (systemBoundHere ? j("span", { key: "system-sb", style: { color: systemMasterReady ? T.ok : T.warn, fontWeight: 700, fontSize: 13, flexShrink: 0 } }, systemMasterReady ? "\u2714 ControlMaster" : "\u26A0 ControlMaster") : j("button", {
+              key: "system-sb",
+              onClick: () => doUseSystemOpenSsh(h.alias),
+              disabled: !!busy,
+              title: `\u590D\u7528\u7EC8\u7AEF\u4E2D ssh ${h.alias} \u5DF2\u5EFA\u7ACB\u7684 OpenSSH ControlMaster\uFF1B\u4E0D\u4F1A\u5728\u7F51\u9875\u4E2D\u8BF7\u6C42 2FA`,
+              style: { ...ghostBtn, color: T.brand, flexShrink: 0 }
+            }, busy === "use-system:" + h.alias ? "\u68C0\u6D4B\u4E2D\u2026" : "\u590D\u7528\u7EC8\u7AEF")),
             j("button", {
               key: "trust",
               onClick: () => prepareTrust(h.alias, trustReady ? { mode: "rotate", hostAlias: h.alias } : {}),
@@ -8618,18 +8748,21 @@ function apply(cctx, config) {
             }, "\u624B\u52A8pin"),
             j("button", {
               key: "o",
-              onClick: () => setTermAlias(h.alias),
-              disabled: !trustReady,
-              title: trustReady ? "\u6253\u5F00\u7F51\u9875\u7EC8\u7AEF" : "\u5148\u5EFA\u7ACB\u76EE\u6807\u53CA\u5B8C\u6574 ProxyJump \u94FE\u7684\u4E3B\u673A\u4FE1\u4EFB",
-              style: { ...ghostBtn, flexShrink: 0, opacity: trustReady ? 1 : 0.5 }
+              onClick: () => setTermTarget({
+                alias: systemBoundHere ? binding.sshEntry : h.alias,
+                transport: systemBoundHere ? "system-openssh" : "engine"
+              }),
+              disabled: systemBoundHere ? !systemMasterReady : !trustReady,
+              title: systemBoundHere ? systemMasterReady ? "\u6253\u5F00\u590D\u7528\u5F53\u524D ControlMaster \u7684\u7CFB\u7EDF OpenSSH \u7EC8\u7AEF" : "\u8BF7\u5148\u5728\u672C\u673A\u7EC8\u7AEF\u5EFA\u7ACB ControlMaster" : trustReady ? "\u6253\u5F00\u5185\u7F6E SSH \u5F15\u64CE\u7EC8\u7AEF" : "\u5148\u5EFA\u7ACB\u76EE\u6807\u53CA\u5B8C\u6574 ProxyJump \u94FE\u7684\u4E3B\u673A\u4FE1\u4EFB",
+              style: { ...ghostBtn, flexShrink: 0, opacity: (systemBoundHere ? systemMasterReady : trustReady) ? 1 : 0.5 }
             }, "\u7EC8\u7AEF"),
             confirmAlias === h.alias ? j("button", { key: "c", onClick: () => doDelete(h.alias), style: { ...btn(T.err), flexShrink: 0 } }, "\u786E\u8BA4\u5220\u9664") : j("button", {
               key: "t",
-              onClick: () => doTest(h.alias),
-              disabled: !!busy || !trustReady,
-              title: trustReady ? "\u8FDE\u901A\u6027\u6D4B\u8BD5" : "\u5148\u5EFA\u7ACB\u76EE\u6807\u53CA\u5B8C\u6574 ProxyJump \u94FE\u7684\u4E3B\u673A\u4FE1\u4EFB",
-              style: { ...ghostBtn, flexShrink: 0, opacity: trustReady ? 1 : 0.5 }
-            }, busy === "test:" + h.alias ? "\u2026" : "\u6D4B\u8BD5"),
+              onClick: () => systemBoundHere ? doUseSystemOpenSsh(binding.sshEntry) : doTest(h.alias),
+              disabled: !!busy || !systemBoundHere && !trustReady,
+              title: systemBoundHere ? "\u53EA\u68C0\u6D4B\u7EC8\u7AEF ControlMaster\uFF0C\u4E0D\u53D1\u8D77\u65B0\u7684 SSH \u8EAB\u4EFD\u9A8C\u8BC1" : trustReady ? "\u6D4B\u8BD5\u5185\u7F6E SSH \u5F15\u64CE\u8FDE\u901A\u6027" : "\u5148\u5EFA\u7ACB\u76EE\u6807\u53CA\u5B8C\u6574 ProxyJump \u94FE\u7684\u4E3B\u673A\u4FE1\u4EFB",
+              style: { ...ghostBtn, flexShrink: 0, opacity: systemBoundHere || trustReady ? 1 : 0.5 }
+            }, busy === (systemBoundHere ? "use-system:" : "test:") + h.alias ? "\u2026" : "\u6D4B\u8BD5"),
             confirmAlias === h.alias ? j("button", { key: "x", onClick: () => setConfirmAlias(null), style: { ...ghostBtn, flexShrink: 0 } }, "\u53D6\u6D88") : j("button", { key: "d", onClick: () => setConfirmAlias(h.alias), disabled: !!busy, title: "\u5220\u9664\u8BE5\u4E3B\u673A\u914D\u7F6E", style: { ...ghostBtn, color: T.err, flexShrink: 0 } }, "\u5220")
           ]);
         })
@@ -8637,7 +8770,7 @@ function apply(cctx, config) {
       confirmAlias && j("div", { style: { fontSize: 13, color: T.warn } }, `\u518D\u6B21\u70B9\u300C\u786E\u8BA4\u5220\u9664\u300D\u4EE5\u79FB\u9664 ${confirmAlias}\uFF08\u8FDE\u63A5\u7ACB\u5373\u65AD\u5F00\uFF09`)
     ]);
   }
-  function SshTerminal({ alias, onClose }) {
+  function SshTerminal({ alias, transport = "engine", onClose }) {
     const boxRef = useRef(null);
     useEffect(() => {
       const el = boxRef.current;
@@ -8667,7 +8800,7 @@ function apply(cctx, config) {
         }
         term.writeln(`\x1B[90m\u8FDE\u63A5 ${alias} \u2026\x1B[0m`);
         const proto = location.protocol === "https:" ? "wss://" : "ws://";
-        ws = authenticatedWebSocket(`${proto}${location.host}/sched/ws/ssh-terminal?alias=${encodeURIComponent(alias)}&cols=${term.cols}&rows=${term.rows}`);
+        ws = authenticatedWebSocket(`${proto}${location.host}/sched/ws/ssh-terminal?transport=${encodeURIComponent(transport)}&alias=${encodeURIComponent(alias)}&cols=${term.cols}&rows=${term.rows}`);
         ws.onmessage = (ev) => {
           let frame;
           try {
@@ -8725,7 +8858,7 @@ function apply(cctx, config) {
         } catch {
         }
       };
-    }, [alias]);
+    }, [alias, transport]);
     return jsxs2("div", { style: { display: "flex", flexDirection: "column", gap: 8, flex: 1, minHeight: 0 } }, [
       jsxs2("div", { style: { display: "flex", gap: 10, alignItems: "center" } }, [
         j("button", { onClick: onClose, style: backBtn, title: "\u8FD4\u56DE\u4E3B\u673A\u5217\u8868" }, [
@@ -8733,6 +8866,11 @@ function apply(cctx, config) {
           j("span", null, "\u8FD4\u56DE")
         ]),
         j("h3", { style: { ...boardTitleStyle, fontSize: 14 } }, `\u7EC8\u7AEF \xB7 ${alias}`),
+        j(
+          "span",
+          { style: { color: transport === "system-openssh" ? T.ok : T.label2, fontSize: 13 } },
+          transport === "system-openssh" ? "\u7CFB\u7EDF OpenSSH \xB7 \u590D\u7528\u7EC8\u7AEF ControlMaster" : "\u5185\u7F6E SSH \u5F15\u64CE"
+        ),
         j("span", { style: { color: T.label2, fontSize: 13 } }, "\u5173\u95ED\u9875\u7B7E\u5373\u65AD\u5F00\u8FDC\u7AEF shell")
       ]),
       j("div", { ref: boxRef, style: { flex: 1, minHeight: 320, borderRadius: 10, border: `1px solid ${T.border2}`, overflow: "hidden", padding: 6, background: "#111318" } })
@@ -8876,23 +9014,26 @@ function apply(cctx, config) {
     }, [load]);
     const running = status != null && status.includes("\u8FD0\u884C\u4E2D");
     const engineMode = channel?.mode === "engine";
+    const systemOpenSshMode = channel?.mode === "system-openssh";
     const localMode = channel?.mode === "local";
+    const systemMasterReady = systemOpenSshMode && channel?.master?.ready === true;
+    const channelColor = engineMode || systemMasterReady ? T.ok : systemOpenSshMode ? T.warn : localMode ? T.brand : T.label2;
     return jsxs2("div", { style: { marginBottom: 8, paddingBottom: 6, borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center" } }, [
       // B24f: 只读通道徽章 —— 连接控制唯一入口在 ssh tab
       j("span", {
-        title: "\u8FDE\u63A5\u901A\u9053\u5728 ssh \u9875\u7BA1\u7406",
+        title: systemOpenSshMode ? "\u7CFB\u7EDF OpenSSH \u590D\u7528\u672C\u673A\u7EC8\u7AEF\u7684 ControlMaster\uFF1B\u8FDE\u63A5\u5931\u6548\u65F6\u8BF7\u5230 ssh \u9875\u6309\u63D0\u793A\u91CD\u65B0\u68C0\u6D4B" : "\u8FDE\u63A5\u901A\u9053\u5728 ssh \u9875\u7BA1\u7406",
         style: {
           fontSize: 13,
           padding: "2px 8px",
           borderRadius: 999,
           flexShrink: 0,
-          color: engineMode ? T.ok : localMode ? T.brand : T.label2,
-          border: `1px solid ${engineMode ? `color-mix(in srgb, ${T.ok} 35%, transparent)` : localMode ? `color-mix(in srgb, ${T.brand} 35%, transparent)` : T.border}`,
-          background: engineMode ? `color-mix(in srgb, ${T.ok} 8%, transparent)` : localMode ? `color-mix(in srgb, ${T.brand} 8%, transparent)` : "transparent",
+          color: channelColor,
+          border: `1px solid ${engineMode || systemOpenSshMode || localMode ? `color-mix(in srgb, ${channelColor} 35%, transparent)` : T.border}`,
+          background: engineMode || systemOpenSshMode || localMode ? `color-mix(in srgb, ${channelColor} 8%, transparent)` : "transparent",
           marginRight: 8,
           whiteSpace: "nowrap"
         }
-      }, engineMode ? `\u26A1 ${channel.alias}` : localMode ? "local transport" : channel ? `cli:${channel.sshEntry}` : "\u2026"),
+      }, engineMode ? `\u26A1 ${channel.alias}` : systemOpenSshMode ? `ssh:${channel.sshEntry} \xB7 master${systemMasterReady ? "\u2713" : "\xD7"}` : localMode ? "local transport" : channel ? `cli:${channel.sshEntry}` : "\u2026"),
       jsxs2("span", { style: { fontSize: 13, marginRight: 8, flex: 1 } }, [
         j(
           "span",

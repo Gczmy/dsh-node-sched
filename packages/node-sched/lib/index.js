@@ -22,6 +22,7 @@ import cp from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import z from "@deepseek-ai/schemastery";
 import { defineTool } from "@deepseek-ai/dsh-tools";
@@ -45,6 +46,11 @@ import {
 	knownHostTrustRecords,
 } from "./host-trust.js";
 import { LocalTransport } from "./transport.js";
+import {
+	NoOpenSshMasterError,
+	SystemOpenSshTransport,
+	validateSshEntry,
+} from "./system-openssh.js";
 import { isLoopbackAddress, loopbackRequestAllowed, originHostAllowed, sameOriginPostAllowed } from "./request-guard.js";
 import { parseUploadedPath } from "./upload-path.js";
 import { persistEntryOverride as writeEntryOverride } from "./entry-override.js";
@@ -1799,6 +1805,7 @@ async function serveTerminalWebSocket({
 	let cleaned = false;
 	let sessionClosed = false;
 	let openSettled = false;
+	const outputDecoder = new StringDecoder("utf8");
 	const opening = reservedOpening ?? beginPendingOpen(slots, maxSlots);
 	if (!opening) {
 		try { ws.close(1013, "too many terminal sessions"); } catch { /* gone */ }
@@ -1856,19 +1863,30 @@ async function serveTerminalWebSocket({
 		drainTimer = setInterval(maybePause, 50);
 		drainTimer.unref?.();
 		ws.send(JSON.stringify({ type: "ready", alias }));
-		session.onData = (data) => {
-			if (ws.readyState !== ws.OPEN) return;
-			const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
-			for (let offset = 0; offset < buffer.length; offset += 64 * 1024) {
+		const sendOutput = (text) => {
+			const buffer = Buffer.from(text, "utf8");
+			for (let offset = 0; offset < buffer.length;) {
+				let end = Math.min(offset + 64 * 1024, buffer.length);
+				if (end < buffer.length) {
+					while (end > offset && (buffer[end] & 0xc0) === 0x80) end -= 1;
+				}
+				if (end === offset) end = Math.min(offset + 64 * 1024, buffer.length);
 				ws.send(JSON.stringify({
 					type: "output",
-					data: buffer.subarray(offset, offset + 64 * 1024).toString("utf8"),
+					data: buffer.subarray(offset, end).toString("utf8"),
 				}));
+				offset = end;
 			}
+		};
+		session.onData = (data) => {
+			if (ws.readyState !== ws.OPEN) return;
+			const buffer = Buffer.isBuffer(data) ? data : Buffer.from(String(data), "utf8");
+			sendOutput(outputDecoder.write(buffer));
 			maybePause();
 		};
 		session.onExit = (code, error) => {
 			try {
+				sendOutput(outputDecoder.end());
 				ws.send(JSON.stringify({
 					type: "exit",
 					code,
@@ -1944,8 +1962,10 @@ function apply(ctx, config) {
 	let observedSshStoreGeneration = sshStore.externalGeneration();
 	const hostTrustBroker = new HostTrustBroker();
 	const localTransport = new LocalTransport();
-	/** 绑定的 sched 主机别名；null = 传统 ssh CLI 模式 (config.sshEntry)。 */
+	/** 绑定的 sched 主机别名；null = 严格复用系统 OpenSSH ControlMaster。 */
 	let boundAlias = null;
+	/** @type {SystemOpenSshTransport | null} */
+	let systemOpenSshTransport = null;
 	const entryFile = path.join(os.homedir(), ".dsh", "nodesched_entry.json");
 	let transportMode = config.transport === "local" ? "local" : "auto";
 	try {
@@ -1966,6 +1986,23 @@ function apply(ctx, config) {
 	}
 	const useLocalTransport = () => transportMode === "local";
 	const persistEntryOverride = (patch) => writeEntryOverride({ fs, file: entryFile, patch });
+	const disposeSystemOpenSshTransport = () => {
+		try { systemOpenSshTransport?.dispose(); } catch { /* already disposed */ }
+		systemOpenSshTransport = null;
+	};
+	const createSystemOpenSshTransport = (sshEntry) => new SystemOpenSshTransport({
+		sshEntry: validateSshEntry(String(sshEntry).trim()),
+		connectTimeoutSec: config.connectTimeoutSec,
+	});
+	const systemOpenSshFor = (sshEntry = config.sshEntry) => {
+		const entry = validateSshEntry(String(sshEntry).trim());
+		if (systemOpenSshTransport?.sshEntry === entry && !systemOpenSshTransport.disposed) {
+			return systemOpenSshTransport;
+		}
+		disposeSystemOpenSshTransport();
+		systemOpenSshTransport = createSystemOpenSshTransport(entry);
+		return systemOpenSshTransport;
+	};
 
 	// Authentication challenges are independent state machines. A dashboard
 	// disconnect does not cancel SSH authentication; the challenge remains
@@ -1981,14 +2018,29 @@ function apply(ctx, config) {
 
 	const runRemoteCli = makeRunner(cp, config);
 	/**
-	 * B24: 双通道调度。绑定 sched 主机（ssh 面板设置）后，所有 sched 命令
-	 * 走内嵌引擎的 ssh2 持久连接池（复用 TCP、无进程 fork 开销）；未绑定时
-	 * 回落传统 ssh CLI 子进程 (config.sshEntry)。引擎故障诚实报错，不静默回退。
+	 * 绑定 sched 主机后走内嵌 ssh2 引擎；未绑定时严格复用终端已经认证的
+	 * OpenSSH ControlMaster。两种模式都不会相互静默回退。
 	 */
 	function captureTransportTarget() {
 		if (useLocalTransport()) return { mode: "local" };
 		if (boundAlias) return { mode: "engine", alias: boundAlias };
-		return { mode: "cli", sshEntry: config.sshEntry };
+		const sshEntry = String(config.sshEntry ?? "").trim();
+		try {
+			return {
+				mode: "system-openssh",
+				sshEntry: validateSshEntry(sshEntry),
+				transport: systemOpenSshFor(sshEntry),
+			};
+		} catch (error) {
+			// Startup and read paths must degrade visibly on an unsupported platform
+			// or malformed persisted entry, so the UI can still select the engine.
+			return {
+				mode: "system-openssh",
+				sshEntry,
+				transport: null,
+				error,
+			};
+		}
 	}
 
 	function runOnTarget(target, args, opts = {}) {
@@ -2011,6 +2063,25 @@ function apply(ctx, config) {
 					stderr: `[ssh-engine:${target.alias}] ${formatSshError(error)}`,
 				}),
 			);
+		}
+		if (target.mode === "system-openssh") {
+			const transport = target.transport;
+			if (!transport || transport.sshEntry !== target.sshEntry) {
+				return Promise.resolve({
+					ok: false,
+					code: -1,
+					stdout: "",
+					stderr: `[system-openssh:${target.sshEntry}] ${safeError(target.error || "captured transport is unavailable")}`,
+					errorCode: target.error?.code ?? "system_openssh_target_unavailable",
+				});
+			}
+			return transport.exec(args, opts).catch((error) => ({
+				ok: false,
+				code: -1,
+				stdout: "",
+				stderr: `[system-openssh:${target.sshEntry}] ${safeError(error)}`,
+				errorCode: error?.code,
+			}));
 		}
 		return runRemoteCli(args, { ...opts, sshEntry: target.sshEntry });
 	}
@@ -2177,7 +2248,7 @@ function apply(ctx, config) {
 			retryable: true,
 		};
 		let res = await runOnTarget(target, args, runOpts);
-		if (target.mode !== "engine" && !res.ok && isTransientSshError(res.stderr)) {
+		if (target.mode === "cli" && !res.ok && isTransientSshError(res.stderr)) {
 			res = await runOnTarget(target, args, runOpts);
 		}
 		return envelope(res, opts);
@@ -2421,7 +2492,7 @@ function apply(ctx, config) {
 		function statusTargetKey() {
 			if (useLocalTransport()) return "local";
 			if (boundAlias) return `engine:${boundAlias}`;
-			return `cli:${config.sshEntry}`;
+			return `system-openssh:${config.sshEntry}`;
 		}
 
 		function invalidateTargetCaches() {
@@ -2530,6 +2601,7 @@ function apply(ctx, config) {
 		}
 	const routeDisposers = [];
 	let postApplyCleanup = () => {
+		disposeSystemOpenSshTransport();
 		hostTrustBroker.dispose();
 		localTransport.dispose();
 		sshEngine.dispose();
@@ -2570,7 +2642,7 @@ function apply(ctx, config) {
 				const inboxDir = path.join(os.homedir(), ".sched", "inbox");
 				return writePrivateUpload(inboxDir, name, content);
 			}
-			// B24: 引擎模式走连接池 exec+stdin；CLI 模式走 ssh 子进程 stdin
+			// 内置引擎与 system-openssh 都保留 stdin 字节；后者严格要求活跃 master。
 			if (target.mode === "engine") {
 				const remotePath = `$HOME/.sched/inbox/${name}`;
 				const r = await sshEngine.execStdin(
@@ -2582,10 +2654,10 @@ function apply(ctx, config) {
 				if (!r.success) throw new Error(r.stderr || r.error || "upload failed");
 				return parseUploadedPath(r.stdout, name);
 			}
-			const result = await runRemoteCli(
+			const result = await runOnTarget(
+				target,
 				buildRemoteInboxWriteCommand(`$HOME/.sched/inbox/${name}`),
 				{
-					sshEntry: target.sshEntry,
 					timeoutMs: 60_000,
 					maxOutputBytes: 64 * 1024,
 					stdinData: Buffer.from(content, "utf8"),
@@ -2627,6 +2699,40 @@ function apply(ctx, config) {
 			}
 			ctx.logger.warn("[node-sched] browser authentication failed: %s", safeError(error));
 			return json(res, { ok: false, error: "browser authentication failed", code: "auth_error" }, 500);
+		};
+		const bindingSnapshot = () => {
+			if (useLocalTransport()) {
+				return { alias: null, mode: "local", sshEntry: config.sshEntry };
+			}
+			if (boundAlias) {
+				return { alias: boundAlias, mode: "engine", sshEntry: config.sshEntry };
+			}
+			return { alias: null, mode: "system-openssh", sshEntry: config.sshEntry };
+		};
+		const sameBinding = (left, right) => left.mode === right.mode
+			&& left.alias === right.alias
+			&& left.sshEntry === right.sshEntry;
+		const currentBinding = async ({ checkMaster = true, retryOnChange = true } = {}) => {
+			const snapshot = bindingSnapshot();
+			if (snapshot.mode !== "system-openssh" || !checkMaster) return snapshot;
+			let master;
+			try {
+				master = await systemOpenSshFor(snapshot.sshEntry).checkMaster();
+			} catch (error) {
+				master = {
+					ready: false,
+					checkedAt: new Date().toISOString(),
+					code: error?.code ?? "system_openssh_unavailable",
+					error: safeError(error),
+				};
+			}
+			const latest = bindingSnapshot();
+			if (!sameBinding(snapshot, latest)) {
+				return retryOnChange
+					? currentBinding({ checkMaster, retryOnChange: false })
+					: latest;
+			}
+			return { ...snapshot, master };
 		};
 
 		startRefresher();
@@ -2820,41 +2926,21 @@ function apply(ctx, config) {
 			ctx.webServer.register({
 				kind: "prefix",
 				path: "/sched/api/entry",
-					handler: async (req, res) => {
-						try {
-							if (req.method === "GET") {
-								if (!readGuard(req, res)) return;
-							// B24f: 统一通道描述结构 {alias, mode, sshEntry}（与 /sched/ssh/binding 一致）
+				handler: async (req, res) => {
+					try {
+						if (req.method === "GET") {
+							if (!readGuard(req, res)) return;
+							return void json(res, { ok: true, ...(await currentBinding()) });
+						}
+						if (!writeGuard(req, res)) return;
+						// Consume through the shared bounded parser so deprecated clients
+						// cannot leave an unread or unbounded request body on the socket.
+						await readBodyJson(req);
 						return void json(res, {
-							ok: true,
-							alias: boundAlias ?? null,
-							mode: useLocalTransport() ? "local" : (boundAlias ? "engine" : "cli"),
-							sshEntry: config.sshEntry,
-						});
-							}
-							if (!writeGuard(req, res)) return;
-						const body = await readBodyJson(req);
-						const entry = String(body.entry || "").trim();
-						if (!/^[A-Za-z0-9_.-]+$/.test(entry)) {
-							return void json(res, { ok: false, text: "非法入口名" }, 400);
-						}
-						const prev = config.sshEntry;
-
-						persistEntryOverride({ sshEntry: entry });
-						config.sshEntry = entry;   // runRemote reads this on every call.
-						invalidateTargetCaches();
-						ctx.logger.warn("[node-sched] audit #%d ssh-entry %s -> %s",
-							++auditSeq, prev, entry);
-						// 用新入口立即探测 daemon 可达性 (诚实反馈, 不假装成功)
-						let probeText = "";
-						try {
-							const pr = await runRemote(`${S} daemon status`, { timeoutMs: 25_000 });
-							const body = (pr.text || pr.stdout || "").trim();
-							probeText = (pr.ok ? "" : "[不可达] ") + body.split("\n")[0].slice(0, 80);
-						} catch (e) {
-							probeText = "探测失败: " + safeError(e, 60);
-						}
-						await json(res, { ok: true, entry, prev, probeText });
+							ok: false,
+							code: "entry_update_moved",
+							text: "Use POST /sched/ssh/use-system to select a system OpenSSH entry.",
+						}, 410);
 					} catch (e) {
 						await json(res, { ok: false, text: safeError(e) }, 400);
 					}
@@ -2945,9 +3031,9 @@ function apply(ctx, config) {
 			ctx.webServer.register({
 				kind: "prefix",
 				path: "/sched/api/dryrun",
-							handler: async (req, res) => {
-								if (!writeGuard(req, res)) return;
-								try {
+				handler: async (req, res) => {
+					if (!writeGuard(req, res)) return;
+					try {
 						const target = captureTransportTarget();
 						const { content } = await readBodyJson(req);
 						const remotePath = await uploadRemote(String(content), target);
@@ -2966,8 +3052,8 @@ function apply(ctx, config) {
 			ctx.webServer.register({
 				kind: "prefix",
 				path: "/sched/api/submit",
-							handler: async (req, res) => {
-								if (!writeGuard(req, res)) return;
+				handler: async (req, res) => {
+					if (!writeGuard(req, res)) return;
 					try {
 						const { content, requestId } = await readBodyJson(req);
 						const result = await operate(
@@ -3129,6 +3215,10 @@ function apply(ctx, config) {
 		let tailRestartTimer;
 		let tailDisposed = false;
 		let tailGeneration = 0;
+		const NORMAL_TAIL_RETRY_MS = 5_000;
+		const NO_MASTER_TAIL_RETRY_MS = Math.max(30_000, Math.min(REFRESH_MS, 60_000));
+		let tailRetryMs = NORMAL_TAIL_RETRY_MS;
+		let tailLastFailureCode;
 
 		function broadcast(obj) {
 			const msg = JSON.stringify(obj);
@@ -3168,11 +3258,28 @@ function apply(ctx, config) {
 			tailRestartTimer = setTimeout(() => {
 				tailRestartTimer = undefined;
 				startTail().catch(() => {});
-			}, 5_000);
+			}, tailRetryMs);
+			tailRestartTimer.unref?.();
 		}
 		restartTailForTargetChange = () => {
 			stopTail();
+			tailRetryMs = NORMAL_TAIL_RETRY_MS;
+			tailLastFailureCode = undefined;
 			if (clients.size > 0) scheduleTailRestart();
+		};
+		const recordTailFailure = (code, message) => {
+			const failureCode = code || "tail_unavailable";
+			tailRetryMs = failureCode === "no_control_master"
+				? NO_MASTER_TAIL_RETRY_MS
+				: NORMAL_TAIL_RETRY_MS;
+			if (tailLastFailureCode !== failureCode) {
+				ctx.logger.warn("[node-sched] event tail unavailable (%s): %s", failureCode, message);
+			}
+			tailLastFailureCode = failureCode;
+		};
+		const recordTailReady = () => {
+			tailRetryMs = NORMAL_TAIL_RETRY_MS;
+			tailLastFailureCode = undefined;
 		};
 		// The UI explicitly reports whether its panel is visible. A connected
 		// hidden dashboard is not allowed to start a new auth challenge.
@@ -3184,26 +3291,36 @@ function apply(ctx, config) {
 		 * NOT the ssh-landing host (an outside entry lands on the gateway whose
 		 * own hostname dir is empty) — so resolve `node` from the remote
 		 * ~/.sched/config.json rather than `hostname`. */
-		async function resolveNode(signal, deadlineAt) {
-			if (useLocalTransport()) {
+		async function resolveNode(signal, deadlineAt, target) {
+			if (target.mode === "local") {
 				try {
-					return JSON.parse(fs.readFileSync(path.join(os.homedir(), ".sched", "config.json"), "utf8")).node;
+					return {
+						node: JSON.parse(fs.readFileSync(path.join(os.homedir(), ".sched", "config.json"), "utf8")).node,
+					};
 				} catch {
-					return undefined;
+					return { errorCode: "sched_config_unavailable", error: "cannot read local sched config" };
 				}
 			}
-			const res = await runRemote("cat $HOME/.sched/config.json", {
+			const res = await runOnTarget(target, "cat $HOME/.sched/config.json", {
 				signal,
 				deadlineAt,
 				timeoutMs: Math.max(1, deadlineAt - Date.now()),
 			});
-			if (!res.ok) return undefined;
-			try { return JSON.parse(res.stdout).node; } catch { return undefined; }
+			if (!res.ok) {
+				return {
+					errorCode: res.errorCode,
+					error: res.stderr || res.stdout || "cannot read remote sched config",
+				};
+			}
+			try { return { node: JSON.parse(res.stdout).node }; } catch {
+				return { errorCode: "sched_config_invalid", error: "remote sched config is invalid" };
+			}
 		}
 
 		async function startTail() {
 			if (tailDisposed || tailChild || tailStream || pendingTailOpens.size > 0 || clients.size === 0) return;
 			const generation = ++tailGeneration;
+			const target = captureTransportTarget();
 			const opening = beginPendingOpen(pendingTailOpens, 1);
 			if (!opening) return;
 			tailOpen = opening;
@@ -3213,16 +3330,21 @@ function apply(ctx, config) {
 				if (tailOpen === opening) tailOpen = undefined;
 				if (!tailDisposed && clients.size > 0 && !tailChild && !tailStream) scheduleTailRestart();
 			};
-			const nodeName = await resolveNode(opening.controller.signal, openDeadlineAt);
+			const resolvedNode = await resolveNode(opening.controller.signal, openDeadlineAt, target);
 			if (tailDisposed || generation !== tailGeneration || clients.size === 0) {
 				releaseOpening();
 				return;
 			}
+			const nodeName = resolvedNode.node;
 			if (!nodeName) {
-				ctx.logger.error("[node-sched] cannot resolve sched node from remote ~/.sched/config.json");
+				recordTailFailure(
+					resolvedNode.errorCode,
+					safeError(resolvedNode.error || "cannot resolve sched node from ~/.sched/config.json"),
+				);
 				releaseOpening();
 				return;
 			}
+			recordTailReady();
 			const safeNode = String(nodeName).replace(/[^a-zA-Z0-9.-]/g, "");
 			const remoteCmd = `tail -n 50 -F $HOME/.sched/${safeNode}/scheduler.log 2>/dev/null`;
 			const framer = new ByteLineFramer({
@@ -3246,7 +3368,7 @@ function apply(ctx, config) {
 				if (tailDisposed) return;
 				scheduleTailRestart();
 			};
-			if (useLocalTransport()) {
+			if (target.mode === "local") {
 				localTransport.openStream(remoteCmd).then((stream) => {
 					if (tailDisposed || generation !== tailGeneration || tailChild || tailStream || clients.size === 0) { stream.close(); return; }
 					tailStream = stream;
@@ -3258,10 +3380,9 @@ function apply(ctx, config) {
 				}).finally(releaseOpening);
 				return;
 			}
-			// B24: 引擎模式走独立 exec 流通道；CLI 模式走 ssh 子进程
-			if (boundAlias) {
+			if (target.mode === "engine") {
 				const { controller } = opening;
-				openExecStream(sshEngine, boundAlias, remoteCmd, {
+				openExecStream(sshEngine, target.alias, remoteCmd, {
 					signal: controller.signal,
 					deadlineAt: openDeadlineAt,
 				}).then((stream) => {
@@ -3274,31 +3395,30 @@ function apply(ctx, config) {
 					stream.onClose = onEnd;
 				}).catch((e) => {
 					if (!controller.signal.aborted) {
-						ctx.logger.warn("[node-sched] engine tail failed (%s): %s", boundAlias, safeError(e));
+						ctx.logger.warn("[node-sched] engine tail failed (%s): %s", target.alias, safeError(e));
 					}
 					onEnd();
 				}).finally(releaseOpening);
 				return;
 			}
-			const detached = process.platform !== "win32";
-			try {
-				const child = cp.spawn(
-					"ssh",
-					["-o", `ConnectTimeout=${config.connectTimeoutSec}`, "-o", "BatchMode=yes", config.sshEntry, remoteCmd],
-					{ detached },
-				);
-				tailChild = child;
-				tailGroupPid = detached && Number.isInteger(child.pid) ? child.pid : undefined;
-				child.stdout.on("data", onData);
-				child.on("exit", onEnd);
-				child.on("close", onEnd);
-				child.on("error", onEnd);
-			} catch (error) {
-				ctx.logger.warn("[node-sched] CLI tail failed: %s", safeError(error));
+			const { controller } = opening;
+			target.transport.openStream(remoteCmd, {
+				signal: controller.signal,
+				masterCheckTimeoutMs: Math.max(1, openDeadlineAt - Date.now()),
+			}).then((stream) => {
+				if (tailDisposed || generation !== tailGeneration || tailChild || tailStream || clients.size === 0) {
+					try { stream.close(); } catch { /* stale open */ }
+					return;
+				}
+				tailStream = stream;
+				stream.onData = onData;
+				stream.onClose = onEnd;
+			}).catch((error) => {
+				if (!controller.signal.aborted) {
+					recordTailFailure(error?.code, safeError(error));
+				}
 				onEnd();
-			} finally {
-				releaseOpening();
-			}
+			}).finally(releaseOpening);
 		}
 		heartbeat = setInterval(async () => {
 			if (clients.size === 0) return;
@@ -3383,6 +3503,7 @@ function apply(ctx, config) {
 			clients.clear();
 			try { wss.close(); } catch { /* already closed */ }
 			localTransport.dispose();
+			disposeSystemOpenSshTransport();
 			hostTrustBroker.dispose();
 			sshEngine.dispose();
 		};
@@ -3888,11 +4009,76 @@ function apply(ctx, config) {
 				handler: async (req, res) => {
 					if (!readGuard(req, res)) return;
 					refreshSshStore();
-					json(res, {
-						alias: boundAlias,
-						mode: useLocalTransport() ? "local" : (boundAlias ? "engine" : "cli"),
-						sshEntry: config.sshEntry,
-					});
+					json(res, await currentBinding());
+				},
+			}),
+
+			ctx.webServer.register({
+				kind: "prefix",
+				path: "/sched/ssh/use-system",
+				handler: async (req, res) => {
+					if (!writeGuard(req, res)) return;
+					let candidateTransport;
+					let ownsCandidateTransport = false;
+					try {
+						const body = exactObjectBody(await readBodyJson(req), ["sshEntry"]);
+						if (useLocalTransport()) {
+							return void json(res, { ok: false, code: "local_transport", error: "system OpenSSH is unavailable in local transport" }, 409);
+						}
+						const sshEntry = validateSshEntry(String(body.sshEntry ?? "").trim());
+						const activeSystemEntry = !boundAlias
+							? String(config.sshEntry ?? "").trim()
+							: null;
+						if (activeSystemEntry === sshEntry) {
+							candidateTransport = systemOpenSshFor(sshEntry);
+						} else {
+							// Probe a proposed alias in isolation. A failed check must not
+							// dispose or abort the currently active transport.
+							candidateTransport = createSystemOpenSshTransport(sshEntry);
+							ownsCandidateTransport = true;
+						}
+						// This is the user's explicit recheck action: bypass a recent
+						// negative cache while still coalescing any live probe.
+						const master = await candidateTransport.checkMaster({ force: true });
+						if (!master.ready) {
+							return void json(res, {
+								ok: false,
+								code: master.code ?? "no_control_master",
+								error: master.error,
+								master,
+							}, 409);
+						}
+						const previousAlias = boundAlias;
+						const previousEntry = config.sshEntry;
+						persistEntryOverride({ sshEntry, schedAlias: null });
+						config.sshEntry = sshEntry;
+						boundAlias = null;
+						if (ownsCandidateTransport) {
+							const previousTransport = systemOpenSshTransport;
+							systemOpenSshTransport = candidateTransport;
+							ownsCandidateTransport = false;
+							try { previousTransport?.dispose(); } catch { /* already disposed */ }
+						}
+						if (previousAlias) sshEngine.dropAlias(previousAlias);
+						invalidateTargetCaches();
+						ctx.logger.warn(
+							"[node-sched] audit #%d sched transport -> system-openssh:%s (from %s)",
+							++auditSeq,
+							sshEntry,
+							previousAlias ? `engine:${previousAlias}` : `system-openssh:${previousEntry}`,
+						);
+						const binding = { alias: null, mode: "system-openssh", sshEntry, master };
+						return void json(res, { ok: true, ...binding, binding });
+					} catch (error) {
+						const code = error instanceof NoOpenSshMasterError
+							? "no_control_master"
+							: (error?.code ?? "invalid_system_openssh_request");
+						return void json(res, { ok: false, code, error: safeError(error) }, code === "no_control_master" ? 409 : 400);
+					} finally {
+						if (ownsCandidateTransport) {
+							try { candidateTransport?.dispose(); } catch { /* already disposed */ }
+						}
+					}
 				},
 			}),
 
@@ -3931,6 +4117,7 @@ function apply(ctx, config) {
 						const previousAlias = boundAlias;
 						persistEntryOverride({ sshEntry: config.sshEntry, schedAlias: alias });
 						boundAlias = alias;
+						disposeSystemOpenSshTransport();
 						if (previousAlias && previousAlias !== alias) sshEngine.dropAlias(previousAlias);
 						invalidateTargetCaches();
 						ctx.logger.warn("[node-sched] audit #%d sched-bind -> %s (engine mode)", ++auditSeq, alias);
@@ -3957,7 +4144,7 @@ function apply(ctx, config) {
 					if (prev) sshEngine.dropAlias(prev);
 					invalidateTargetCaches();
 					ctx.logger.warn("[node-sched] audit #%d sched-unbind <- %s", ++auditSeq, prev);
-					json(res, { ok: true, prev, mode: "cli", sshEntry: config.sshEntry });
+					json(res, { ok: true, prev, ...(await currentBinding()) });
 				},
 			}),
 
@@ -4040,8 +4227,29 @@ function apply(ctx, config) {
 							socket.destroy();
 							return;
 						}
+						let alias;
+						let requestedTransport;
+						let openShell;
+						let openDeadlineAt;
 						try {
-							refreshSshStore();
+							const requestUrl = new URL(req.url, "http://x");
+							alias = requestUrl.searchParams.get("alias") ?? "";
+							requestedTransport = requestUrl.searchParams.get("transport") || "engine";
+							if (requestedTransport === "system-openssh") {
+								const target = captureTransportTarget();
+								if (target.mode !== "system-openssh" || alias !== target.sshEntry || !target.transport) {
+									throw new Error("system OpenSSH terminal target is not active");
+								}
+								const transport = target.transport;
+								openShell = (_alias, size, options) => transport.openPty(size, options);
+								openDeadlineAt = Date.now() + Math.max(5_000, config.connectTimeoutSec * 1000);
+							} else if (requestedTransport === "engine") {
+								refreshSshStore();
+								openShell = (...args) => sshEngine.openShell(...args);
+								openDeadlineAt = sshOpenDeadlineAt(sshEngine);
+							} else {
+								throw new Error("unsupported terminal transport");
+							}
 						} catch {
 							socket.destroy();
 							return;
@@ -4051,7 +4259,6 @@ function apply(ctx, config) {
 							socket.destroy();
 							return;
 						}
-						const openDeadlineAt = sshOpenDeadlineAt(sshEngine);
 						let handedOff = false;
 						let admissionClosed = false;
 						const releaseUnhanded = () => {
@@ -4072,7 +4279,6 @@ function apply(ctx, config) {
 								handedOff = true;
 								browserAuth.trackConnection(ws, principal);
 								const u = new URL(req.url, "http://x");
-								const alias = u.searchParams.get("alias") ?? "";
 								const cols = clamp(parseInt(u.searchParams.get("cols") || "80", 10) || 80, 20, 500);
 								const rows = clamp(parseInt(u.searchParams.get("rows") || "24", 10) || 24, 10, 200);
 								void serveTerminalWebSocket({
@@ -4081,7 +4287,7 @@ function apply(ctx, config) {
 									slots: terminalSlots,
 									maxSlots: 4,
 									opening,
-									openShell: (...args) => sshEngine.openShell(...args),
+									openShell,
 									openDeadlineAt,
 									alias,
 									cols,
