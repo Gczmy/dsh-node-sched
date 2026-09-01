@@ -481,6 +481,44 @@ test("UI validates local bearer tokens and OpenSSH SHA256 host pins", async () =
 	assert.equal(validHostKey(`SHA256:${"A".repeat(42)}=`), false);
 });
 
+test("incident rows preserve complete identity fields without GPU or job overlap", async () => {
+	const source = await readFile(new URL("../src/client.jsx", import.meta.url), "utf8");
+	const start = source.indexOf("\tconst IncidentsTab = memo(function IncidentsTab()");
+	const end = source.indexOf("\n\t// B25c: 模块级水合缓存", start);
+	const incidents = source.slice(start, end);
+
+	assert.ok(start >= 0 && end > start);
+	assert.match(incidents, /display: "grid"/);
+	assert.match(incidents, /gridTemplateColumns: "max-content minmax\(0, 1fr\) max-content max-content"/);
+	assert.match(incidents, /gridRow: "1 \/ span 2"/);
+	assert.match(incidents, /gridColumn: "2 \/ -1"/);
+	assert.match(incidents, /whiteSpace: "nowrap"/);
+	assert.match(incidents, /wordBreak: "break-word"/);
+	assert.doesNotMatch(incidents, /flex: "0 0 30px"|flex: "0 1 130px"|flex: "0 0 70px"|flex: "0 0 36px"/);
+});
+
+test("every dashboard multiline text box has a bounded vertical resize grip", async () => {
+	const source = await readFile(new URL("../src/client.jsx", import.meta.url), "utf8");
+	const start = source.indexOf("\tconst resizeHint =");
+	const end = source.indexOf("\n\n\n\t\tconst Badge", start);
+	const component = source.slice(start, end);
+
+	assert.ok(start >= 0 && end > start);
+	assert.match(source, /\.nsResizableTextBox::\-webkit-resizer/);
+	assert.match(component, /className: \[className, "nsResizableTextBox"\]/);
+	assert.match(component, /boxSizing: "border-box"/);
+	assert.match(component, /minHeight/);
+	assert.match(component, /maxHeight/);
+	assert.match(component, /resize: "vertical"/);
+	assert.match(component, /overflow: "auto"/);
+	assert.equal(source.match(/j\(ResizableTextBox,/g)?.length, 7);
+	assert.equal(source.match(/as: "textarea"/g)?.length, 2);
+	assert.doesNotMatch(source, /j\("textarea"/);
+	assert.doesNotMatch(source, /j\("pre"/);
+	assert.match(source, /"aria-label": "批次 JSON"/);
+	assert.match(source, /"aria-label": "配置 JSON"/);
+});
+
 test("SSH host trust UI reuses known_hosts, supports zero-credential confirmation, and truly cancels", async () => {
 	const source = await readFile(new URL("../src/client.jsx", import.meta.url), "utf8");
 	const start = source.indexOf("\tfunction SshTab()");

@@ -164,6 +164,14 @@ function injectStyles() {
 
 		"",
 
+		"/* --- bounded vertical resize grip for multiline text panels --- */",
+
+		".nsResizableTextBox { resize: vertical !important; overflow: auto !important; }",
+
+		".nsResizableTextBox::-webkit-resizer { background: linear-gradient(135deg, transparent 0 35%, var(--dsw-alias-label-secondary, #6b7280) 35% 43%, transparent 43% 56%, var(--dsw-alias-label-secondary, #6b7280) 56% 64%, transparent 64% 72%, var(--dsw-alias-label-secondary, #6b7280) 72% 80%, transparent 80%); }",
+
+		"",
+
 		"/* --- collapsed rail: icon-only --- */",
 
 		"[data-sidebar-collapsed] .nsEntry { justify-content: center; padding: 0; width: 36px; height: 36px; margin: 0 auto 12px; border-radius: 50%; }",
@@ -349,6 +357,35 @@ function apply(cctx, config) {
 	const bar = (pct) => ({ height: 6, background: "rgba(127,127,127,.2)", borderRadius: 3, overflow: "hidden", flex: 1, margin: "0 8px", display: "flex" });
 
 	const barFill = (pct) => ({ height: "100%", width: `${Math.max(0, Math.min(100, pct))}%`, background: T.brand });
+	const resizeHint = "拖动右下角斜线调整高度";
+
+	function ResizableTextBox({
+		as = "pre",
+		className,
+		style,
+		minHeight = 96,
+		maxHeight = "min(70vh, 640px)",
+		initialHeight,
+		title = resizeHint,
+		children,
+		...props
+	}) {
+		return j(as, {
+			...props,
+			className: [className, "nsResizableTextBox"].filter(Boolean).join(" "),
+			title,
+			style: {
+				width: "100%",
+				boxSizing: "border-box",
+				...style,
+				minHeight,
+				maxHeight,
+				height: initialHeight ?? style?.height,
+				resize: "vertical",
+				overflow: "auto",
+			},
+		}, children);
+	}
 
 
 
@@ -674,7 +711,12 @@ function apply(cctx, config) {
 
 				]),
 
-				j("pre", { style: { ...pre, maxHeight: "60vh", overflow: "auto" } }, text),
+				j(ResizableTextBox, {
+					minHeight: 160,
+					maxHeight: "70vh",
+					initialHeight: "min(60vh, 480px)",
+					style: pre,
+				}, text),
 
 			]),
 
@@ -1885,15 +1927,36 @@ function apply(cctx, config) {
 							openDetail(r.id);
 						}
 					},
-					style: { display: "flex", gap: 8, padding: "4px 6px", cursor: "pointer",
-						borderRadius: 4, background: detail && detail.id === r.id ? T.bgLayer : "transparent",
-						flexWrap: "wrap", minWidth: 0, width: "100%", boxSizing: "border-box" },
+					style: {
+						display: "grid",
+						gridTemplateColumns: "max-content minmax(0, 1fr) max-content max-content",
+						gridTemplateRows: "auto auto",
+						columnGap: 10,
+						rowGap: 2,
+						alignItems: "start",
+						padding: "5px 8px",
+						cursor: "pointer",
+						borderRadius: 4,
+						background: detail && detail.id === r.id ? T.bgLayer : "transparent",
+						minWidth: 0,
+						width: "100%",
+						boxSizing: "border-box",
+					},
 				}, [
-					j("span", { style: { flex: "0 0 30px", width: 30, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: T.label2 } }, "#" + r.id),
-					j("span", { style: { flex: "0 1 130px", width: 130, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: T.label } }, r.ts),
-					j("span", { style: { flex: "0 0 70px", width: 70, minWidth: 0, color: r.kind === "oom" ? T.err : T.warn } }, r.kind),
-					j("span", { style: { flex: "0 0 36px", width: 36 } }, "gpu" + (r.gpu_idx ?? "-")),
-					j("span", { style: { flex: "1 1 180px", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", overflowWrap: "anywhere" } }, r.job_id),
+					j("span", { style: { gridColumn: 1, gridRow: "1 / span 2", minWidth: "4ch", whiteSpace: "nowrap", color: T.label2 } }, "#" + r.id),
+					j("span", { style: { gridColumn: 2, gridRow: 1, minWidth: 0, color: T.label, overflowWrap: "anywhere" } }, r.ts),
+					j("span", { style: { gridColumn: 3, gridRow: 1, whiteSpace: "nowrap", color: r.kind === "oom" ? T.err : T.warn } }, r.kind),
+					j("span", { style: { gridColumn: 4, gridRow: 1, whiteSpace: "nowrap" } }, "gpu" + (r.gpu_idx ?? "-")),
+					j("span", {
+						style: {
+							gridColumn: "2 / -1",
+							gridRow: 2,
+							minWidth: 0,
+							color: T.label2,
+							overflowWrap: "anywhere",
+							wordBreak: "break-word",
+						},
+					}, r.job_id || "—"),
 				]),
 				detail && detail.id === r.id && detail.loading &&
 					j("div", { key: "detail-loading", style: { color: T.label2, padding: 8, margin: "2px 0 6px clamp(0px, 38px, 10vw)", minWidth: 0, maxWidth: "100%", boxSizing: "border-box", overflowWrap: "anywhere" } }, "加载事故详情…"),
@@ -1929,7 +1992,12 @@ function apply(cctx, config) {
 					]),
 					p.log_excerpt && jsxs2("div", { style: { minWidth: 0 } }, [
 						j("div", { style: { color: T.label2, marginTop: 6 } }, "日志摘录:"),
-						j("pre", { style: { ...pre, maxHeight: 120, minWidth: 0, overflow: "auto", margin: "2px 0" } }, p.log_excerpt),
+						j(ResizableTextBox, {
+							minHeight: 72,
+							maxHeight: 360,
+							initialHeight: 120,
+							style: { ...pre, minWidth: 0, margin: "2px 0" },
+						}, p.log_excerpt),
 					]),
 				]),
 			])),
@@ -2284,11 +2352,21 @@ function apply(cctx, config) {
 
 			]),
 
-			advanced && j("textarea", {
+			advanced && j(ResizableTextBox, {
+
+				as: "textarea",
 
 				value: cfgText, onChange: (e) => setCfgText(e.target.value),
 
-				style: { width: "100%", minHeight: 200, background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label, borderRadius: 6, fontSize: 13, fontFamily: "monospace", padding: 6 },
+				"aria-label": "配置 JSON",
+
+				minHeight: 160,
+
+				maxHeight: "min(70vh, 640px)",
+
+				initialHeight: 240,
+
+				style: { background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label, borderRadius: 6, fontSize: 13, fontFamily: "monospace", padding: 8 },
 
 			}),
 
@@ -2381,13 +2459,23 @@ function apply(cctx, config) {
 				}, projectNames.map((name) => j("option", { key: name, value: name }, name))),
 			]),
 
-			j("textarea", {
+			j(ResizableTextBox, {
+
+				as: "textarea",
 
 				value: text, onChange: (e) => setText(e.target.value),
 
 				placeholder: submitExampleForProject(selectedProject),
 
-				style: { width: "100%", height: 150, fontFamily: "monospace", fontSize: 13 },
+				"aria-label": "批次 JSON",
+
+				minHeight: 120,
+
+				maxHeight: "min(70vh, 640px)",
+
+				initialHeight: 180,
+
+				style: { fontFamily: "monospace", fontSize: 13, padding: 8 },
 
 			}),
 
@@ -2401,7 +2489,12 @@ function apply(cctx, config) {
 
 			]),
 
-			preview && j("pre", { style: { ...pre, maxHeight: 240, overflow: "auto" } }, preview.text),
+			preview && j(ResizableTextBox, {
+				minHeight: 80,
+				maxHeight: 480,
+				initialHeight: 160,
+				style: pre,
+			}, preview.text),
 
 		]);
 
@@ -2714,7 +2807,12 @@ function apply(cctx, config) {
 
 					!summary && j("div", null, "loading…"),
 
-					summary && j("pre", { style: { ...pre, maxHeight: 110, overflow: "auto" } }, summary.split("\njobs:")[0]),
+					summary && j(ResizableTextBox, {
+						minHeight: 64,
+						maxHeight: "min(45vh, 360px)",
+						initialHeight: 110,
+						style: pre,
+					}, summary.split("\njobs:")[0]),
 
 					raw && jsxs2("div", {}, [
 
@@ -2756,7 +2854,13 @@ function apply(cctx, config) {
 
 				]),
 
-				tab === "events" && j("pre", { key: "tab-events", style: { ...pre, maxHeight: "55vh", overflow: "auto" } }, stream.lines.join("\n") || "(no events yet)"),
+				tab === "events" && j(ResizableTextBox, {
+					key: "tab-events",
+					minHeight: 140,
+					maxHeight: "70vh",
+					initialHeight: "55vh",
+					style: pre,
+				}, stream.lines.join("\n") || "(no events yet)"),
 
 				tab === "submit" && j("fieldset", {
 					key: "tab-submit",
