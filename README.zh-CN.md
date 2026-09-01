@@ -110,11 +110,22 @@ dsh --profile nodesched
 | `/sched/api/daemon` | GET | daemon 存活状态 |
 | `/sched/api/dryrun` | POST | batch spec 的 dry-run 预览（无副作用） |
 | `/sched/api/op` | POST | 白名单操作：`cancel` / `retry` / `resubmit` / `gpu-free` / `gpu-ignore` / `gpu-ok` / `daemon-start` / `daemon-stop` |
+| `/sched/ssh/hosts` | GET/POST | SSH 主机摘要及带 revision 的主机管理 |
+| `/sched/ssh/import` | POST | 导入 `~/.ssh/config` 并安全复用本机 known_hosts |
+| `/sched/ssh/host-key` | POST | 准备、确认或取消服务器 host key 信任 |
+| `/sched/ssh/test` | POST | 使用已固定服务器身份执行正常 SSH 连通测试 |
 | `/sched/ws/events` | WS | dispatcher 实时事件流 |
+
+### SSH 服务器信任
+
+浏览器设备信任、SSH 服务器身份和 SSH 用户认证是三件不同的事；`kelvin2_key.pub` 这类客户端公钥不能作为服务器 host pin。SSH 面板会先从 owned、非 group/other writable 的 `~/.ssh/known_hosts`/`known_hosts2` 复用精确匹配（包括 hashed host、多算法和 `HostKeyAlias`）。当前 pin 若与 `@revoked` 指纹精确相交则拒绝继续；CA、通配符、畸形或不安全文件不会被静默信任。
+
+没有可复用记录时，“建立信任”只做 SSH 密钥交换，待确认节点不会收到密码、私钥、passphrase、agent 签名或动态验证码。页面显示端点、算法和 SHA256 指纹，用户确认后才持久化；这是 TOFU，不能独立证明第一次网络路径未被劫持。取消会终止当前探测并撤销短期 challenge；点击“确认并信任”进入同步耐久写入后，取消按钮会禁用。ProxyJump 按目标上的显式扁平 alias 链逐段确认，嵌套链 fail-closed。
 
 ## 安全模型
 
-- **SSH 入口显式化** — 集群别名固定写在配置中；探活失败直接报错，不会静默切换主机。
+- **SSH 入口与身份显式化** — 集群别名固定写在配置中；每个目标和 ProxyJump hop 都必须有精确服务器 host key，缺失、撤销或不匹配时 fail-closed。
+- **并发安全的主机存储** — 主机编辑携带 per-host revision；写入持有跨进程私有锁，在锁内安全 reload 并比较完整旧 generation，过期进程只能得到冲突，不能覆盖新 pin。
 - **写操作门** — 写操作经单飞（single-flight）门串行执行；结果未知时不自动重试。
 - **键入确认** — cancel、清产物的 resubmit、GPU 释放、daemon stop 均需键入显式确认词。
 - **审计日志** — 每条转发操作记录调用方、参数与结果。

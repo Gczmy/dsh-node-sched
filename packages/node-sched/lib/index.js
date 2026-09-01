@@ -26,7 +26,24 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypt
 import z from "@deepseek-ai/schemastery";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { WebSocketServer } from "ws";
-import { HostStore, KEYBOARD_INTERACTIVE_PROMPT_CAP, SshEngine, formatSshError, normalizeKeyboardInteractivePrompts, openExecStream } from "./ssh-engine.js";
+import {
+	HostStore,
+	KEYBOARD_INTERACTIVE_PROMPT_CAP,
+	SshEngine,
+	formatSshError,
+	normalizeKeyboardInteractivePrompts,
+	openExecStream,
+	probeHostKey,
+	resolveHostRoute,
+	trustedHostKeyRecords,
+} from "./ssh-engine.js";
+import { defaultKnownHostsFiles, lookupKnownHostKeys } from "./known-hosts.js";
+import {
+	HostTrustBroker,
+	hostTrustPrincipalKey,
+	hostTrustRouteSnapshot,
+	knownHostTrustRecords,
+} from "./host-trust.js";
 import { LocalTransport } from "./transport.js";
 import { isLoopbackAddress, loopbackRequestAllowed, originHostAllowed, sameOriginPostAllowed } from "./request-guard.js";
 import { parseUploadedPath } from "./upload-path.js";
@@ -1924,6 +1941,8 @@ function apply(ctx, config) {
 	// ── B24: 内嵌 SSH 引擎（先于 runRemote 创建：绑定后 sched 命令走引擎通道）──
 	const sshStore = new HostStore();
 	const sshEngine = new SshEngine(sshStore);
+	let observedSshStoreGeneration = sshStore.externalGeneration();
+	const hostTrustBroker = new HostTrustBroker();
 	const localTransport = new LocalTransport();
 	/** 绑定的 sched 主机别名；null = 传统 ssh CLI 模式 (config.sshEntry)。 */
 	let boundAlias = null;
@@ -2511,6 +2530,7 @@ function apply(ctx, config) {
 		}
 	const routeDisposers = [];
 	let postApplyCleanup = () => {
+		hostTrustBroker.dispose();
 		localTransport.dispose();
 		sshEngine.dispose();
 	};
@@ -2800,10 +2820,10 @@ function apply(ctx, config) {
 			ctx.webServer.register({
 				kind: "prefix",
 				path: "/sched/api/entry",
-				handler: async (req, res) => {
-					try {
-						if (req.method === "GET") {
-							if (!readGuard(req, res)) return;
+					handler: async (req, res) => {
+						try {
+							if (req.method === "GET") {
+								if (!readGuard(req, res)) return;
 							// B24f: 统一通道描述结构 {alias, mode, sshEntry}（与 /sched/ssh/binding 一致）
 						return void json(res, {
 							ok: true,
@@ -2811,8 +2831,8 @@ function apply(ctx, config) {
 							mode: useLocalTransport() ? "local" : (boundAlias ? "engine" : "cli"),
 							sshEntry: config.sshEntry,
 						});
-						}
-						if (!writeGuard(req, res)) return;
+							}
+							if (!writeGuard(req, res)) return;
 						const body = await readBodyJson(req);
 						const entry = String(body.entry || "").trim();
 						if (!/^[A-Za-z0-9_.-]+$/.test(entry)) {
@@ -2925,9 +2945,9 @@ function apply(ctx, config) {
 			ctx.webServer.register({
 				kind: "prefix",
 				path: "/sched/api/dryrun",
-				handler: async (req, res) => {
-					if (!writeGuard(req, res)) return;
-					try {
+							handler: async (req, res) => {
+								if (!writeGuard(req, res)) return;
+								try {
 						const target = captureTransportTarget();
 						const { content } = await readBodyJson(req);
 						const remotePath = await uploadRemote(String(content), target);
@@ -2946,8 +2966,8 @@ function apply(ctx, config) {
 			ctx.webServer.register({
 				kind: "prefix",
 				path: "/sched/api/submit",
-				handler: async (req, res) => {
-					if (!writeGuard(req, res)) return;
+							handler: async (req, res) => {
+								if (!writeGuard(req, res)) return;
 					try {
 						const { content, requestId } = await readBodyJson(req);
 						const result = await operate(
@@ -3363,12 +3383,31 @@ function apply(ctx, config) {
 			clients.clear();
 			try { wss.close(); } catch { /* already closed */ }
 			localTransport.dispose();
+			hostTrustBroker.dispose();
 			sshEngine.dispose();
 		};
 		const boundTargetUsesAlias = (alias) => {
 			if (alias === boundAlias) return true;
 			const active = boundAlias ? sshStore.find(boundAlias) : undefined;
 			return Array.isArray(active?.proxyJump) && active.proxyJump.includes(alias);
+		};
+		const invalidateAliasAndDependents = (alias) => {
+			for (const entry of sshStore.list()) {
+				if (entry.alias === alias || (entry.proxyJump ?? []).includes(alias)) {
+					sshEngine.dropAlias(entry.alias);
+				}
+			}
+		};
+		const refreshSshStore = () => {
+			const aliases = sshStore.list().map((entry) => entry.alias);
+			sshStore.refresh();
+			const generation = sshStore.externalGeneration();
+			if (generation === observedSshStoreGeneration) return false;
+			observedSshStoreGeneration = generation;
+			for (const alias of new Set([...aliases, ...sshStore.list().map((entry) => entry.alias)])) {
+				sshEngine.dropAlias(alias);
+			}
+			return true;
 		};
 
 		routeDisposers.push(
@@ -3379,16 +3418,26 @@ function apply(ctx, config) {
 					try {
 						if (req.method === "GET") {
 							if (!readGuard(req, res)) return;
+							refreshSshStore();
 							const url = new URL(req.url, "http://x");
-							return void json(res, { hosts: sshEngine.list(url.searchParams.get("query") ?? undefined) });
+							return void json(res, {
+								storeRevision: sshStore.revision(),
+								hosts: sshEngine.list(url.searchParams.get("query") ?? undefined),
+							});
 						}
 						if (!writeGuard(req, res)) return;
+						refreshSshStore();
 						const body = await readBodyJson(req);
 						const action = String(body?.action ?? "");
 						if (action === "create") {
+							exactObjectBody(body, ["action", "host"]);
+							if (Object.hasOwn(body.host ?? {}, "hostKeys")) {
+								return void json(res, { error: "hostKeys provenance is internal; use hostKey for a manual pin" }, 400);
+							}
 							const entry = sshStore.create(body.host);
 							return void json(res, { host: sshStore.summarize(entry) }, 201);
 						}
+						exactObjectBody(body, ["action", "alias", "patch", "expectedHostRevision"]);
 						const alias = String(body?.alias ?? "").trim();
 						if (!alias) return void json(res, { error: "alias is required" }, 400);
 						if (!["update", "delete"].includes(action)) {
@@ -3397,16 +3446,34 @@ function apply(ctx, config) {
 						if (boundTargetUsesAlias(alias)) {
 							return void json(res, { error: "unbind the active target before editing or deleting it or its proxy hop" }, 409);
 						}
+						if (!Number.isInteger(body.expectedHostRevision) || body.expectedHostRevision < 0) {
+							return void json(res, { error: "expectedHostRevision is required" }, 400);
+						}
 						if (action === "update") {
-							const entry = sshStore.update(alias, body.patch);
-							sshEngine.dropAlias(alias);
+							if (Object.hasOwn(body.patch ?? {}, "hostKeys")) {
+								return void json(res, { error: "hostKeys provenance is internal; use hostKey for a manual pin" }, 400);
+							}
+							const entry = sshStore.update(alias, body.patch, {
+								expectedRevision: body.expectedHostRevision,
+							});
+							invalidateAliasAndDependents(alias);
 							return void json(res, { host: sshStore.summarize(entry) });
 						}
-						const removed = sshStore.remove(alias);
-						sshEngine.dropAlias(alias);
+						const referenced = sshStore.list().filter(
+							(entry) => entry.alias !== alias && (entry.proxyJump ?? []).includes(alias),
+						);
+						if (referenced.length > 0) {
+							return void json(res, {
+								error: `alias '${alias}' is used by ProxyJump target '${referenced[0].alias}'`,
+								code: "SSH_PROXY_JUMP_IN_USE",
+							}, 409);
+						}
+						const removed = sshStore.remove(alias, { expectedRevision: body.expectedHostRevision });
+						invalidateAliasAndDependents(alias);
 						return void json(res, { removed });
 					} catch (e) {
-						json(res, { error: safeError(e) }, 400);
+						if (e?.code === "SSH_HOST_STORE_CONFLICT") refreshSshStore();
+						json(res, { error: safeError(e), code: e?.code }, e?.status ?? (["SSH_HOST_REVISION_CONFLICT", "SSH_HOST_STORE_CONFLICT"].includes(e?.code) ? 409 : 400));
 					}
 				},
 			}),
@@ -3417,9 +3484,355 @@ function apply(ctx, config) {
 				handler: async (req, res) => {
 					if (!writeGuard(req, res)) return;
 					try {
-						json(res, { result: sshStore.importSshConfig() });
+						refreshSshStore();
+						const result = sshStore.importSshConfig();
+						const updates = [];
+						const conflicts = [];
+						const lookupErrors = [];
+						let unsupported = 0;
+						let revoked = 0;
+						for (const entry of sshStore.list()) {
+							const trusted = trustedHostKeyRecords(entry);
+							let lookup;
+							try {
+								lookup = lookupKnownHostKeys({
+									host: entry.host,
+									port: entry.port,
+									hostKeyAlias: entry.hostKeyAlias,
+									files: defaultKnownHostsFiles(),
+								});
+							} catch (error) {
+								lookupErrors.push({ alias: entry.alias, error: safeError(error) });
+								continue;
+							}
+							revoked += lookup.revoked.length;
+							const revokedFingerprints = new Set(lookup.revoked.map((key) => key.fingerprint));
+							const revokedPins = trusted.filter((key) => revokedFingerprints.has(key.fingerprint));
+							if (revokedPins.length > 0) {
+								conflicts.push({
+									alias: entry.alias,
+									code: "SSH_HOST_KEY_REVOKED",
+									fingerprints: revokedPins.map((key) => key.fingerprint),
+								});
+								continue;
+							}
+							if (trusted.length > 0) continue;
+							unsupported += lookup.unsupported.length;
+							const hostKeys = knownHostTrustRecords(lookup.keys);
+							if (hostKeys.length === 0) continue;
+							updates.push({
+								alias: entry.alias,
+								expectedRevision: entry.revision ?? 0,
+								hostKeys,
+								hostKey: hostKeys[0].fingerprint,
+							});
+						}
+						const changed = sshStore.updateHostKeys(updates);
+						for (const entry of changed) invalidateAliasAndDependents(entry.alias);
+						json(res, {
+							result: {
+								...result,
+								pinned: changed.length,
+								pending: sshStore.list().filter((entry) => trustedHostKeyRecords(entry).length === 0).length,
+								conflicts,
+								revoked,
+								unsupported,
+								lookupErrors,
+							},
+						});
 					} catch (e) {
-						json(res, { error: safeError(e) }, 400);
+						if (e?.code === "SSH_HOST_STORE_CONFLICT") refreshSshStore();
+						json(res, { error: safeError(e), code: e?.code }, e?.status ?? 400);
+					}
+				},
+			}),
+
+			ctx.webServer.register({
+				kind: "prefix",
+				path: "/sched/ssh/host-key",
+				handler: async (req, res) => {
+					if (!writeGuard(req, res)) return;
+					const principal = bearerPrincipal(req, browserAuth);
+					if (!principal) return void rejectUnauthorized(res);
+					let body;
+					try {
+						refreshSshStore();
+						body = await readBodyJson(req);
+						if (!body || typeof body !== "object" || Array.isArray(body)) {
+							return void json(res, { ok: false, error: "request body must be an object", code: "SSH_TRUST_INVALID_REQUEST" }, 400);
+						}
+						const principalKey = hostTrustPrincipalKey(principal);
+						const action = String(body.action ?? "");
+						const allowedFields = {
+							cancel: ["action", "challengeId", "targetAlias"],
+							prepare: ["action", "targetAlias", "expectedHostRevision", "mode", "hostAlias"],
+							confirm: ["action", "targetAlias", "expectedHostRevision", "hostAlias", "challengeId", "fingerprint"],
+						}[action];
+						if (!allowedFields) {
+							return void json(res, { ok: false, error: "action must be prepare, confirm, or cancel", code: "SSH_TRUST_INVALID_REQUEST" }, 400);
+						}
+						exactObjectBody(body, allowedFields);
+						if (action === "cancel") {
+							const challengeId = body.challengeId === undefined ? undefined : String(body.challengeId);
+							const targetAlias = body.targetAlias === undefined ? undefined : String(body.targetAlias).trim();
+							if (targetAlias !== undefined && (targetAlias.length > 128 || !/^[A-Za-z0-9_.-]+$/.test(targetAlias))) {
+								return void json(res, { ok: false, error: "invalid target alias", code: "SSH_TRUST_INVALID_REQUEST" }, 400);
+							}
+							const cancelledProbe = hostTrustBroker.cancelProbe(principalKey, targetAlias);
+							const cancelledChallenge = challengeId === undefined
+								? hostTrustBroker.cancelForPrincipal(principalKey) > 0
+								: hostTrustBroker.cancel(challengeId, principalKey);
+							return void json(res, {
+								ok: true,
+								state: "cancelled",
+								cancelled: cancelledProbe || cancelledChallenge,
+							});
+						}
+
+						const targetAlias = String(body.targetAlias ?? "").trim();
+						if (targetAlias.length > 128 || !/^[A-Za-z0-9_.-]+$/.test(targetAlias)) {
+							return void json(res, { ok: false, error: "invalid target alias", code: "SSH_TRUST_INVALID_REQUEST" }, 400);
+						}
+						const target = sshStore.find(targetAlias);
+						if (!target) {
+							return void json(res, { ok: false, error: `alias '${targetAlias}' not found`, code: "SSH_HOST_NOT_FOUND" }, 404);
+						}
+						if (!Number.isInteger(body.expectedHostRevision) || body.expectedHostRevision < 0) {
+							return void json(res, { ok: false, error: "expectedHostRevision is required", code: "SSH_TRUST_INVALID_REQUEST" }, 400);
+						}
+						if (body.expectedHostRevision !== (target.revision ?? 0)) {
+							return void json(res, { ok: false, error: "host changed since it was loaded", code: "SSH_HOST_REVISION_CONFLICT" }, 409);
+						}
+
+						if (action === "prepare") {
+							if (body.mode !== undefined && !["initial", "rotate"].includes(body.mode)) {
+								return void json(res, { ok: false, error: "mode must be initial or rotate", code: "SSH_TRUST_INVALID_REQUEST" }, 400);
+							}
+							const mode = body.mode ?? "initial";
+							const requestedHostAlias = body.hostAlias === undefined ? undefined : String(body.hostAlias);
+							if (
+								requestedHostAlias !== undefined
+								&& (requestedHostAlias.length > 128 || !/^[A-Za-z0-9_.-]+$/.test(requestedHostAlias))
+							) {
+								return void json(res, { ok: false, error: "invalid host alias", code: "SSH_TRUST_INVALID_REQUEST" }, 400);
+							}
+							let knownHostsWarnings = [];
+							const route = resolveHostRoute(sshStore, target);
+							const knownHostsByAlias = new Map();
+							for (const entry of route) {
+								let lookup;
+								try {
+									lookup = lookupKnownHostKeys({
+										host: entry.host,
+										port: entry.port,
+										hostKeyAlias: entry.hostKeyAlias,
+									});
+								} catch (error) {
+									knownHostsWarnings.push({ alias: entry.alias, error: safeError(error) });
+									continue;
+								}
+								knownHostsByAlias.set(entry.alias, lookup);
+								if (lookup.warnings.length > 0 || lookup.unsupported.length > 0) {
+									knownHostsWarnings.push({
+										alias: entry.alias,
+										warnings: lookup.warnings.length,
+										unsupported: lookup.unsupported.length,
+									});
+								}
+							}
+							if (mode === "rotate") {
+								const hostAlias = requestedHostAlias ?? targetAlias;
+								if (boundTargetUsesAlias(hostAlias)) {
+									return void json(res, { ok: false, error: "unbind the active target before rotating its host key", code: "SSH_TRUST_BOUND_TARGET" }, 409);
+								}
+							} else {
+								const updates = [];
+								for (const entry of route) {
+									const trusted = trustedHostKeyRecords(entry);
+									const lookup = knownHostsByAlias.get(entry.alias);
+									if (!lookup) continue;
+									const revokedFingerprints = new Set(lookup.revoked.map((key) => key.fingerprint));
+									const revokedPins = trusted.filter((key) => revokedFingerprints.has(key.fingerprint));
+									if (revokedPins.length > 0) {
+										return void json(res, {
+											ok: false,
+											error: `known_hosts revokes the currently trusted key for '${entry.alias}'`,
+											code: "SSH_HOST_KEY_REVOKED",
+										}, 409);
+									}
+									if (trusted.length > 0) continue;
+									const hostKeys = knownHostTrustRecords(lookup.keys);
+									if (hostKeys.length > 0) {
+										updates.push({
+											alias: entry.alias,
+											expectedRevision: entry.revision ?? 0,
+											hostKeys,
+											hostKey: hostKeys[0].fingerprint,
+										});
+									}
+								}
+								const imported = sshStore.updateHostKeys(updates);
+								for (const entry of imported) invalidateAliasAndDependents(entry.alias);
+								const refreshed = hostTrustRouteSnapshot(sshStore, targetAlias);
+								if (refreshed.route.every((entry) => trustedHostKeyRecords(entry).length > 0)) {
+									ctx.logger.warn(
+										"[node-sched] audit #%d ssh-host-trust known_hosts target=%s imported=%d",
+										++auditSeq,
+										targetAlias,
+										imported.length,
+									);
+									return void json(res, {
+										ok: true,
+										state: imported.length > 0 ? "trusted_from_known_hosts" : "already_trusted",
+										imported: imported.map((entry) => sshStore.summarize(entry)),
+										warnings: knownHostsWarnings,
+									});
+								}
+							}
+
+							const routeBeforeProbe = hostTrustRouteSnapshot(sshStore, targetAlias);
+							const controller = new AbortController();
+							const abort = () => controller.abort(new Error("host key probe request was cancelled"));
+							const abortDisconnected = () => {
+								if (!res.writableEnded) abort();
+							};
+							const probeOperation = hostTrustBroker.beginProbe({
+								principalKey,
+								targetAlias,
+								abort,
+							});
+							req.once("aborted", abort);
+							res.once("close", abortDisconnected);
+							try {
+								const observation = await probeHostKey(sshEngine, targetAlias, {
+									probeAlias: mode === "rotate" ? (requestedHostAlias ?? targetAlias) : undefined,
+									signal: controller.signal,
+								});
+								refreshSshStore();
+								if (!probeOperation.isCurrent()) {
+									const error = new Error("host key probe was superseded by a newer request");
+									error.code = "SSH_TRUST_SUPERSEDED";
+									error.status = 409;
+									throw error;
+								}
+								const routeAfterProbe = hostTrustRouteSnapshot(sshStore, targetAlias);
+								if (routeAfterProbe.digest !== routeBeforeProbe.digest) {
+									const error = new Error("SSH host or ProxyJump route changed during the probe");
+									error.code = "SSH_TRUST_ROUTE_CHANGED";
+									error.status = 409;
+									throw error;
+								}
+								if (observation.state === "already_trusted") {
+									return void json(res, { ok: true, state: "already_trusted", warnings: knownHostsWarnings });
+								}
+								const revokedFingerprints = new Set(
+									(knownHostsByAlias.get(observation.alias)?.revoked ?? [])
+										.map((key) => key.fingerprint),
+								);
+								if (revokedFingerprints.has(observation.fingerprint)) {
+									const error = new Error(
+										`known_hosts revokes the observed key for '${observation.alias}'`,
+									);
+									error.code = "SSH_HOST_KEY_REVOKED";
+									error.status = 409;
+									throw error;
+								}
+								const currentTarget = sshStore.find(targetAlias);
+								const challenge = hostTrustBroker.create({
+									principalKey,
+									targetAlias,
+									targetRevision: currentTarget?.revision ?? 0,
+									alias: observation.alias,
+									host: observation.host,
+									port: observation.port,
+									algorithm: observation.algorithm,
+									fingerprint: observation.fingerprint,
+									routeDigest: routeBeforeProbe.digest,
+								});
+								ctx.logger.warn(
+									"[node-sched] audit #%d ssh-host-trust probe target=%s observed=%s",
+									++auditSeq,
+									targetAlias,
+									observation.alias,
+								);
+								return void json(res, {
+									ok: true,
+									state: "confirmation_required",
+									challenge,
+									warnings: knownHostsWarnings,
+								});
+							} finally {
+								req.removeListener("aborted", abort);
+								res.removeListener("close", abortDisconnected);
+								probeOperation.finish();
+							}
+						}
+
+						if (action === "confirm") {
+							const challengeId = String(body.challengeId ?? "");
+							const hostAlias = String(body.hostAlias ?? "");
+							const fingerprint = String(body.fingerprint ?? "");
+							if (!/^[A-Za-z0-9_.-]+$/.test(hostAlias) || !/^SHA256:[A-Za-z0-9+/]{43}$/.test(fingerprint)) {
+								return void json(res, { ok: false, error: "invalid host trust confirmation", code: "SSH_TRUST_INVALID_REQUEST" }, 400);
+							}
+							if (boundTargetUsesAlias(hostAlias)) {
+								return void json(res, { ok: false, error: "unbind the active target before changing its host key", code: "SSH_TRUST_BOUND_TARGET" }, 409);
+							}
+							const route = hostTrustRouteSnapshot(sshStore, targetAlias);
+							const challenge = hostTrustBroker.consume(challengeId, {
+								principalKey,
+								targetAlias,
+								alias: hostAlias,
+								fingerprint,
+								routeDigest: route.digest,
+							});
+							const entry = sshStore.find(hostAlias);
+							if (!entry) throw new Error(`alias '${hostAlias}' disappeared after the probe`);
+							const changed = sshStore.updateHostKeys([{
+								alias: hostAlias,
+								expectedRevision: entry.revision ?? 0,
+								hostKey: fingerprint,
+								hostKeys: [{
+									algorithm: challenge.algorithm,
+									fingerprint,
+									source: "probe",
+									trustedAt: Date.now(),
+								}],
+							}])[0];
+							invalidateAliasAndDependents(hostAlias);
+							const complete = resolveHostRoute(sshStore, sshStore.find(targetAlias))
+								.every((candidate) => trustedHostKeyRecords(candidate).length > 0);
+							ctx.logger.warn(
+								"[node-sched] audit #%d ssh-host-trust confirm target=%s host=%s",
+								++auditSeq,
+								targetAlias,
+								hostAlias,
+							);
+							return void json(res, {
+								ok: true,
+								state: complete ? "trusted" : "next_required",
+								host: sshStore.summarize(changed),
+							});
+						}
+
+					} catch (error) {
+						if (error?.code === "SSH_HOST_STORE_CONFLICT") refreshSshStore();
+						if (res.destroyed || res.writableEnded) return;
+						const conflictCodes = new Set([
+							"SSH_HOST_REVISION_CONFLICT",
+							"SSH_HOST_STORE_CONFLICT",
+							"SSH_PROXY_JUMP_INVALID",
+							"SSH_PROXY_JUMP_MISSING",
+							"SSH_PROXY_JUMP_NESTED",
+							"SSH_TRUST_DEPENDENCY",
+							"SSH_TRUST_ROUTE_CHANGED",
+							"SSH_TRUST_SUPERSEDED",
+						]);
+						const status = error?.status
+							?? (conflictCodes.has(error?.code)
+								? 409
+								: error?.code === "SSH_OPEN_DEADLINE" ? 504 : 400);
+						json(res, { ok: false, error: safeError(error), code: error?.code }, status);
 					}
 				},
 			}),
@@ -3430,6 +3843,7 @@ function apply(ctx, config) {
 				handler: async (req, res) => {
 					if (!writeGuard(req, res)) return;
 					try {
+						refreshSshStore();
 						const body = await readBodyJson(req);
 						const result = await sshEngine.test(String(body.alias ?? ""));
 						if (!result.ok && result.error) result.error = safeError(result.error);
@@ -3446,6 +3860,7 @@ function apply(ctx, config) {
 				handler: async (req, res) => {
 					if (!writeGuard(req, res)) return;
 					try {
+						refreshSshStore();
 						const body = await readBodyJson(req);
 						const command = String(body.command ?? "").trim();
 						if (!command) return void json(res, { error: "command required" }, 400);
@@ -3472,6 +3887,7 @@ function apply(ctx, config) {
 				path: "/sched/ssh/binding",
 				handler: async (req, res) => {
 					if (!readGuard(req, res)) return;
+					refreshSshStore();
 					json(res, {
 						alias: boundAlias,
 						mode: useLocalTransport() ? "local" : (boundAlias ? "engine" : "cli"),
@@ -3489,6 +3905,7 @@ function apply(ctx, config) {
 						return void json(res, { ok: false, error: "SSH binding unavailable in local transport" }, 409);
 					}
 					try {
+						refreshSshStore();
 						const body = await readBodyJson(req);
 						const alias = String(body.alias ?? "").trim();
 						if (!alias || !/^[A-Za-z0-9_.-]+$/.test(alias)) {
@@ -3620,6 +4037,12 @@ function apply(ctx, config) {
 					handler: (req, socket, head) => {
 						const principal = websocketRequestPrincipal(req, browserAuth);
 						if (!principal) {
+							socket.destroy();
+							return;
+						}
+						try {
+							refreshSshStore();
+						} catch {
 							socket.destroy();
 							return;
 						}

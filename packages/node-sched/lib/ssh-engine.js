@@ -35,13 +35,15 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
-import { Client } from "ssh2";
+import ssh2 from "ssh2";
 import {
 	appendLimitedOutput,
 	createLimitedOutput,
 	finalizeLimitedOutput,
 	limitedOutputText,
 } from "./output-limit.js";
+
+const { Client, utils: ssh2Utils } = ssh2;
 
 export const INTERACTIVE_AUTH_TIMEOUT_MS = 180_000;
 
@@ -60,6 +62,8 @@ export const KEYBOARD_INTERACTIVE_PROMPT_CAP = 32;
 const HOST_STORE_MAX_HOSTS = 1024;
 const HOST_STORE_MAX_JUMPS = 32;
 const HOST_STORE_MAX_TAGS = 128;
+const HOST_STORE_MAX_HOST_KEYS = 16;
+const HOST_KEY_SOURCES = new Set(["legacy", "manual", "known_hosts", "probe"]);
 
 function storedString(value, label, maxChars, { required = false } = {}) {
 	if (typeof value !== "string" || (required && value.length === 0)) {
@@ -122,6 +126,54 @@ function normalizeHostKey(value) {
 	return fingerprint;
 }
 
+function normalizeHostKeyRecord(value, defaultSource = "manual") {
+	const source = typeof value === "string" ? { fingerprint: value } : value;
+	if (!source || typeof source !== "object" || Array.isArray(source)) {
+		throw new Error("host key trust record must be an object");
+	}
+	const fingerprint = normalizeHostKey(source.fingerprint);
+	if (!fingerprint) throw new Error("host key trust record fingerprint is required");
+	const algorithm = source.algorithm === undefined ? undefined : String(source.algorithm).trim();
+	if (algorithm !== undefined && !/^[A-Za-z0-9@._+-]{1,128}$/.test(algorithm)) {
+		throw new Error("invalid host key algorithm");
+	}
+	const trustSource = String(source.source ?? defaultSource);
+	if (!HOST_KEY_SOURCES.has(trustSource)) throw new Error("invalid host key trust source");
+	const trustedAt = source.trustedAt === undefined ? undefined : Number(source.trustedAt);
+	if (trustedAt !== undefined && (!Number.isFinite(trustedAt) || trustedAt < 0)) {
+		throw new Error("invalid host key trust timestamp");
+	}
+	return {
+		algorithm,
+		fingerprint,
+		source: trustSource,
+		trustedAt,
+	};
+}
+
+function normalizeHostKeys(value, defaultSource = "manual") {
+	if (value === undefined) return undefined;
+	if (!Array.isArray(value) || value.length > HOST_STORE_MAX_HOST_KEYS) {
+		throw new Error(`hostKeys must be an array of at most ${HOST_STORE_MAX_HOST_KEYS} entries`);
+	}
+	const records = [];
+	const seen = new Set();
+	for (const candidate of value) {
+		const record = normalizeHostKeyRecord(candidate, defaultSource);
+		if (seen.has(record.fingerprint)) continue;
+		seen.add(record.fingerprint);
+		records.push(record);
+	}
+	return records;
+}
+
+export function trustedHostKeyRecords(entry) {
+	const records = normalizeHostKeys(entry?.hostKeys, "legacy");
+	if (records && records.length > 0) return records;
+	const legacy = normalizeHostKey(entry?.hostKey);
+	return legacy ? [{ fingerprint: legacy, source: "legacy", algorithm: undefined, trustedAt: undefined }] : [];
+}
+
 function ownedByCurrentUser(info) {
 	return typeof process.getuid !== "function" || info.uid === process.getuid();
 }
@@ -179,6 +231,19 @@ function validateStoredHost(entry) {
 			throw new Error(`invalid ${field} in host store entry '${alias}'`);
 		}
 	}
+	if (entry.revision !== undefined && (!Number.isInteger(entry.revision) || entry.revision < 0)) {
+		throw new Error(`invalid revision in host store entry '${alias}'`);
+	}
+	const hostKeys = normalizeHostKeys(entry.hostKeys, "legacy");
+	if (hostKeys && hostKeys.length > 0 && entry.hostKey !== undefined) {
+		const primary = normalizeHostKey(entry.hostKey);
+		if (!hostKeys.some((record) => record.fingerprint === primary)) {
+			throw new Error(`hostKey must be present in hostKeys for '${alias}'`);
+		}
+	}
+	if (entry.hostKeyAlias !== undefined) {
+		storedString(entry.hostKeyAlias, `host '${alias}' hostKeyAlias`, 255, { required: true });
+	}
 	return entry;
 }
 
@@ -188,6 +253,7 @@ function validateHostStoreDocument(document) {
 		|| typeof document !== "object"
 		|| Array.isArray(document)
 		|| document.version !== 1
+		|| (document.revision !== undefined && (!Number.isInteger(document.revision) || document.revision < 0))
 		|| !Array.isArray(document.hosts)
 		|| document.hosts.length > HOST_STORE_MAX_HOSTS
 	) {
@@ -231,12 +297,17 @@ function readBoundedFd(fd, maxBytes, label) {
 export class HostStore {
 	constructor(file = join(homedir(), ".dsh", "dsh-ssh.json")) {
 		this.file = file;
-		this.data = { version: 1, hosts: [] };
+		this.data = { version: 1, revision: 0, hosts: [] };
+		this.externalChangeGeneration = 0;
 		this.#load();
 	}
 
 	#load() {
-		if (!existsSync(this.file)) return;
+		this.data = this.#readCurrent();
+	}
+
+	#readCurrent() {
+		if (!existsSync(this.file)) return { version: 1, revision: 0, hosts: [] };
 		let fd;
 		try {
 			const pathInfo = lstatSync(this.file);
@@ -268,7 +339,12 @@ export class HostStore {
 				throw new Error("host store changed during secure open");
 			}
 			const bytes = readBoundedFd(fd, HOST_STORE_MAX_BYTES, "host store");
-			this.data = validateHostStoreDocument(JSON.parse(bytes.toString("utf8")));
+			const loaded = validateHostStoreDocument(JSON.parse(bytes.toString("utf8")));
+			return {
+				...loaded,
+				revision: loaded.revision ?? 0,
+				hosts: loaded.hosts.map((entry) => ({ ...entry, revision: entry.revision ?? 0 })),
+			};
 		} catch (error) {
 			throw new Error(`invalid or unsafe SSH host store: ${error.message}`, { cause: error });
 		} finally {
@@ -276,9 +352,7 @@ export class HostStore {
 		}
 	}
 
-	#save(candidate) {
-		const content = serializeHostStore(candidate);
-		const previousContent = serializeHostStore(this.data);
+	#prepareDirectory() {
 		const directory = dirname(this.file);
 		mkdirSync(directory, { recursive: true, mode: 0o700 });
 		const directoryInfo = lstatSync(directory);
@@ -288,6 +362,155 @@ export class HostStore {
 			|| !ownedByCurrentUser(directoryInfo)
 		) {
 			throw new Error("host store directory must be an owned real directory");
+		}
+		const directoryFd = openSync(
+			directory,
+			constants.O_RDONLY
+				| (constants.O_DIRECTORY ?? 0)
+				| (constants.O_CLOEXEC ?? 0)
+				| (constants.O_NOFOLLOW ?? 0),
+		);
+		try {
+			const openedDirectory = fstatSync(directoryFd);
+			if (
+				!openedDirectory.isDirectory()
+				|| !ownedByCurrentUser(openedDirectory)
+				|| openedDirectory.dev !== directoryInfo.dev
+				|| openedDirectory.ino !== directoryInfo.ino
+			) {
+				throw new Error("host store directory changed during secure open");
+			}
+			fchmodSync(directoryFd, 0o700);
+		} finally {
+			closeSync(directoryFd);
+		}
+		return { directory, directoryInfo };
+	}
+
+	#clearStaleLock(lockPath) {
+		let fd;
+		try {
+			const pathInfo = lstatSync(lockPath);
+			if (
+				!pathInfo.isFile()
+				|| pathInfo.isSymbolicLink()
+				|| !ownedByCurrentUser(pathInfo)
+				|| pathInfo.nlink !== 1
+				|| (pathInfo.mode & 0o077) !== 0
+				|| pathInfo.size > 4096
+			) {
+				throw new Error("host store lock is unsafe");
+			}
+			fd = openSync(
+				lockPath,
+				constants.O_RDONLY
+					| (constants.O_CLOEXEC ?? 0)
+					| (constants.O_NOFOLLOW ?? 0),
+			);
+			const info = fstatSync(fd);
+			if (
+				!info.isFile()
+				|| !ownedByCurrentUser(info)
+				|| info.nlink !== 1
+				|| info.dev !== pathInfo.dev
+				|| info.ino !== pathInfo.ino
+				|| info.size > 4096
+			) {
+				throw new Error("host store lock changed during secure open");
+			}
+			const metadata = JSON.parse(readBoundedFd(fd, 4096, "host store lock").toString("utf8"));
+			if (!Number.isInteger(metadata?.pid) || metadata.pid < 1) {
+				throw new Error("host store lock metadata is invalid");
+			}
+			try {
+				process.kill(metadata.pid, 0);
+				return false;
+			} catch (error) {
+				if (error?.code !== "ESRCH") return false;
+			}
+			const latest = lstatSync(lockPath);
+			if (latest.dev !== info.dev || latest.ino !== info.ino) return false;
+			unlinkSync(lockPath);
+			return true;
+		} finally {
+			if (fd !== undefined) closeSync(fd);
+		}
+	}
+
+	#acquireLock() {
+		this.#prepareDirectory();
+		const lockPath = `${this.file}.lock`;
+		const flags = constants.O_WRONLY
+			| constants.O_CREAT
+			| constants.O_EXCL
+			| (constants.O_CLOEXEC ?? 0)
+			| (constants.O_NOFOLLOW ?? 0);
+		let fd;
+		for (let attempt = 0; attempt < 2; attempt += 1) {
+			try {
+				fd = openSync(lockPath, flags, 0o600);
+				break;
+			} catch (error) {
+				if (error?.code !== "EEXIST" || attempt > 0 || !this.#clearStaleLock(lockPath)) {
+					const busy = new Error("SSH host store is locked by another dsh process");
+					busy.code = "SSH_HOST_STORE_BUSY";
+					busy.status = 409;
+					throw busy;
+				}
+			}
+		}
+		let lockInfo;
+		try {
+			lockInfo = fstatSync(fd);
+			const metadata = `${JSON.stringify({ pid: process.pid, createdAt: Date.now(), nonce: randomUUID() })}\n`;
+			writeFileSync(fd, metadata, "utf8");
+			fchmodSync(fd, 0o600);
+			fsyncSync(fd);
+		} catch (error) {
+			try { closeSync(fd); } catch { /* best-effort close */ }
+			try { unlinkSync(lockPath); } catch { /* best-effort owned lock cleanup */ }
+			throw error;
+		}
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			try {
+				const current = lstatSync(lockPath);
+				if (current.dev === lockInfo.dev && current.ino === lockInfo.ino) unlinkSync(lockPath);
+			} finally {
+				closeSync(fd);
+			}
+		};
+	}
+
+	#save(candidate) {
+		const content = serializeHostStore(candidate);
+		const previousContent = serializeHostStore(this.data);
+		const releaseLock = this.#acquireLock();
+		let current;
+		try {
+			current = this.#readCurrent();
+		} catch (error) {
+			releaseLock();
+			throw error;
+		}
+		if (serializeHostStore(current) !== previousContent) {
+			this.data = current;
+			this.externalChangeGeneration += 1;
+			releaseLock();
+			const conflict = new Error("SSH host store changed in another dsh process; reload and retry");
+			conflict.code = "SSH_HOST_STORE_CONFLICT";
+			conflict.status = 409;
+			throw conflict;
+		}
+		let directory;
+		let directoryInfo;
+		try {
+			({ directory, directoryInfo } = this.#prepareDirectory());
+		} catch (error) {
+			releaseLock();
+			throw error;
 		}
 		const tmp = `${this.file}.${process.pid}.${randomUUID()}.tmp`;
 		const tempFlags = constants.O_WRONLY
@@ -369,6 +592,7 @@ export class HostStore {
 			if (ownsTmp) {
 				try { unlinkSync(tmp); } catch { /* best-effort owned temp cleanup */ }
 			}
+			releaseLock();
 		}
 	}
 
@@ -376,43 +600,112 @@ export class HostStore {
 		return this.data.hosts;
 	}
 
+	refresh() {
+		const current = this.#readCurrent();
+		if (serializeHostStore(current) === serializeHostStore(this.data)) return false;
+		this.data = current;
+		this.externalChangeGeneration += 1;
+		return true;
+	}
+
+	externalGeneration() {
+		return this.externalChangeGeneration;
+	}
+
+	revision() {
+		return this.data.revision ?? 0;
+	}
+
 	find(alias) {
 		return this.data.hosts.find((h) => h.alias === alias);
 	}
 
 	create(payload) {
-		const entry = normalizePayload(payload, true);
+		const entry = { ...normalizePayload(payload, true), revision: 1 };
 		if (this.find(entry.alias)) {
 			throw new Error(`alias '${entry.alias}' already exists`);
 		}
-		const candidate = { version: 1, hosts: [...this.data.hosts, entry] };
+		const candidate = { version: 1, revision: this.revision() + 1, hosts: [...this.data.hosts, entry] };
 		this.#save(candidate);
 		this.data = candidate;
 		return entry;
 	}
 
-	update(alias, payload) {
+	update(alias, payload, { expectedRevision } = {}) {
 		const index = this.data.hosts.findIndex((entry) => entry.alias === alias);
 		if (index < 0) throw new Error(`alias '${alias}' not found`);
 		const entry = this.data.hosts[index];
+		if (expectedRevision !== undefined && entry.revision !== expectedRevision) {
+			const error = new Error(`alias '${alias}' changed since it was loaded`);
+			error.code = "SSH_HOST_REVISION_CONFLICT";
+			throw error;
+		}
 		const patch = normalizePayload(payload, false);
 		const auth = patch.auth === undefined
 			? entry.auth
 			: mergeAuthPatch(entry.auth, patch.auth);
-		const next = { ...entry, ...patch, auth, alias, updatedAt: Date.now() };
+		const next = {
+			...entry,
+			...patch,
+			auth,
+			alias,
+			revision: (entry.revision ?? 0) + 1,
+			updatedAt: Date.now(),
+		};
 		const hosts = this.data.hosts.slice();
 		hosts[index] = next;
-		const candidate = { version: 1, hosts };
+		const candidate = { version: 1, revision: this.revision() + 1, hosts };
 		this.#save(candidate);
 		this.data = candidate;
 		return next;
 	}
 
-	remove(alias) {
+	updateHostKeys(updates) {
+		if (!Array.isArray(updates) || updates.length === 0) return [];
+		const aliases = new Set();
+		const hosts = this.data.hosts.slice();
+		const changed = [];
+		const now = Date.now();
+		for (const update of updates) {
+			const alias = String(update?.alias ?? "").trim();
+			if (!alias || aliases.has(alias)) throw new Error("host key updates must contain unique aliases");
+			aliases.add(alias);
+			const index = hosts.findIndex((entry) => entry.alias === alias);
+			if (index < 0) throw new Error(`alias '${alias}' not found`);
+			const entry = hosts[index];
+			if (update.expectedRevision !== undefined && entry.revision !== update.expectedRevision) {
+				const error = new Error(`alias '${alias}' changed since it was loaded`);
+				error.code = "SSH_HOST_REVISION_CONFLICT";
+				throw error;
+			}
+			const patch = normalizePayload({ hostKeys: update.hostKeys, hostKey: update.hostKey }, false);
+			const next = {
+				...entry,
+				...patch,
+				revision: (entry.revision ?? 0) + 1,
+				updatedAt: now,
+			};
+			hosts[index] = next;
+			changed.push(next);
+		}
+		const candidate = { version: 1, revision: this.revision() + 1, hosts };
+		this.#save(candidate);
+		this.data = candidate;
+		return changed;
+	}
+
+	remove(alias, { expectedRevision } = {}) {
 		const index = this.data.hosts.findIndex((entry) => entry.alias === alias);
 		if (index < 0) return false;
+		const entry = this.data.hosts[index];
+		if (expectedRevision !== undefined && entry.revision !== expectedRevision) {
+			const error = new Error(`alias '${alias}' changed since it was loaded`);
+			error.code = "SSH_HOST_REVISION_CONFLICT";
+			throw error;
+		}
 		const candidate = {
 			version: 1,
+			revision: this.revision() + 1,
 			hosts: this.data.hosts.filter((_entry, candidateIndex) => candidateIndex !== index),
 		};
 		this.#save(candidate);
@@ -426,20 +719,36 @@ export class HostStore {
 			const p = entry.auth.keyPath ? expandHome(entry.auth.keyPath) : undefined;
 			keyReady = p !== undefined && existsSync(p);
 		}
+		const hostKeys = trustedHostKeyRecords(entry);
+		const credentialReady = entry.auth.kind === "key"
+			? keyReady
+			: entry.auth.kind === "agent"
+				? resolveAgentPath(entry.auth.agentPath) !== undefined
+				: Boolean(entry.auth.password || entry.auth.kbdintPassword);
+		let chainReady = false;
+		try {
+			chainReady = resolveHostRoute(this, entry)
+				.slice(0, -1)
+				.every((hop) => trustedHostKeyRecords(hop).length > 0);
+		} catch { /* invalid routes remain visible but cannot bind or connect */ }
 		return {
 			alias: entry.alias, host: entry.host, port: entry.port, user: entry.user,
-			auth: entry.auth.kind, keyReady, proxyJump: entry.proxyJump ?? [],
+			auth: entry.auth.kind, keyReady, credentialReady, proxyJump: entry.proxyJump ?? [],
 			hostKey: entry.hostKey,
-			hostKeyReady: typeof entry.hostKey === "string",
+			hostKeys,
+			hostKeyReady: hostKeys.length > 0,
+			chainReady,
+			hostKeyAlias: entry.hostKeyAlias,
 			description: entry.description, environment: entry.environment,
 			tags: entry.tags ?? [], location: entry.location,
 			createdAt: entry.createdAt, updatedAt: entry.updatedAt,
+			revision: entry.revision ?? 0,
 		};
 	}
 
 	/**
 	 * One-shot parse of a standard ~/.ssh/config (Host/HostName/User/Port/
-	 * IdentityFile/User/ProxyJump). Existing aliases are skipped.
+	 * IdentityFile/IdentityAgent/ProxyJump/HostKeyAlias). Existing aliases are skipped.
 	 */
 	importSshConfig(configPath = join(homedir(), ".ssh", "config")) {
 		if (!existsSync(configPath)) throw new Error("ssh config not found: " + configPath);
@@ -501,29 +810,44 @@ export class HostStore {
 		}
 		let added = 0, skipped = 0;
 		const skippedNames = [];
+		const hosts = this.data.hosts.slice();
+		const aliases = new Set(hosts.map((entry) => entry.alias));
 		for (const block of blocks) {
 			if (block.patterns.some((pat) => pat.includes("*") || pat.includes("?"))) continue;
 			const alias = block.patterns[0];
 			const hostName = block.opts.hostname;
 			if (!hostName) { skipped += 1; skippedNames.push(alias); continue; }
-			if (this.find(alias)) { skipped += 1; continue; }
+			if (aliases.has(alias)) { skipped += 1; continue; }
 			try {
-				this.create({
+				const entry = {
+					...normalizePayload({
 					alias,
 					host: hostName,
 					port: parseInt(block.opts.port || "22", 10) || 22,
 					user: block.opts.user || process.env.USER || "root",
+					hostKeyAlias: block.opts.hostkeyalias,
 					auth: block.opts.identityagent
 						? { kind: "agent", agentPath: block.opts.identityagent }
 						: { kind: "key", keyPath: block.opts.identityfile ? block.opts.identityfile.split(/\s+/)[0] : "~/.ssh/id_rsa" },
-					proxyJump: block.opts.proxyjump ? block.opts.proxyjump.split(/\s+/) : [],
+					proxyJump: block.opts.proxyjump && block.opts.proxyjump.toLowerCase() !== "none"
+						? block.opts.proxyjump.split(/[,\s]+/).filter(Boolean)
+						: [],
 					tags: ["imported"],
-				});
+					}, true),
+					revision: 1,
+				};
+				hosts.push(entry);
+				aliases.add(alias);
 				added += 1;
 			} catch {
 				skipped += 1;
 				skippedNames.push(alias);
 			}
+		}
+		if (added > 0) {
+			const candidate = { version: 1, revision: this.revision() + 1, hosts };
+			this.#save(candidate);
+			this.data = candidate;
 		}
 		return { parsed: blocks.length, added, skipped, skippedNames };
 	}
@@ -585,8 +909,20 @@ function normalizePayload(payload, requireAll) {
 	if (host !== undefined) out.host = host;
 	if (user !== undefined) out.user = user;
 	if (requireAll || payload.port !== undefined) out.port = clampInt(payload.port, 1, 65535, 22);
-	if (requireAll || payload.hostKey !== undefined) {
-		out.hostKey = normalizeHostKey(payload.hostKey);
+	if (requireAll || payload.hostKey !== undefined || payload.hostKeys !== undefined) {
+		const explicitPrimary = normalizeHostKey(payload.hostKey);
+		const records = payload.hostKeys === undefined
+			? (explicitPrimary ? [{ fingerprint: explicitPrimary, source: "manual", trustedAt: now }] : [])
+			: normalizeHostKeys(payload.hostKeys);
+		if (explicitPrimary && !records.some((record) => record.fingerprint === explicitPrimary)) {
+			throw new Error("hostKey must be present in hostKeys");
+		}
+		out.hostKeys = records;
+		out.hostKey = explicitPrimary ?? records[0]?.fingerprint;
+	}
+	if (requireAll || payload.hostKeyAlias !== undefined) {
+		const hostKeyAlias = pickStr(payload.hostKeyAlias);
+		out.hostKeyAlias = hostKeyAlias || undefined;
 	}
 	if (Array.isArray(payload.proxyJump)) out.proxyJump = payload.proxyJump.map(String);
 	if (requireAll || payload.description !== undefined) out.description = payload.description ? String(payload.description) : undefined;
@@ -636,6 +972,9 @@ export class SshEngine {
 		this.aliasGeneration = new Map();
 		this.acquireActive = new Map();
 		this.acquireControllers = new Map();
+		this.storeExternalGeneration = typeof store.externalGeneration === "function"
+			? store.externalGeneration()
+			: 0;
 		this.disposed = false;
 		this.sweepTimer = setInterval(() => sweepPool(this), Math.max(10_000, this.opts.idleTimeoutMs / 4));
 		this.sweepTimer.unref?.();
@@ -651,6 +990,7 @@ export class SshEngine {
 	}
 
 	list(query) {
+		refreshEngineStore(this);
 		const needle = query?.trim().toLowerCase();
 		return this.store.list()
 			.filter((e) => !needle
@@ -744,11 +1084,49 @@ export function formatSshError(error) {
 	return msg(error);
 }
 
+export function hostKeyFingerprint(rawKey) {
+	return `SHA256:${createHash("sha256")
+		.update(rawKey)
+		.digest("base64")
+		.replace(/=+$/, "")}`;
+}
+
+export function inspectHostKey(rawKey) {
+	let algorithm;
+	try {
+		const parsed = ssh2Utils.parseKey(rawKey);
+		const key = Array.isArray(parsed) ? parsed[0] : parsed;
+		if (!(key instanceof Error) && typeof key?.type === "string") algorithm = key.type;
+	} catch { /* the fingerprint remains authoritative even if type parsing fails */ }
+	return { algorithm, fingerprint: hostKeyFingerprint(rawKey) };
+}
+
+export function buildHostProbeConfig(entry, sock, opts, observe) {
+	if (!entry.host) throw new Error(`alias '${entry.alias}': host is empty — fix the entry`);
+	if (!entry.user) throw new Error(`alias '${entry.alias}': user is empty — fix the entry`);
+	if (typeof observe !== "function") throw new Error("host key probe observer is required");
+	const config = {
+		host: entry.host,
+		port: entry.port,
+		username: entry.user,
+		readyTimeout: opts.connectTimeoutMs,
+		keepaliveInterval: 0,
+		tryKeyboard: false,
+		authHandler: () => false,
+		hostVerifier: (rawKey) => {
+			observe(inspectHostKey(rawKey));
+			return false;
+		},
+	};
+	if (sock !== undefined) config.sock = sock;
+	return config;
+}
+
 export function buildConnectConfig(entry, sock, opts) {
 	if (!entry.host) throw new Error(`alias '${entry.alias}': host is empty — fix the entry`);
 	if (!entry.user) throw new Error(`alias '${entry.alias}': user is empty — fix the entry`);
-	const expectedHostKey = normalizeHostKey(entry.hostKey);
-	if (!expectedHostKey) {
+	const expectedHostKeys = new Set(trustedHostKeyRecords(entry).map((record) => record.fingerprint));
+	if (expectedHostKeys.size === 0) {
 		throw new Error(`alias '${entry.alias}': pinned host key fingerprint is required`);
 	}
 	const config = {
@@ -759,13 +1137,7 @@ export function buildConnectConfig(entry, sock, opts) {
 		keepaliveInterval: opts.keepaliveIntervalMs,
 		keepaliveCountMax: 3,
 	};
-	config.hostVerifier = (rawKey) => {
-		const fingerprint = `SHA256:${createHash("sha256")
-			.update(rawKey)
-			.digest("base64")
-			.replace(/=+$/, "")}`;
-		return fingerprint === expectedHostKey;
-	};
+	config.hostVerifier = (rawKey) => expectedHostKeys.has(hostKeyFingerprint(rawKey));
 	if (sock !== undefined) config.sock = sock;
 	// 静态 keyboard-interactive 应答仅接受显式 kbdintPassword；
 	// password 主认证不能代替可能包含密码+动态码的交互式质询。
@@ -1244,12 +1616,197 @@ export function attachInteractiveAuth(engine, config, alias, deadlineAt) {
 }
 
 
+export function resolveHostRoute(store, entry) {
+	const aliases = [...(entry.proxyJump ?? []), entry.alias];
+	const seen = new Set();
+	return aliases.map((alias, index) => {
+		if (seen.has(alias)) {
+			const error = new Error(`duplicate or recursive ProxyJump alias '${alias}'`);
+			error.code = "SSH_PROXY_JUMP_INVALID";
+			throw error;
+		}
+		seen.add(alias);
+		const candidate = store.find(alias);
+		if (!candidate) {
+			const error = new Error(`proxyJump alias '${alias}' not found — create it first`);
+			error.code = "SSH_PROXY_JUMP_MISSING";
+			throw error;
+		}
+		if (index < aliases.length - 1 && (candidate.proxyJump ?? []).length > 0) {
+			const error = new Error(
+				`nested ProxyJump on '${alias}' is not supported; flatten the complete route on '${entry.alias}'`,
+			);
+			error.code = "SSH_PROXY_JUMP_NESTED";
+			throw error;
+		}
+		return candidate;
+	});
+}
+
+function probeClient(config, { signal, deadlineAt, clock, label }) {
+	return new Promise((resolve, reject) => {
+		const client = new Client();
+		let observation;
+		let settled = false;
+		let deadlineTimer;
+		const cleanup = () => {
+			signal?.removeEventListener?.("abort", onAbort);
+			if (deadlineTimer !== undefined) clock.clearTimeout(deadlineTimer);
+		};
+		const destroy = () => {
+			try { client.destroy(); } catch { /* already closed */ }
+		};
+		const fail = (error) => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			destroy();
+			reject(error instanceof Error ? error : new Error(String(error)));
+		};
+		const succeed = () => {
+			if (settled || observation === undefined) return;
+			settled = true;
+			cleanup();
+			resolve(observation);
+		};
+		const onAbort = () => fail(sshAbortError(signal, label));
+		const remaining = deadlineAt - clock.now();
+		if (remaining <= 0) {
+			fail(sshDeadlineError(label));
+			return;
+		}
+		deadlineTimer = clock.setTimeout(() => fail(sshDeadlineError(label)), remaining);
+		signal?.addEventListener?.("abort", onAbort, { once: true });
+		if (signal?.aborted) {
+			onAbort();
+			return;
+		}
+		const originalVerifier = config.hostVerifier;
+		config.hostVerifier = (rawKey) => {
+			const accepted = originalVerifier(rawKey);
+			observation ??= inspectHostKey(rawKey);
+			queueMicrotask(destroy);
+			return accepted;
+		};
+		client.once("ready", () => fail(new Error(`host key probe unexpectedly authenticated to ${label}`)));
+		client.on("error", (error) => {
+			if (observation === undefined) fail(error);
+		});
+		client.once("close", () => {
+			if (observation !== undefined) succeed();
+			else fail(new Error(`SSH connection closed before presenting a host key for ${label}`));
+		});
+		try { client.connect(config); } catch (error) { fail(error); }
+	});
+}
+
+/**
+ * Observe the first untrusted identity in a target's flat ProxyJump route.
+ * Credentials are used only for already-pinned prefix hops. The observed node
+ * always receives a config with no password, private key, agent, or kbdint data.
+ */
+export async function probeHostKey(engine, targetAlias, options = {}) {
+	refreshEngineStore(engine);
+	const target = engine.store.find(targetAlias);
+	if (!target) throw new Error(`alias '${targetAlias}' not found — add it first`);
+	const route = resolveHostRoute(engine.store, target);
+	let probeIndex;
+	if (options.probeAlias !== undefined) {
+		probeIndex = route.findIndex((entry) => entry.alias === options.probeAlias);
+		if (probeIndex < 0) throw new Error(`alias '${options.probeAlias}' is not in target route '${targetAlias}'`);
+	} else {
+		probeIndex = route.findIndex((entry) => trustedHostKeyRecords(entry).length === 0);
+	}
+	if (probeIndex < 0) {
+		return { state: "already_trusted", route: route.map((entry) => entry.alias) };
+	}
+	for (let index = 0; index < probeIndex; index += 1) {
+		if (trustedHostKeyRecords(route[index]).length === 0) {
+			const error = new Error(`ProxyJump dependency '${route[index].alias}' must be trusted first`);
+			error.code = "SSH_TRUST_DEPENDENCY";
+			error.alias = route[index].alias;
+			throw error;
+		}
+	}
+
+	const hops = [];
+	let sock;
+	const clock = options.clock ?? interactiveClock(engine);
+	const configuredTimeout = typeof engine.interactivePrompter === "function"
+		? engine.opts?.interactiveAuthTimeoutMs
+		: engine.opts?.connectTimeoutMs;
+	const timeoutMs = Number.isFinite(configuredTimeout) && configuredTimeout > 0
+		? configuredTimeout
+		: (typeof engine.interactivePrompter === "function" ? INTERACTIVE_AUTH_TIMEOUT_MS : 15_000);
+	const deadlineAt = options.deadlineAt ?? (clock.now() + timeoutMs);
+	const signal = options.signal;
+	const closePrefix = () => {
+		try { sock?.destroy?.(); } catch { /* already closed */ }
+		for (const client of hops.reverse()) { try { client.end(); } catch { /* already closed */ } }
+	};
+	try {
+		for (let index = 0; index < probeIndex; index += 1) {
+			const hop = route[index];
+			const hopCfg = buildConnectConfig(hop, sock, engine.opts);
+			hopCfg.readyTimeout = Math.max(1, deadlineAt - clock.now());
+			attachInteractiveAuth(engine, hopCfg, hop.alias, deadlineAt);
+			const hopClient = await withSshDeadline(
+				connectWithInteractiveAuth(engine, hopCfg, hop.alias, { signal, deadlineAt, clock }),
+				{
+					label: `ProxyJump ${hop.alias}`,
+					clock,
+					deadlineAt,
+					signal,
+					disposeLate: (client) => client.end(),
+				},
+			);
+			hops.push(hopClient);
+			const next = route[index + 1];
+			const forwarded = new Promise((resolve, reject) => {
+				hopClient.forwardOut("127.0.0.1", 0, next.host, next.port, (error, stream) => {
+					if (error) reject(error); else resolve(stream);
+				});
+			});
+			sock = await withSshDeadline(forwarded, {
+				label: `ProxyJump ${hop.alias} forwardOut`,
+				clock,
+				deadlineAt,
+				signal,
+				disposeLate: (stream) => stream.destroy?.(),
+			});
+		}
+		const candidate = route[probeIndex];
+		let observed;
+		const config = buildHostProbeConfig(candidate, sock, engine.opts, (value) => { observed = value; });
+		config.readyTimeout = Math.max(1, deadlineAt - clock.now());
+		const result = await probeClient(config, {
+			signal,
+			deadlineAt,
+			clock,
+			label: candidate.alias,
+		});
+		return {
+			state: "observed",
+			alias: candidate.alias,
+			host: candidate.host,
+			port: candidate.port,
+			algorithm: observed?.algorithm ?? result.algorithm,
+			fingerprint: observed?.fingerprint ?? result.fingerprint,
+			route: route.map((entry) => entry.alias),
+		};
+	} finally {
+		closePrefix();
+	}
+}
+
+
 
 /** Build one full jump chain (ProxyJump): hop clients in order, then target. */
 export async function connectChain(engine, entry, options = {}) {
 	const hops = [];
 	let sock;
-	const chain = entry.proxyJump ?? [];
+	const route = resolveHostRoute(engine.store, entry);
+	const chain = route.slice(0, -1);
 	const clock = options.clock ?? interactiveClock(engine);
 	const configuredTimeout = typeof engine.interactivePrompter === "function"
 		? engine.opts?.interactiveAuthTimeoutMs
@@ -1265,9 +1822,8 @@ export async function connectChain(engine, entry, options = {}) {
 	};
 	try {
 		for (let index = 0; index < chain.length; index += 1) {
-			const hopAlias = chain[index];
-			const hop = engine.store.find(hopAlias);
-			if (!hop) throw new Error(`proxyJump alias '${hopAlias}' not found — create it first`);
+			const hop = chain[index];
+			const hopAlias = hop.alias;
 			const hopCfg = buildConnectConfig(hop, sock, engine.opts);
 			hopCfg.readyTimeout = Math.max(1, deadlineAt - clock.now());
 			attachInteractiveAuth(engine, hopCfg, hopAlias, deadlineAt);
@@ -1284,7 +1840,7 @@ export async function connectChain(engine, entry, options = {}) {
 				},
 			);
 			hops.push(hopClient);
-			const next = index + 1 < chain.length ? engine.store.find(chain[index + 1]) : undefined;
+			const next = index + 1 < chain.length ? chain[index + 1] : undefined;
 			const nextHost = next ? next.host : entry.host;
 			const nextPort = next ? next.port : entry.port;
 			const forwarded = new Promise((resolve, reject) => {
@@ -1345,8 +1901,24 @@ function pruneAliasGeneration(engine, alias) {
 	}
 }
 
+function refreshEngineStore(engine) {
+	if (
+		typeof engine.store?.refresh !== "function"
+		|| typeof engine.store?.externalGeneration !== "function"
+	) return;
+	const aliases = engine.store.list().map((entry) => entry.alias);
+	engine.store.refresh();
+	const generation = engine.store.externalGeneration();
+	if (generation === engine.storeExternalGeneration) return;
+	engine.storeExternalGeneration = generation;
+	for (const alias of new Set([...aliases, ...engine.store.list().map((entry) => entry.alias)])) {
+		engine.dropAlias(alias);
+	}
+}
+
 async function acquire(engine, alias, options = {}) {
 	if (engine.disposed) throw new Error("SSH engine disposed");
+	refreshEngineStore(engine);
 	const generation = engine.aliasGeneration.get(alias) ?? 0;
 	const pending = engine.acquireQueue.get(alias);
 	if (pending?.generation === generation) return pending.promise;

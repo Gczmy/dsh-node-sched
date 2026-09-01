@@ -813,6 +813,10 @@ function apply(cctx, config) {
 
 		const [confirmAlias, setConfirmAlias] = useState(null);
 		const [pinDraft, setPinDraft] = useState(null);
+		const [trustDraft, setTrustDraft] = useState(null);
+		const trustAbortRef = useRef(null);
+		const trustEpochRef = useRef(0);
+		const trustCommitRef = useRef(false);
 
 		const [termAlias, setTermAlias] = useState(null);
 
@@ -832,15 +836,21 @@ function apply(cctx, config) {
 
 				]);
 
-				setHosts(h.hosts ?? []);
+				const nextHosts = h.hosts ?? [];
+				setHosts(nextHosts);
 
 				setBinding(b);
+				return { hosts: nextHosts, binding: b };
 
-			} catch { setHosts([]); }
+			} catch { setHosts([]); return { hosts: [], binding: null }; }
 
 		}, []);
 
 		useEffect(() => { load(); }, [load]);
+		useEffect(() => () => {
+			trustEpochRef.current += 1;
+			trustAbortRef.current?.abort();
+		}, []);
 
 
 
@@ -894,7 +904,9 @@ function apply(cctx, config) {
 
 				const r = await authFetch("/sched/ssh/import", { method: "POST" }).then((r) => r.json());
 
-				setMsg(r.result ? `导入完成: 解析 ${r.result.parsed} / 新增 ${r.result.added} / 跳过 ${r.result.skipped}` : `失败: ${r.error}`);
+				setMsg(r.result
+					? `导入完成: 解析 ${r.result.parsed} / 新增 ${r.result.added} / 自动信任 ${r.result.pinned ?? 0} / 待确认 ${r.result.pending ?? 0} / 冲突 ${(r.result.conflicts ?? []).length}`
+					: `失败: ${r.error}`);
 
 				await load();
 
@@ -920,13 +932,159 @@ function apply(cctx, config) {
 
 		};
 
+		const testAfterTrust = async (alias) => {
+			try {
+				const result = await authFetch("/sched/ssh/test", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ alias }),
+				}).then((response) => response.json());
+				setMsg(result.ok
+					? `✅ ${alias} 已建立信任并通过 SSH 测试 (${result.latencyMs}ms)`
+					: `✅ ${alias} 的服务器身份已信任；但用户认证或连通性测试失败 — ${result.error ?? "unreachable"}`);
+			} catch (error) {
+				setMsg(`✅ ${alias} 的服务器身份已信任；但用户认证或连通性测试失败 — ${error.message}`);
+			}
+		};
+
+		const cancelTrust = async () => {
+			if (trustCommitRef.current) return;
+			const current = trustDraft;
+			trustEpochRef.current += 1;
+			trustAbortRef.current?.abort();
+			trustAbortRef.current = null;
+			setTrustDraft(null);
+			setBusy("trust-cancel");
+			setMsg("已取消主机信任操作；未确认的指纹不会保存");
+			if (current?.targetAlias) {
+				try {
+					await authFetch("/sched/ssh/host-key", {
+						method: "POST",
+						headers: { "content-type": "application/json" },
+						body: JSON.stringify({
+							action: "cancel",
+							targetAlias: current.targetAlias,
+							challengeId: current.challenge?.id,
+						}),
+					});
+				} catch { /* challenge also expires automatically */ }
+			}
+			setBusy("");
+		};
+
+		const prepareTrust = async (targetAlias, options = {}) => {
+			trustAbortRef.current?.abort();
+			const controller = new AbortController();
+			trustAbortRef.current = controller;
+			const epoch = ++trustEpochRef.current;
+			const host = (hosts ?? []).find((candidate) => candidate.alias === targetAlias);
+			setTrustDraft({ phase: "probing", targetAlias, mode: options.mode ?? "initial" });
+			setBusy("trust:" + targetAlias);
+			setMsg(options.mode === "rotate"
+				? `正在重新探测 ${options.hostAlias ?? targetAlias} 的服务器身份…`
+				: `正在检查本机 known_hosts；如无记录，将安全探测 ${targetAlias}…`);
+			try {
+				const response = await authFetch("/sched/ssh/host-key", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					signal: controller.signal,
+					body: JSON.stringify({
+						action: "prepare",
+						targetAlias,
+						expectedHostRevision: options.expectedHostRevision ?? host?.revision,
+						mode: options.mode ?? "initial",
+						hostAlias: options.hostAlias,
+					}),
+				});
+				const result = await response.json().catch(() => ({}));
+				if (epoch !== trustEpochRef.current) return;
+				if (!response.ok || result.ok !== true) {
+					throw new Error(result.error ?? `HTTP ${response.status}`);
+				}
+				if (["trusted_from_known_hosts", "already_trusted", "trusted"].includes(result.state)) {
+					setTrustDraft(null);
+					await load();
+					await testAfterTrust(targetAlias);
+					return;
+				}
+				if (result.state !== "confirmation_required" || !result.challenge) {
+					throw new Error("服务器返回了未知的主机信任状态");
+				}
+				setTrustDraft({
+					phase: "confirm",
+					targetAlias,
+					mode: options.mode ?? "initial",
+					challenge: result.challenge,
+				});
+				setMsg((result.warnings ?? []).length > 0
+					? `known_hosts 存在不可安全复用的记录；请人工核对 ${result.challenge.target.alias} 的服务器指纹`
+					: `请核对 ${result.challenge.target.alias} 的服务器指纹`);
+			} catch (error) {
+				if (epoch !== trustEpochRef.current || error?.name === "AbortError") return;
+				setTrustDraft(null);
+				setMsg("建立信任失败: " + error.message);
+			} finally {
+				if (epoch === trustEpochRef.current) {
+					setBusy("");
+					trustAbortRef.current = null;
+				}
+			}
+		};
+
+		const confirmTrust = async () => {
+			const current = trustDraft;
+			if (current?.phase !== "confirm" || trustCommitRef.current) return;
+			trustCommitRef.current = true;
+			const epoch = ++trustEpochRef.current;
+			setBusy("trust-confirm:" + current.targetAlias);
+			try {
+				const response = await authFetch("/sched/ssh/host-key", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({
+						action: "confirm",
+						targetAlias: current.targetAlias,
+						hostAlias: current.challenge.target.alias,
+						challengeId: current.challenge.id,
+						fingerprint: current.challenge.observed.fingerprint,
+						expectedHostRevision: current.challenge.targetRevision,
+					}),
+				});
+				const result = await response.json().catch(() => ({}));
+				if (epoch !== trustEpochRef.current) return;
+				if (!response.ok || result.ok !== true) {
+					throw new Error(result.error ?? `HTTP ${response.status}`);
+				}
+				setTrustDraft(null);
+				const loaded = await load();
+				if (result.state === "next_required") {
+					setMsg(`${current.challenge.target.alias} 已信任，继续处理下一段 SSH 路径…`);
+					const refreshedTarget = loaded.hosts.find((candidate) => candidate.alias === current.targetAlias);
+					await prepareTrust(current.targetAlias, { expectedHostRevision: refreshedTarget?.revision });
+					return;
+				}
+				await testAfterTrust(current.targetAlias);
+			} catch (error) {
+				if (epoch !== trustEpochRef.current) return;
+				setTrustDraft(null);
+				setMsg("确认主机信任失败，请重新建立信任: " + error.message);
+			} finally {
+				trustCommitRef.current = false;
+				if (epoch === trustEpochRef.current) setBusy("");
+			}
+		};
+
 		const doDelete = async (alias) => {
 			setBusy("del:" + alias);
 			try {
 				const response = await authFetch("/sched/ssh/hosts", {
 					method: "POST",
 					headers: { "content-type": "application/json" },
-					body: JSON.stringify({ action: "delete", alias }),
+					body: JSON.stringify({
+						action: "delete",
+						alias,
+						expectedHostRevision: (hosts ?? []).find((host) => host.alias === alias)?.revision,
+					}),
 				});
 				const result = await response.json().catch(() => ({}));
 				if (!response.ok || result.removed === false) {
@@ -957,6 +1115,7 @@ function apply(cctx, config) {
 					body: JSON.stringify({
 						action: "update",
 						alias: pinDraft.alias,
+						expectedHostRevision: (hosts ?? []).find((host) => host.alias === pinDraft.alias)?.revision,
 						patch: { hostKey },
 					}),
 				});
@@ -1030,6 +1189,34 @@ function apply(cctx, config) {
 
 				"暂无主机 —— 点上方「从 ~/.ssh/config 导入」一键导入"),
 
+			trustDraft && jsxs2("div", {
+				style: { display: "flex", flexDirection: "column", gap: 8, padding: "10px 12px", border: `1px solid ${T.warn}`, borderRadius: 10, background: `color-mix(in srgb, ${T.warn} 7%, transparent)` },
+			}, trustDraft.phase === "probing" ? [
+				j("div", { key: "title", style: { fontWeight: 700 } }, `正在为 ${trustDraft.targetAlias} 建立服务器信任…`),
+				j("div", { key: "detail", style: { color: T.label2, fontSize: 13 } }, "先检查本机 known_hosts；如果没有记录，只进行 SSH 密钥交换，不向待确认主机发送用户凭据。"),
+				j("div", { key: "actions", style: { display: "flex", justifyContent: "flex-end" } },
+					j("button", { onClick: cancelTrust, style: ghostBtn }, "取消")),
+			] : [
+				j("div", { key: "title", style: { fontWeight: 700 } }, `确认 ${trustDraft.challenge.target.alias} 的服务器身份`),
+				j("div", { key: "endpoint", style: { color: T.label2, fontSize: 13 } },
+					`${trustDraft.challenge.target.host}:${trustDraft.challenge.target.port} · ${trustDraft.challenge.observed.algorithm ?? "未知算法"}`),
+				trustDraft.mode === "rotate" && j("div", { key: "old", style: { color: T.err, fontSize: 12, fontFamily: "monospace", overflowWrap: "anywhere" } },
+					`原指纹: ${(hosts ?? []).find((host) => host.alias === trustDraft.challenge.target.alias)?.hostKey ?? "未记录"}`),
+				j("div", { key: "fingerprint", style: { padding: "8px 10px", borderRadius: 8, background: T.bgLayer, fontFamily: "monospace", fontSize: 13, overflowWrap: "anywhere" } },
+					trustDraft.challenge.observed.fingerprint),
+				j("div", { key: "safety", style: { color: T.ok, fontSize: 12 } }, "此次探测未向这台待确认主机发送密码、私钥、ssh-agent 签名或动态验证码。首次确认属于 TOFU，请只在你确认当前网络路径可信时继续。"),
+				jsxs2("div", { key: "actions", style: { display: "flex", gap: 8, justifyContent: "flex-end" } }, [
+					j("button", {
+						onClick: cancelTrust,
+						disabled: busy.startsWith("trust-confirm:"),
+						title: busy.startsWith("trust-confirm:") ? "保存已开始，不能再撤销本次确认" : "取消且不保存指纹",
+						style: { ...ghostBtn, opacity: busy.startsWith("trust-confirm:") ? 0.5 : 1 },
+					}, "取消"),
+					j("button", { onClick: confirmTrust, disabled: busy.startsWith("trust-confirm:"), style: btn(T.warn, busy.startsWith("trust-confirm:")) },
+						busy.startsWith("trust-confirm:") ? "保存中…" : "确认并信任"),
+				]),
+			]),
+
 			pinDraft && jsxs2("div", {
 				style: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", padding: "8px 10px", border: `1px solid ${T.warn}`, borderRadius: 8 },
 			}, [
@@ -1048,9 +1235,11 @@ function apply(cctx, config) {
 
 			hosts !== null && jsxs2("div", { style: { display: "flex", flexDirection: "column", gap: 6 } }, [
 
-				...hosts.map((h) => {
+					...hosts.map((h) => {
 
-					const boundHere = binding?.alias === h.alias;
+						const boundHere = binding?.alias === h.alias;
+						const trustSource = h.hostKeys?.[0]?.source;
+						const trustReady = h.hostKeyReady && h.chainReady !== false;
 
 					return jsxs2("div", {
 
@@ -1087,7 +1276,8 @@ function apply(cctx, config) {
 							(h.proxyJump && h.proxyJump.length > 0) ? ` · via ${h.proxyJump.join(">")}` : "",
 
 							h.description ? ` · ${h.description}` : "",
-							h.hostKeyReady ? " · host✓" : " · ⚠host pin缺失",
+							h.hostKeyReady ? ` · host✓${trustSource ? `(${trustSource})` : ""}` : " · ⚠host pin缺失",
+							h.chainReady === false ? " · ⚠跳板链未信任" : "",
 
 						].join("")),
 
@@ -1100,24 +1290,31 @@ function apply(cctx, config) {
 							: j("button", {
 								key: "bnd",
 								onClick: () => doBind(h.alias),
-								disabled: !!busy || !h.hostKeyReady,
-								title: h.hostKeyReady ? "设为 sched 数据源主机（引擎模式）" : "先设置 host pin",
-								style: { ...ghostBtn, color: T.brand, borderColor: `color-mix(in srgb, ${T.brand} 45%, transparent)`, flexShrink: 0, opacity: h.hostKeyReady ? 1 : 0.5 },
+								disabled: !!busy || !trustReady,
+								title: trustReady ? "设为 sched 数据源主机（引擎模式）" : "先建立目标及完整 ProxyJump 链的主机信任",
+								style: { ...ghostBtn, color: T.brand, borderColor: `color-mix(in srgb, ${T.brand} 45%, transparent)`, flexShrink: 0, opacity: trustReady ? 1 : 0.5 },
 							}, busy === "bind:" + h.alias ? "绑定中…" : "设为SCHED"),
 
 						j("button", {
-							key: "pin",
+							key: "trust",
+							onClick: () => prepareTrust(h.alias, trustReady ? { mode: "rotate", hostAlias: h.alias } : {}),
+							disabled: !!busy,
+							title: trustReady ? "无凭据重新探测并显式确认服务器身份" : "优先复用本机 known_hosts，否则无凭据逐段探测后确认",
+							style: { ...ghostBtn, color: trustReady ? T.label2 : T.warn, flexShrink: 0 },
+						}, busy === "trust:" + h.alias ? "…" : (trustReady ? "重新确认" : "建立信任")),
+						j("button", {
+							key: "manual-pin",
 							onClick: () => setPinDraft({ alias: h.alias, value: h.hostKey ?? "SHA256:" }),
 							disabled: !!busy,
-							title: "固定 OpenSSH SHA256 host key 指纹；未固定时拒绝连接",
-							style: { ...ghostBtn, color: h.hostKeyReady ? T.label2 : T.warn, flexShrink: 0 },
-						}, busy === "pin:" + h.alias ? "…" : (h.hostKeyReady ? "更新pin" : "设置pin")),
+							title: "高级设置：手动粘贴 OpenSSH SHA256 host key 指纹",
+							style: { ...ghostBtn, color: T.label2, flexShrink: 0 },
+						}, "手动pin"),
 						j("button", {
 							key: "o",
 							onClick: () => setTermAlias(h.alias),
-							disabled: !h.hostKeyReady,
-							title: h.hostKeyReady ? "打开网页终端" : "先设置 host pin",
-							style: { ...ghostBtn, flexShrink: 0, opacity: h.hostKeyReady ? 1 : 0.5 },
+							disabled: !trustReady,
+							title: trustReady ? "打开网页终端" : "先建立目标及完整 ProxyJump 链的主机信任",
+							style: { ...ghostBtn, flexShrink: 0, opacity: trustReady ? 1 : 0.5 },
 						}, "终端"),
 
 						confirmAlias === h.alias
@@ -1127,9 +1324,9 @@ function apply(cctx, config) {
 							: j("button", {
 								key: "t",
 								onClick: () => doTest(h.alias),
-								disabled: !!busy || !h.hostKeyReady,
-								title: h.hostKeyReady ? "连通性测试" : "先设置 host pin",
-								style: { ...ghostBtn, flexShrink: 0, opacity: h.hostKeyReady ? 1 : 0.5 },
+								disabled: !!busy || !trustReady,
+								title: trustReady ? "连通性测试" : "先建立目标及完整 ProxyJump 链的主机信任",
+								style: { ...ghostBtn, flexShrink: 0, opacity: trustReady ? 1 : 0.5 },
 							}, busy === "test:" + h.alias ? "…" : "测试"),
 
 						confirmAlias === h.alias

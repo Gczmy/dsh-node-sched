@@ -15,7 +15,13 @@ import { execFileSync, spawn } from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { HOST_STORE_MAX_BYTES, buildConnectConfig, HostStore } from "../lib/ssh-engine.js";
+import {
+	HOST_STORE_MAX_BYTES,
+	HostStore,
+	SshEngine,
+	buildConnectConfig,
+	buildHostProbeConfig,
+} from "../lib/ssh-engine.js";
 
 function host() {
 	return {
@@ -60,6 +66,113 @@ test("SSH connection rejects an absent or mismatched pinned host key", () => {
 		}),
 		/host key|fingerprint|pin/i,
 	);
+});
+
+test("SSH connection accepts an exact member of a multi-key trust set", () => {
+	const first = Buffer.from("first-server-key");
+	const second = Buffer.from("second-server-key");
+	const fingerprint = (key) => `SHA256:${createHash("sha256").update(key).digest("base64").replace(/=+$/, "")}`;
+	const config = buildConnectConfig({
+		...host(),
+		auth: { kind: "password", password: "secret" },
+		hostKey: fingerprint(first),
+		hostKeys: [
+			{ fingerprint: fingerprint(first), source: "legacy" },
+			{ fingerprint: fingerprint(second), source: "known_hosts" },
+		],
+	}, undefined, { connectTimeoutMs: 5_000, keepaliveIntervalMs: 10_000 });
+	assert.equal(config.hostVerifier(first), true);
+	assert.equal(config.hostVerifier(second), true);
+	assert.equal(config.hostVerifier(Buffer.from("attacker")), false);
+});
+
+test("host-key probe config never contains user authentication credentials", () => {
+	let observed;
+	const config = buildHostProbeConfig({
+		...host(),
+		auth: {
+			kind: "password",
+			password: "must-not-leak",
+			kbdintPassword: "must-not-leak-either",
+		},
+	}, undefined, { connectTimeoutMs: 5_000 }, (value) => { observed = value; });
+	for (const field of [
+		"password", "privateKey", "passphrase", "agent", "_kbdintAnswer", "_interactiveAuth",
+	]) {
+		assert.equal(Object.hasOwn(config, field), false, field);
+	}
+	assert.equal(config.tryKeyboard, false);
+	assert.equal(config.authHandler(), false);
+	assert.equal(config.hostVerifier(Buffer.from("observed-server-key")), false);
+	assert.match(observed.fingerprint, /^SHA256:[A-Za-z0-9+/]{43}$/);
+});
+
+test("HostStore revisions reject stale host trust updates and retain version-1 rollback compatibility", () => {
+	const dir = mkdtempSync(join(tmpdir(), "node-sched-host-revision-"));
+	const file = join(dir, "hosts.json");
+	try {
+		const store = new HostStore(file);
+		const created = store.create(host());
+		assert.equal(created.revision, 1);
+		const changed = store.updateHostKeys([{
+			alias: created.alias,
+			expectedRevision: created.revision,
+			hostKeys: [{
+				fingerprint: "SHA256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+				source: "probe",
+			}],
+		}])[0];
+		assert.equal(changed.revision, 2);
+		assert.throws(
+			() => store.update(created.alias, { description: "stale" }, { expectedRevision: created.revision }),
+			(error) => error.code === "SSH_HOST_REVISION_CONFLICT",
+		);
+		const persisted = JSON.parse(readFileSync(file, "utf8"));
+		assert.equal(persisted.version, 1);
+		assert.equal(persisted.hosts[0].hostKey, persisted.hosts[0].hostKeys[0].fingerprint);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("HostStore cross-process CAS prevents stale instances from overwriting newer pins", () => {
+	const dir = mkdtempSync(join(tmpdir(), "node-sched-host-cas-"));
+	const file = join(dir, "hosts.json");
+	try {
+		const first = new HostStore(file);
+		const stale = new HostStore(file);
+		first.create(host());
+		assert.throws(
+			() => stale.create({ ...host(), alias: "other" }),
+			(error) => error.code === "SSH_HOST_STORE_CONFLICT" && error.status === 409,
+		);
+		assert.equal(stale.find("hpdc").alias, "hpdc");
+		stale.create({ ...host(), alias: "other" });
+		assert.deepEqual(
+			new HostStore(file).list().map((entry) => entry.alias),
+			["hpdc", "other"],
+		);
+		assert.equal(fs.existsSync(`${file}.lock`), false);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("SshEngine refreshes external host-store generations before listing or connecting", (t) => {
+	const dir = mkdtempSync(join(tmpdir(), "node-sched-host-refresh-"));
+	const file = join(dir, "hosts.json");
+	try {
+		const writer = new HostStore(file);
+		const reader = new HostStore(file);
+		const engine = new SshEngine(reader, { idleTimeoutMs: 60_000 });
+		t.after(() => engine.dispose());
+		assert.deepEqual(engine.list(), []);
+		writer.create(host());
+		assert.equal(engine.list()[0].alias, "hpdc");
+		assert.equal(reader.revision(), 1);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
 });
 
 test("HostStore fails closed on corrupt or overly broad credential files", () => {

@@ -16,6 +16,7 @@ import fs, {
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { Client } from "ssh2";
 
 const INDEX = "../lib/index.js";
 const SSH_ENGINE = "../lib/ssh-engine.js";
@@ -28,9 +29,11 @@ async function exported(modulePath, name) {
 }
 
 function responseRecorder() {
-	return {
+	return Object.assign(new EventEmitter(), {
 		status: undefined,
 		headers: undefined,
+		writableEnded: false,
+		destroyed: false,
 		body: "",
 		writeHead(status, headers) {
 			this.status = status;
@@ -38,8 +41,9 @@ function responseRecorder() {
 		},
 		end(body = "") {
 			this.body += String(body);
+			this.writableEnded = true;
 		},
-	};
+	});
 }
 
 class FakeChild extends EventEmitter {
@@ -69,7 +73,7 @@ function requestFor(url, {
 	const headers = { host: "127.0.0.1:3000" };
 	if (origin !== undefined) headers.origin = origin;
 	if (authorization !== undefined) headers.authorization = authorization;
-	return {
+	return Object.assign(new EventEmitter(), {
 		method,
 		url,
 		headers,
@@ -77,7 +81,7 @@ function requestFor(url, {
 		async *[Symbol.asyncIterator]() {
 			if (body !== undefined) yield Buffer.from(JSON.stringify(body));
 		},
-	};
+	});
 }
 
 function statusFixture(document = {}) {
@@ -122,6 +126,16 @@ function jobStatus(batch, task, { status = "failed", version = 1 } = {}) {
 		status,
 		wait_reason: null,
 	};
+}
+
+function sshPublicKeyBlob(keyType, value) {
+	const field = (text) => {
+		const bytes = Buffer.from(text);
+		const length = Buffer.alloc(4);
+		length.writeUInt32BE(bytes.length);
+		return Buffer.concat([length, bytes]);
+	};
+	return Buffer.concat([field(keyType), field(value)]);
 }
 
 
@@ -1708,6 +1722,7 @@ test("D-H02 mutation guard requires same-origin POST for every mutation route", 
 		"/sched/api/op",
 		"/sched/ssh/hosts",
 		"/sched/ssh/import",
+		"/sched/ssh/host-key",
 		"/sched/ssh/test",
 		"/sched/ssh/exec",
 		"/sched/ssh/bind",
@@ -1751,6 +1766,7 @@ test("D-H02 mutation-only HTTP routes enforce the shared POST and Origin guard",
 			"/sched/api/submit",
 			"/sched/api/op",
 			"/sched/ssh/import",
+			"/sched/ssh/host-key",
 			"/sched/ssh/test",
 			"/sched/ssh/exec",
 			"/sched/ssh/bind",
@@ -1803,6 +1819,298 @@ test("D-H02 mutation-only HTTP routes enforce the shared POST and Origin guard",
 		assert.notEqual(postHost.status, 403);
 		assert.notEqual(postHost.status, 405);
 	});
+});
+
+test("SSH config import reuses a safe known_hosts pin without a live credentialed connection", async () => {
+	const blob = sshPublicKeyBlob("ssh-ed25519", "known-hosts-integration");
+	await withBackendRoutes(
+		{ batches: [], jobs: [], gpus: [] },
+		async ({ request, home }) => {
+			const imported = await request("/sched/ssh/import", {
+				method: "POST",
+				origin: "http://127.0.0.1:3000",
+				body: {},
+			});
+			assert.equal(imported.status, 200);
+			assert.equal(imported.body.result.added, 1);
+			assert.equal(imported.body.result.pinned, 1);
+			assert.equal(imported.body.result.pending, 0);
+
+			const listed = await request("/sched/ssh/hosts");
+			assert.equal(listed.body.hosts.length, 1);
+			assert.equal(listed.body.hosts[0].hostKeyReady, true);
+			assert.equal(listed.body.hosts[0].hostKeys[0].source, "known_hosts");
+			assert.ok(Number.isInteger(listed.body.hosts[0].revision));
+
+			const prepared = await request("/sched/ssh/host-key", {
+				method: "POST",
+				origin: "http://127.0.0.1:3000",
+				body: {
+					action: "prepare",
+					targetAlias: "compute",
+					expectedHostRevision: listed.body.hosts[0].revision,
+				},
+			});
+			assert.equal(prepared.body.ok, true);
+			assert.equal(prepared.body.state, "already_trusted");
+
+			writeFileSync(
+				path.join(home, ".ssh", "known_hosts"),
+				`@revoked compute.example ssh-ed25519 ${blob.toString("base64")}\n`,
+				{ mode: 0o600 },
+			);
+			const revoked = await request("/sched/ssh/host-key", {
+				method: "POST",
+				origin: "http://127.0.0.1:3000",
+				body: {
+					action: "prepare",
+					targetAlias: "compute",
+					expectedHostRevision: listed.body.hosts[0].revision,
+				},
+			});
+			assert.equal(revoked.status, 409);
+			assert.equal(revoked.body.code, "SSH_HOST_KEY_REVOKED");
+		},
+		{
+			beforeApply({ home }) {
+				const sshDirectory = path.join(home, ".ssh");
+				mkdirSync(sshDirectory, { mode: 0o700 });
+				writeFileSync(path.join(sshDirectory, "config"), [
+					"Host compute",
+					"  HostName compute.example",
+					"  User runner",
+					"  IdentityFile ~/.ssh/id_test",
+					"",
+				].join("\n"), { mode: 0o600 });
+				writeFileSync(
+					path.join(sshDirectory, "known_hosts"),
+					`compute.example ssh-ed25519 ${blob.toString("base64")}\n`,
+					{ mode: 0o600 },
+				);
+			},
+		},
+	);
+});
+
+test("first TOFU probe refuses a host key marked @revoked in known_hosts", async (t) => {
+	const observedKey = sshPublicKeyBlob("ssh-ed25519", "revoked-first-tofu-key");
+	const originalConnect = Client.prototype.connect;
+	const originalDestroy = Client.prototype.destroy;
+	Client.prototype.connect = function connect(config) {
+		queueMicrotask(() => config.hostVerifier(observedKey));
+		return this;
+	};
+	Client.prototype.destroy = function destroy() {
+		queueMicrotask(() => this.emit("close"));
+		return this;
+	};
+	t.after(() => {
+		Client.prototype.connect = originalConnect;
+		Client.prototype.destroy = originalDestroy;
+	});
+
+	await withBackendRoutes(
+		{ batches: [], jobs: [], gpus: [] },
+		async ({ request }) => {
+			const imported = await request("/sched/ssh/import", {
+				method: "POST",
+				origin: "http://127.0.0.1:3000",
+				body: {},
+			});
+			assert.equal(imported.status, 200);
+			assert.equal(imported.body.result.pinned, 0);
+			assert.equal(imported.body.result.pending, 1);
+
+			const listed = await request("/sched/ssh/hosts");
+			const target = listed.body.hosts.find((host) => host.alias === "compute");
+			const prepared = await request("/sched/ssh/host-key", {
+				method: "POST",
+				origin: "http://127.0.0.1:3000",
+				body: {
+					action: "prepare",
+					targetAlias: "compute",
+					expectedHostRevision: target.revision,
+				},
+			});
+			assert.equal(prepared.status, 409);
+			assert.equal(prepared.body.code, "SSH_HOST_KEY_REVOKED");
+			assert.equal(prepared.body.state, undefined);
+		},
+		{
+			beforeApply({ home }) {
+				const sshDirectory = path.join(home, ".ssh");
+				mkdirSync(sshDirectory, { mode: 0o700 });
+				writeFileSync(path.join(sshDirectory, "config"), [
+					"Host compute",
+					"  HostName compute.example",
+					"  User runner",
+					"",
+				].join("\n"), { mode: 0o600 });
+				writeFileSync(
+					path.join(sshDirectory, "known_hosts"),
+					`@revoked compute.example ssh-ed25519 ${observedKey.toString("base64")}\n`,
+					{ mode: 0o600 },
+				);
+			},
+		},
+	);
+});
+
+test("host-key rotation refuses a newly observed key marked @revoked in known_hosts", async (t) => {
+	const trustedKey = sshPublicKeyBlob("ssh-ed25519", "trusted-before-rotation");
+	const observedKey = sshPublicKeyBlob("ssh-ed25519", "revoked-rotation-key");
+	const originalConnect = Client.prototype.connect;
+	const originalDestroy = Client.prototype.destroy;
+	Client.prototype.connect = function connect(config) {
+		queueMicrotask(() => config.hostVerifier(observedKey));
+		return this;
+	};
+	Client.prototype.destroy = function destroy() {
+		queueMicrotask(() => this.emit("close"));
+		return this;
+	};
+	t.after(() => {
+		Client.prototype.connect = originalConnect;
+		Client.prototype.destroy = originalDestroy;
+	});
+
+	await withBackendRoutes(
+		{ batches: [], jobs: [], gpus: [] },
+		async ({ request }) => {
+			const imported = await request("/sched/ssh/import", {
+				method: "POST",
+				origin: "http://127.0.0.1:3000",
+				body: {},
+			});
+			assert.equal(imported.status, 200);
+			assert.equal(imported.body.result.pinned, 1);
+
+			const listed = await request("/sched/ssh/hosts");
+			const target = listed.body.hosts.find((host) => host.alias === "compute");
+			const prepared = await request("/sched/ssh/host-key", {
+				method: "POST",
+				origin: "http://127.0.0.1:3000",
+				body: {
+					action: "prepare",
+					mode: "rotate",
+					targetAlias: "compute",
+					hostAlias: "compute",
+					expectedHostRevision: target.revision,
+				},
+			});
+			assert.equal(prepared.status, 409);
+			assert.equal(prepared.body.code, "SSH_HOST_KEY_REVOKED");
+			assert.equal(prepared.body.state, undefined);
+		},
+		{
+			beforeApply({ home }) {
+				const sshDirectory = path.join(home, ".ssh");
+				mkdirSync(sshDirectory, { mode: 0o700 });
+				writeFileSync(path.join(sshDirectory, "config"), [
+					"Host compute",
+					"  HostName compute.example",
+					"  User runner",
+					"",
+				].join("\n"), { mode: 0o600 });
+				writeFileSync(
+					path.join(sshDirectory, "known_hosts"),
+					[
+						`compute.example ssh-ed25519 ${trustedKey.toString("base64")}`,
+						`@revoked compute.example ssh-ed25519 ${observedKey.toString("base64")}`,
+						"",
+					].join("\n"),
+					{ mode: 0o600 },
+				);
+			},
+		},
+	);
+});
+
+test("partial known_hosts reuse returns the refreshed target revision for the remaining TOFU hop", async (t) => {
+	const originalConnect = Client.prototype.connect;
+	const originalDestroy = Client.prototype.destroy;
+	Client.prototype.connect = function connect(config) {
+		queueMicrotask(() => config.hostVerifier(sshPublicKeyBlob("ssh-ed25519", "observed-jump-key")));
+		return this;
+	};
+	Client.prototype.destroy = function destroy() {
+		queueMicrotask(() => this.emit("close"));
+		return this;
+	};
+	t.after(() => {
+		Client.prototype.connect = originalConnect;
+		Client.prototype.destroy = originalDestroy;
+	});
+
+	await withBackendRoutes(
+		{ batches: [], jobs: [], gpus: [] },
+		async ({ request }) => {
+			const imported = await request("/sched/ssh/import", {
+				method: "POST",
+				origin: "http://127.0.0.1:3000",
+				body: {},
+			});
+			assert.equal(imported.status, 200);
+			assert.equal(imported.body.result.pinned, 1);
+			assert.equal(imported.body.result.pending, 1);
+
+			const listed = await request("/sched/ssh/hosts");
+			const target = listed.body.hosts.find((host) => host.alias === "compute");
+			assert.equal(target.revision, 2);
+			const prepared = await request("/sched/ssh/host-key", {
+				method: "POST",
+				origin: "http://127.0.0.1:3000",
+				body: {
+					action: "prepare",
+					targetAlias: "compute",
+					expectedHostRevision: target.revision,
+				},
+			});
+			assert.equal(prepared.status, 200);
+			assert.equal(prepared.body.state, "confirmation_required");
+			assert.equal(prepared.body.challenge.target.alias, "jump");
+			assert.equal(prepared.body.challenge.targetRevision, 2);
+
+			const confirmed = await request("/sched/ssh/host-key", {
+				method: "POST",
+				origin: "http://127.0.0.1:3000",
+				body: {
+					action: "confirm",
+					targetAlias: "compute",
+					hostAlias: "jump",
+					challengeId: prepared.body.challenge.id,
+					fingerprint: prepared.body.challenge.observed.fingerprint,
+					expectedHostRevision: prepared.body.challenge.targetRevision,
+				},
+			});
+			assert.equal(confirmed.status, 200);
+			assert.equal(confirmed.body.state, "trusted");
+		},
+		{
+			beforeApply({ home }) {
+				const sshDirectory = path.join(home, ".ssh");
+				mkdirSync(sshDirectory, { mode: 0o700 });
+				writeFileSync(path.join(sshDirectory, "config"), [
+					"Host jump",
+					"  HostName jump.invalid",
+					"  User runner",
+					"  IdentityFile ~/.ssh/id_test",
+					"Host compute",
+					"  HostName compute.example",
+					"  User runner",
+					"  IdentityFile ~/.ssh/id_test",
+					"  ProxyJump jump",
+					"",
+				].join("\n"), { mode: 0o600 });
+				const blob = sshPublicKeyBlob("ssh-ed25519", "known-target-key");
+				writeFileSync(
+					path.join(sshDirectory, "known_hosts"),
+					`compute.example ssh-ed25519 ${blob.toString("base64")}\n`,
+					{ mode: 0o600 },
+				);
+			},
+		},
+	);
 });
 
 test("D-H03 remote inbox writes enforce umask 077, directory 0700, and file 0600", async () => {

@@ -8134,6 +8134,10 @@ function apply(cctx, config) {
     const [msg, setMsg] = useState("");
     const [confirmAlias, setConfirmAlias] = useState(null);
     const [pinDraft, setPinDraft] = useState(null);
+    const [trustDraft, setTrustDraft] = useState(null);
+    const trustAbortRef = useRef(null);
+    const trustEpochRef = useRef(0);
+    const trustCommitRef = useRef(false);
     const [termAlias, setTermAlias] = useState(null);
     const [binding, setBinding] = useState(null);
     const load = useCallback(async () => {
@@ -8142,15 +8146,22 @@ function apply(cctx, config) {
           authFetch("/sched/ssh/hosts").then((r) => r.json()),
           authFetch("/sched/ssh/binding").then((r) => r.json())
         ]);
-        setHosts(h.hosts ?? []);
+        const nextHosts = h.hosts ?? [];
+        setHosts(nextHosts);
         setBinding(b);
+        return { hosts: nextHosts, binding: b };
       } catch {
         setHosts([]);
+        return { hosts: [], binding: null };
       }
     }, []);
     useEffect(() => {
       load();
     }, [load]);
+    useEffect(() => () => {
+      trustEpochRef.current += 1;
+      trustAbortRef.current?.abort();
+    }, []);
     const doBind = async (alias) => {
       setBusy("bind:" + alias);
       try {
@@ -8178,7 +8189,7 @@ function apply(cctx, config) {
       setBusy("import");
       try {
         const r = await authFetch("/sched/ssh/import", { method: "POST" }).then((r2) => r2.json());
-        setMsg(r.result ? `\u5BFC\u5165\u5B8C\u6210: \u89E3\u6790 ${r.result.parsed} / \u65B0\u589E ${r.result.added} / \u8DF3\u8FC7 ${r.result.skipped}` : `\u5931\u8D25: ${r.error}`);
+        setMsg(r.result ? `\u5BFC\u5165\u5B8C\u6210: \u89E3\u6790 ${r.result.parsed} / \u65B0\u589E ${r.result.added} / \u81EA\u52A8\u4FE1\u4EFB ${r.result.pinned ?? 0} / \u5F85\u786E\u8BA4 ${r.result.pending ?? 0} / \u51B2\u7A81 ${(r.result.conflicts ?? []).length}` : `\u5931\u8D25: ${r.error}`);
         await load();
       } catch (e) {
         setMsg("\u5931\u8D25: " + e.message);
@@ -8195,13 +8206,150 @@ function apply(cctx, config) {
       }
       setBusy("");
     };
+    const testAfterTrust = async (alias) => {
+      try {
+        const result = await authFetch("/sched/ssh/test", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ alias })
+        }).then((response) => response.json());
+        setMsg(result.ok ? `\u2705 ${alias} \u5DF2\u5EFA\u7ACB\u4FE1\u4EFB\u5E76\u901A\u8FC7 SSH \u6D4B\u8BD5 (${result.latencyMs}ms)` : `\u2705 ${alias} \u7684\u670D\u52A1\u5668\u8EAB\u4EFD\u5DF2\u4FE1\u4EFB\uFF1B\u4F46\u7528\u6237\u8BA4\u8BC1\u6216\u8FDE\u901A\u6027\u6D4B\u8BD5\u5931\u8D25 \u2014 ${result.error ?? "unreachable"}`);
+      } catch (error) {
+        setMsg(`\u2705 ${alias} \u7684\u670D\u52A1\u5668\u8EAB\u4EFD\u5DF2\u4FE1\u4EFB\uFF1B\u4F46\u7528\u6237\u8BA4\u8BC1\u6216\u8FDE\u901A\u6027\u6D4B\u8BD5\u5931\u8D25 \u2014 ${error.message}`);
+      }
+    };
+    const cancelTrust = async () => {
+      if (trustCommitRef.current) return;
+      const current = trustDraft;
+      trustEpochRef.current += 1;
+      trustAbortRef.current?.abort();
+      trustAbortRef.current = null;
+      setTrustDraft(null);
+      setBusy("trust-cancel");
+      setMsg("\u5DF2\u53D6\u6D88\u4E3B\u673A\u4FE1\u4EFB\u64CD\u4F5C\uFF1B\u672A\u786E\u8BA4\u7684\u6307\u7EB9\u4E0D\u4F1A\u4FDD\u5B58");
+      if (current?.targetAlias) {
+        try {
+          await authFetch("/sched/ssh/host-key", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              action: "cancel",
+              targetAlias: current.targetAlias,
+              challengeId: current.challenge?.id
+            })
+          });
+        } catch {
+        }
+      }
+      setBusy("");
+    };
+    const prepareTrust = async (targetAlias, options = {}) => {
+      trustAbortRef.current?.abort();
+      const controller = new AbortController();
+      trustAbortRef.current = controller;
+      const epoch = ++trustEpochRef.current;
+      const host = (hosts ?? []).find((candidate) => candidate.alias === targetAlias);
+      setTrustDraft({ phase: "probing", targetAlias, mode: options.mode ?? "initial" });
+      setBusy("trust:" + targetAlias);
+      setMsg(options.mode === "rotate" ? `\u6B63\u5728\u91CD\u65B0\u63A2\u6D4B ${options.hostAlias ?? targetAlias} \u7684\u670D\u52A1\u5668\u8EAB\u4EFD\u2026` : `\u6B63\u5728\u68C0\u67E5\u672C\u673A known_hosts\uFF1B\u5982\u65E0\u8BB0\u5F55\uFF0C\u5C06\u5B89\u5168\u63A2\u6D4B ${targetAlias}\u2026`);
+      try {
+        const response = await authFetch("/sched/ssh/host-key", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          signal: controller.signal,
+          body: JSON.stringify({
+            action: "prepare",
+            targetAlias,
+            expectedHostRevision: options.expectedHostRevision ?? host?.revision,
+            mode: options.mode ?? "initial",
+            hostAlias: options.hostAlias
+          })
+        });
+        const result = await response.json().catch(() => ({}));
+        if (epoch !== trustEpochRef.current) return;
+        if (!response.ok || result.ok !== true) {
+          throw new Error(result.error ?? `HTTP ${response.status}`);
+        }
+        if (["trusted_from_known_hosts", "already_trusted", "trusted"].includes(result.state)) {
+          setTrustDraft(null);
+          await load();
+          await testAfterTrust(targetAlias);
+          return;
+        }
+        if (result.state !== "confirmation_required" || !result.challenge) {
+          throw new Error("\u670D\u52A1\u5668\u8FD4\u56DE\u4E86\u672A\u77E5\u7684\u4E3B\u673A\u4FE1\u4EFB\u72B6\u6001");
+        }
+        setTrustDraft({
+          phase: "confirm",
+          targetAlias,
+          mode: options.mode ?? "initial",
+          challenge: result.challenge
+        });
+        setMsg((result.warnings ?? []).length > 0 ? `known_hosts \u5B58\u5728\u4E0D\u53EF\u5B89\u5168\u590D\u7528\u7684\u8BB0\u5F55\uFF1B\u8BF7\u4EBA\u5DE5\u6838\u5BF9 ${result.challenge.target.alias} \u7684\u670D\u52A1\u5668\u6307\u7EB9` : `\u8BF7\u6838\u5BF9 ${result.challenge.target.alias} \u7684\u670D\u52A1\u5668\u6307\u7EB9`);
+      } catch (error) {
+        if (epoch !== trustEpochRef.current || error?.name === "AbortError") return;
+        setTrustDraft(null);
+        setMsg("\u5EFA\u7ACB\u4FE1\u4EFB\u5931\u8D25: " + error.message);
+      } finally {
+        if (epoch === trustEpochRef.current) {
+          setBusy("");
+          trustAbortRef.current = null;
+        }
+      }
+    };
+    const confirmTrust = async () => {
+      const current = trustDraft;
+      if (current?.phase !== "confirm" || trustCommitRef.current) return;
+      trustCommitRef.current = true;
+      const epoch = ++trustEpochRef.current;
+      setBusy("trust-confirm:" + current.targetAlias);
+      try {
+        const response = await authFetch("/sched/ssh/host-key", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            action: "confirm",
+            targetAlias: current.targetAlias,
+            hostAlias: current.challenge.target.alias,
+            challengeId: current.challenge.id,
+            fingerprint: current.challenge.observed.fingerprint,
+            expectedHostRevision: current.challenge.targetRevision
+          })
+        });
+        const result = await response.json().catch(() => ({}));
+        if (epoch !== trustEpochRef.current) return;
+        if (!response.ok || result.ok !== true) {
+          throw new Error(result.error ?? `HTTP ${response.status}`);
+        }
+        setTrustDraft(null);
+        const loaded = await load();
+        if (result.state === "next_required") {
+          setMsg(`${current.challenge.target.alias} \u5DF2\u4FE1\u4EFB\uFF0C\u7EE7\u7EED\u5904\u7406\u4E0B\u4E00\u6BB5 SSH \u8DEF\u5F84\u2026`);
+          const refreshedTarget = loaded.hosts.find((candidate) => candidate.alias === current.targetAlias);
+          await prepareTrust(current.targetAlias, { expectedHostRevision: refreshedTarget?.revision });
+          return;
+        }
+        await testAfterTrust(current.targetAlias);
+      } catch (error) {
+        if (epoch !== trustEpochRef.current) return;
+        setTrustDraft(null);
+        setMsg("\u786E\u8BA4\u4E3B\u673A\u4FE1\u4EFB\u5931\u8D25\uFF0C\u8BF7\u91CD\u65B0\u5EFA\u7ACB\u4FE1\u4EFB: " + error.message);
+      } finally {
+        trustCommitRef.current = false;
+        if (epoch === trustEpochRef.current) setBusy("");
+      }
+    };
     const doDelete = async (alias) => {
       setBusy("del:" + alias);
       try {
         const response = await authFetch("/sched/ssh/hosts", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ action: "delete", alias })
+          body: JSON.stringify({
+            action: "delete",
+            alias,
+            expectedHostRevision: (hosts ?? []).find((host) => host.alias === alias)?.revision
+          })
         });
         const result = await response.json().catch(() => ({}));
         if (!response.ok || result.removed === false) {
@@ -8231,6 +8379,7 @@ function apply(cctx, config) {
           body: JSON.stringify({
             action: "update",
             alias: pinDraft.alias,
+            expectedHostRevision: (hosts ?? []).find((host) => host.alias === pinDraft.alias)?.revision,
             patch: { hostKey }
           })
         });
@@ -8285,6 +8434,48 @@ function apply(cctx, config) {
         { style: { color: T.label2, fontSize: 13 } },
         "\u6682\u65E0\u4E3B\u673A \u2014\u2014 \u70B9\u4E0A\u65B9\u300C\u4ECE ~/.ssh/config \u5BFC\u5165\u300D\u4E00\u952E\u5BFC\u5165"
       ),
+      trustDraft && jsxs2("div", {
+        style: { display: "flex", flexDirection: "column", gap: 8, padding: "10px 12px", border: `1px solid ${T.warn}`, borderRadius: 10, background: `color-mix(in srgb, ${T.warn} 7%, transparent)` }
+      }, trustDraft.phase === "probing" ? [
+        j("div", { key: "title", style: { fontWeight: 700 } }, `\u6B63\u5728\u4E3A ${trustDraft.targetAlias} \u5EFA\u7ACB\u670D\u52A1\u5668\u4FE1\u4EFB\u2026`),
+        j("div", { key: "detail", style: { color: T.label2, fontSize: 13 } }, "\u5148\u68C0\u67E5\u672C\u673A known_hosts\uFF1B\u5982\u679C\u6CA1\u6709\u8BB0\u5F55\uFF0C\u53EA\u8FDB\u884C SSH \u5BC6\u94A5\u4EA4\u6362\uFF0C\u4E0D\u5411\u5F85\u786E\u8BA4\u4E3B\u673A\u53D1\u9001\u7528\u6237\u51ED\u636E\u3002"),
+        j(
+          "div",
+          { key: "actions", style: { display: "flex", justifyContent: "flex-end" } },
+          j("button", { onClick: cancelTrust, style: ghostBtn }, "\u53D6\u6D88")
+        )
+      ] : [
+        j("div", { key: "title", style: { fontWeight: 700 } }, `\u786E\u8BA4 ${trustDraft.challenge.target.alias} \u7684\u670D\u52A1\u5668\u8EAB\u4EFD`),
+        j(
+          "div",
+          { key: "endpoint", style: { color: T.label2, fontSize: 13 } },
+          `${trustDraft.challenge.target.host}:${trustDraft.challenge.target.port} \xB7 ${trustDraft.challenge.observed.algorithm ?? "\u672A\u77E5\u7B97\u6CD5"}`
+        ),
+        trustDraft.mode === "rotate" && j(
+          "div",
+          { key: "old", style: { color: T.err, fontSize: 12, fontFamily: "monospace", overflowWrap: "anywhere" } },
+          `\u539F\u6307\u7EB9: ${(hosts ?? []).find((host) => host.alias === trustDraft.challenge.target.alias)?.hostKey ?? "\u672A\u8BB0\u5F55"}`
+        ),
+        j(
+          "div",
+          { key: "fingerprint", style: { padding: "8px 10px", borderRadius: 8, background: T.bgLayer, fontFamily: "monospace", fontSize: 13, overflowWrap: "anywhere" } },
+          trustDraft.challenge.observed.fingerprint
+        ),
+        j("div", { key: "safety", style: { color: T.ok, fontSize: 12 } }, "\u6B64\u6B21\u63A2\u6D4B\u672A\u5411\u8FD9\u53F0\u5F85\u786E\u8BA4\u4E3B\u673A\u53D1\u9001\u5BC6\u7801\u3001\u79C1\u94A5\u3001ssh-agent \u7B7E\u540D\u6216\u52A8\u6001\u9A8C\u8BC1\u7801\u3002\u9996\u6B21\u786E\u8BA4\u5C5E\u4E8E TOFU\uFF0C\u8BF7\u53EA\u5728\u4F60\u786E\u8BA4\u5F53\u524D\u7F51\u7EDC\u8DEF\u5F84\u53EF\u4FE1\u65F6\u7EE7\u7EED\u3002"),
+        jsxs2("div", { key: "actions", style: { display: "flex", gap: 8, justifyContent: "flex-end" } }, [
+          j("button", {
+            onClick: cancelTrust,
+            disabled: busy.startsWith("trust-confirm:"),
+            title: busy.startsWith("trust-confirm:") ? "\u4FDD\u5B58\u5DF2\u5F00\u59CB\uFF0C\u4E0D\u80FD\u518D\u64A4\u9500\u672C\u6B21\u786E\u8BA4" : "\u53D6\u6D88\u4E14\u4E0D\u4FDD\u5B58\u6307\u7EB9",
+            style: { ...ghostBtn, opacity: busy.startsWith("trust-confirm:") ? 0.5 : 1 }
+          }, "\u53D6\u6D88"),
+          j(
+            "button",
+            { onClick: confirmTrust, disabled: busy.startsWith("trust-confirm:"), style: btn(T.warn, busy.startsWith("trust-confirm:")) },
+            busy.startsWith("trust-confirm:") ? "\u4FDD\u5B58\u4E2D\u2026" : "\u786E\u8BA4\u5E76\u4FE1\u4EFB"
+          )
+        ])
+      ]),
       pinDraft && jsxs2("div", {
         style: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", padding: "8px 10px", border: `1px solid ${T.warn}`, borderRadius: 8 }
       }, [
@@ -8303,6 +8494,8 @@ function apply(cctx, config) {
       hosts !== null && jsxs2("div", { style: { display: "flex", flexDirection: "column", gap: 6 } }, [
         ...hosts.map((h) => {
           const boundHere = binding?.alias === h.alias;
+          const trustSource = h.hostKeys?.[0]?.source;
+          const trustReady = h.hostKeyReady && h.chainReady !== false;
           return jsxs2("div", {
             key: h.alias,
             style: {
@@ -8324,36 +8517,44 @@ function apply(cctx, config) {
               h.auth === "key" ? h.keyReady ? " \xB7 \u{1F511}" : " \xB7 \u26A0key\u7F3A\u5931" : h.auth === "agent" ? " \xB7 agent" : " \xB7 \u5BC6\u7801",
               h.proxyJump && h.proxyJump.length > 0 ? ` \xB7 via ${h.proxyJump.join(">")}` : "",
               h.description ? ` \xB7 ${h.description}` : "",
-              h.hostKeyReady ? " \xB7 host\u2713" : " \xB7 \u26A0host pin\u7F3A\u5931"
+              h.hostKeyReady ? ` \xB7 host\u2713${trustSource ? `(${trustSource})` : ""}` : " \xB7 \u26A0host pin\u7F3A\u5931",
+              h.chainReady === false ? " \xB7 \u26A0\u8DF3\u677F\u94FE\u672A\u4FE1\u4EFB" : ""
             ].join("")),
             // 右：操作区
             localMode || boundHere ? j("span", { key: "sb", style: { color: localMode ? T.brand : T.ok, fontWeight: 700, fontSize: 13, flexShrink: 0 } }, localMode ? "\u672C\u5730\u8FD0\u884C" : "\u2714 \u6570\u636E\u6E90") : j("button", {
               key: "bnd",
               onClick: () => doBind(h.alias),
-              disabled: !!busy || !h.hostKeyReady,
-              title: h.hostKeyReady ? "\u8BBE\u4E3A sched \u6570\u636E\u6E90\u4E3B\u673A\uFF08\u5F15\u64CE\u6A21\u5F0F\uFF09" : "\u5148\u8BBE\u7F6E host pin",
-              style: { ...ghostBtn, color: T.brand, borderColor: `color-mix(in srgb, ${T.brand} 45%, transparent)`, flexShrink: 0, opacity: h.hostKeyReady ? 1 : 0.5 }
+              disabled: !!busy || !trustReady,
+              title: trustReady ? "\u8BBE\u4E3A sched \u6570\u636E\u6E90\u4E3B\u673A\uFF08\u5F15\u64CE\u6A21\u5F0F\uFF09" : "\u5148\u5EFA\u7ACB\u76EE\u6807\u53CA\u5B8C\u6574 ProxyJump \u94FE\u7684\u4E3B\u673A\u4FE1\u4EFB",
+              style: { ...ghostBtn, color: T.brand, borderColor: `color-mix(in srgb, ${T.brand} 45%, transparent)`, flexShrink: 0, opacity: trustReady ? 1 : 0.5 }
             }, busy === "bind:" + h.alias ? "\u7ED1\u5B9A\u4E2D\u2026" : "\u8BBE\u4E3ASCHED"),
             j("button", {
-              key: "pin",
+              key: "trust",
+              onClick: () => prepareTrust(h.alias, trustReady ? { mode: "rotate", hostAlias: h.alias } : {}),
+              disabled: !!busy,
+              title: trustReady ? "\u65E0\u51ED\u636E\u91CD\u65B0\u63A2\u6D4B\u5E76\u663E\u5F0F\u786E\u8BA4\u670D\u52A1\u5668\u8EAB\u4EFD" : "\u4F18\u5148\u590D\u7528\u672C\u673A known_hosts\uFF0C\u5426\u5219\u65E0\u51ED\u636E\u9010\u6BB5\u63A2\u6D4B\u540E\u786E\u8BA4",
+              style: { ...ghostBtn, color: trustReady ? T.label2 : T.warn, flexShrink: 0 }
+            }, busy === "trust:" + h.alias ? "\u2026" : trustReady ? "\u91CD\u65B0\u786E\u8BA4" : "\u5EFA\u7ACB\u4FE1\u4EFB"),
+            j("button", {
+              key: "manual-pin",
               onClick: () => setPinDraft({ alias: h.alias, value: h.hostKey ?? "SHA256:" }),
               disabled: !!busy,
-              title: "\u56FA\u5B9A OpenSSH SHA256 host key \u6307\u7EB9\uFF1B\u672A\u56FA\u5B9A\u65F6\u62D2\u7EDD\u8FDE\u63A5",
-              style: { ...ghostBtn, color: h.hostKeyReady ? T.label2 : T.warn, flexShrink: 0 }
-            }, busy === "pin:" + h.alias ? "\u2026" : h.hostKeyReady ? "\u66F4\u65B0pin" : "\u8BBE\u7F6Epin"),
+              title: "\u9AD8\u7EA7\u8BBE\u7F6E\uFF1A\u624B\u52A8\u7C98\u8D34 OpenSSH SHA256 host key \u6307\u7EB9",
+              style: { ...ghostBtn, color: T.label2, flexShrink: 0 }
+            }, "\u624B\u52A8pin"),
             j("button", {
               key: "o",
               onClick: () => setTermAlias(h.alias),
-              disabled: !h.hostKeyReady,
-              title: h.hostKeyReady ? "\u6253\u5F00\u7F51\u9875\u7EC8\u7AEF" : "\u5148\u8BBE\u7F6E host pin",
-              style: { ...ghostBtn, flexShrink: 0, opacity: h.hostKeyReady ? 1 : 0.5 }
+              disabled: !trustReady,
+              title: trustReady ? "\u6253\u5F00\u7F51\u9875\u7EC8\u7AEF" : "\u5148\u5EFA\u7ACB\u76EE\u6807\u53CA\u5B8C\u6574 ProxyJump \u94FE\u7684\u4E3B\u673A\u4FE1\u4EFB",
+              style: { ...ghostBtn, flexShrink: 0, opacity: trustReady ? 1 : 0.5 }
             }, "\u7EC8\u7AEF"),
             confirmAlias === h.alias ? j("button", { key: "c", onClick: () => doDelete(h.alias), style: { ...btn(T.err), flexShrink: 0 } }, "\u786E\u8BA4\u5220\u9664") : j("button", {
               key: "t",
               onClick: () => doTest(h.alias),
-              disabled: !!busy || !h.hostKeyReady,
-              title: h.hostKeyReady ? "\u8FDE\u901A\u6027\u6D4B\u8BD5" : "\u5148\u8BBE\u7F6E host pin",
-              style: { ...ghostBtn, flexShrink: 0, opacity: h.hostKeyReady ? 1 : 0.5 }
+              disabled: !!busy || !trustReady,
+              title: trustReady ? "\u8FDE\u901A\u6027\u6D4B\u8BD5" : "\u5148\u5EFA\u7ACB\u76EE\u6807\u53CA\u5B8C\u6574 ProxyJump \u94FE\u7684\u4E3B\u673A\u4FE1\u4EFB",
+              style: { ...ghostBtn, flexShrink: 0, opacity: trustReady ? 1 : 0.5 }
             }, busy === "test:" + h.alias ? "\u2026" : "\u6D4B\u8BD5"),
             confirmAlias === h.alias ? j("button", { key: "x", onClick: () => setConfirmAlias(null), style: { ...ghostBtn, flexShrink: 0 } }, "\u53D6\u6D88") : j("button", { key: "d", onClick: () => setConfirmAlias(h.alias), disabled: !!busy, title: "\u5220\u9664\u8BE5\u4E3B\u673A\u914D\u7F6E", style: { ...ghostBtn, color: T.err, flexShrink: 0 } }, "\u5220")
           ]);

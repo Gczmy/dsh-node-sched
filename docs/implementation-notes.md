@@ -34,6 +34,32 @@
 | 远程 `sched: command not found` | 非交互 ssh 不加载 rc | 所有命令走 `schedBin` 配置（默认 `$HOME/bin/sched` 全路径），插件侧统一加前缀 |
 | WS tail 收不到日志 | 校外入口落在**网关**，远端 `hostname` 是网关名；state 目录按**计算节点**分区（`~/.sched/ambiorix/`），网关自己的同名目录是空的 | 从远程 `~/.sched/config.json` 读 `node` 字段解析目录名，绝不用 `hostname` |
 
+### SSH host key 信任（2026-09-01）
+
+- 浏览器设备信任、SSH 服务器身份、SSH 用户认证是三层独立契约。客户端 `.pub`
+  文件不能作为服务器 host pin。
+- 正常连接继续 fail-closed；`hostKey` 保留为旧版本主 pin，同时新增有来源的
+  `hostKeys[]` 精确集合。HostStore 顶层仍使用 version 1，避免部署回滚时旧代码拒绝
+  version 2；`revision` 是兼容附加字段。
+- `known_hosts` 只读且安全有界：owned regular、单硬链、非 group/other writable、
+  `O_NOFOLLOW`、open 前后 inode/size 复核。支持 `|1|` hashed host；`@revoked`
+  fail-closed，`@cert-authority` 不可误当具体服务器 key。
+- 首次探测必须使用独立 config，绝不能先调用正常 `buildConnectConfig()`：待确认节点
+  只收到 KEX，配置不含 password/privateKey/passphrase/agent/kbdint，并以
+  `authHandler: () => false` 做第二层阻断。ProxyJump 只有已固定的前序 hop 可以使用凭据。
+- 探测结果不是自动身份认证，而是 TOFU 候选。落盘前必须经过短 TTL、单次使用、
+  浏览器 principal、目标 alias、完整 route digest 和指纹全部匹配的确认。
+- 每个浏览器只允许一个当前探测 generation；新探测/显式取消会终止旧 controller，旧请求
+  即使迟到也不能发布 challenge。探测另有每 principal 速率和全局/单 principal in-flight 上限。
+- 取消既 abort 网络请求，也撤销 challenge；UI 用 epoch 丢弃迟到响应，不能只关闭弹层。
+  用户点击“确认并信任”后开始同步耐久提交，此时取消按钮禁用，避免虚假撤销语义。
+- known_hosts 可能只覆盖链中一部分；challenge 返回刷新后的 target revision，确认阶段同时
+  校验完整 route digest。`@revoked` 只在其指纹与当前 pin 精确相交时硬拒绝，历史已撤销的
+  其他 key 不会错误封禁同一 hostname 的新 key。
+- HostStore 写入使用跨进程私有锁，锁内安全 reload 并比较完整旧文档；冲突时刷新内存并拒绝
+  覆盖。SSH 路由使用前刷新外部 generation 并清理连接池。ProxyJump 契约保持显式扁平链；
+  hop 自身再配置 ProxyJump 会 fail-closed，不能静默绕过中间节点。
+
 ### sched CLI 事实核实（ambiorix 实测）
 
 - `list-gpus` **不支持** `--json`（文本输出）

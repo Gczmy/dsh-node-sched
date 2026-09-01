@@ -480,3 +480,26 @@ test("UI validates local bearer tokens and OpenSSH SHA256 host pins", async () =
 	assert.equal(validHostKey(`SHA256:${"A".repeat(43)}`), true);
 	assert.equal(validHostKey(`SHA256:${"A".repeat(42)}=`), false);
 });
+
+test("SSH host trust UI reuses known_hosts, supports zero-credential confirmation, and truly cancels", async () => {
+	const source = await readFile(new URL("../src/client.jsx", import.meta.url), "utf8");
+	const start = source.indexOf("\tfunction SshTab()");
+	const end = source.indexOf("\n\tfunction SshTerminal", start);
+	const sshTab = source.slice(start, end);
+	assert.ok(start >= 0 && end > start);
+	assert.match(sshTab, /authFetch\("\/sched\/ssh\/host-key"/);
+	assert.match(sshTab, /action:\s*"prepare"/);
+	assert.match(sshTab, /action:\s*"confirm"/);
+	assert.match(sshTab, /action:\s*"cancel"/);
+	assert.match(sshTab, /new AbortController\(\)/);
+	assert.match(sshTab, /trustAbortRef\.current\?\.abort\(\)/);
+	assert.match(sshTab, /trustEpochRef\.current \+= 1/);
+	assert.match(sshTab, /trustCommitRef\.current/);
+	assert.match(sshTab, /expectedHostRevision:\s*current\.challenge\.targetRevision/);
+	assert.match(sshTab, /targetAlias:\s*current\.targetAlias/);
+	assert.match(sshTab, /known_hosts/);
+	assert.match(sshTab, /未向这台待确认主机发送密码、私钥、ssh-agent 签名或动态验证码/);
+	assert.match(sshTab, /确认并信任/);
+	assert.match(sshTab, /保存已开始，不能再撤销本次确认/);
+	assert.match(sshTab, /服务器身份已信任；但用户认证或连通性测试失败/);
+});
