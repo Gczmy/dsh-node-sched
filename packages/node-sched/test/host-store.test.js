@@ -175,6 +175,36 @@ test("SshEngine refreshes external host-store generations before listing or conn
 	}
 });
 
+test("cached exec and standalone streams reject aliases removed by another host-store writer", async (t) => {
+	const { openExecStream } = await import("../lib/ssh-engine.js");
+	const dir = mkdtempSync(join(tmpdir(), "node-sched-host-cache-refresh-"));
+	t.after(() => rmSync(dir, { recursive: true, force: true }));
+	const file = join(dir, "hosts.json");
+	const writer = new HostStore(file);
+	writer.create(host());
+	const reader = new HostStore(file);
+	const engine = new SshEngine(reader);
+	t.after(() => engine.dispose());
+	let executions = 0;
+	let ended = 0;
+	const cached = { client: { exec() { executions += 1; }, end() { ended += 1; } },
+		hops: [], idleAt: Date.now(), inFlight: 0, broken: false, disposed: false, closed: false };
+	engine.pool.set("hpdc", cached);
+	writer.remove("hpdc");
+	await assert.rejects(engine.execOnce("hpdc", "touch output", 50), /not found/);
+	assert.equal(executions, 0);
+	assert.equal(ended, 1);
+	assert.equal(engine.pool.has("hpdc"), false);
+	writer.create(host());
+	engine.list();
+	writer.remove("hpdc");
+	await assert.rejects(openExecStream(engine, "hpdc", "tail -f output"), /not found/);
+	writer.create(host());
+	engine.list();
+	writer.remove("hpdc");
+	await assert.rejects(engine.openShell("hpdc", { cols: 80, rows: 24 }), /not found/);
+});
+
 test("HostStore fails closed on corrupt or overly broad credential files", () => {
 	const dir = mkdtempSync(join(tmpdir(), "node-sched-host-hardening-"));
 	const file = join(dir, "hosts.json");

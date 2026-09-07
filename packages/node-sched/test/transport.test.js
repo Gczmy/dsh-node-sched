@@ -1,6 +1,51 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import cp from "node:child_process";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import { LocalTransport } from "../lib/transport.js";
+
+test("LocalTransport bounds output buffered before a stream consumer attaches", async () => {
+	const transport = new LocalTransport({ maxOutputBytes: 4 });
+	try {
+		const stream = await transport.openStream("printf 123456789");
+		await new Promise((resolve) => { stream.onClose = resolve; });
+		let output = "";
+		stream.onData = (chunk) => { output += chunk.toString(); };
+		assert.equal(output, "1234\n…[truncated 5 bytes]");
+	} finally { transport.dispose(); }
+});
+
+test("LocalTransport never signals an exited leader while output pipes remain open", async (t) => {
+	const spawn = cp.spawn;
+	const kill = process.kill;
+	const signals = [];
+	t.after(() => { cp.spawn = spawn; process.kill = kill; });
+	process.kill = (...args) => { signals.push(args); };
+	cp.spawn = () => {
+		const child = new EventEmitter();
+		child.pid = 424242;
+		child.stdout = new PassThrough();
+		child.stderr = new PassThrough();
+		child.stdin = new PassThrough();
+		child.kill = (...args) => signals.push(args);
+		queueMicrotask(() => child.emit("exit", 0));
+		return child;
+	};
+	const transport = new LocalTransport({ timeoutMs: 10 });
+	try {
+		const result = await transport.exec("background-child");
+		assert.equal(result.timedOut, true);
+		const pending = transport.exec("background-child", { timeoutMs: 60_000 });
+		await Promise.resolve();
+		transport.dispose();
+		assert.equal((await pending).error, "local transport disposed");
+		const stream = await transport.openStream("background-child");
+		stream.close();
+		transport.dispose();
+		assert.deepEqual(signals, []);
+	} finally { transport.dispose(); }
+});
 
 test("LocalTransport executes commands and stdin locally", async () => {
 	const transport = new LocalTransport({ maxOutputBytes: 1024 });

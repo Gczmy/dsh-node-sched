@@ -1261,6 +1261,20 @@ test("mutation preparation runs after attestation and preflight on the writer", 
 	]);
 });
 
+test("ambiguous SSH exits retain uploaded mutation payloads for exact replay", async () => {
+	const verifyAndExecuteMutation = await exported(INDEX, "verifyAndExecuteMutation");
+	for (const code of [-1, 75, 137, 255, 0]) {
+		let cleaned = false;
+		await verifyAndExecuteMutation({
+			configuredWriter: { mode: "engine", alias: "writer", expectedNode: "compute-01", schedBin: "/opt/sched" },
+			executeRead: async () => ({ ok: true, stdout: 'compute-01\n{"node":"compute-01"}\n' }),
+			prepare: async () => ({ command: "/opt/sched submit '/tmp/batch.json'", cleanup: async () => { cleaned = true; } }),
+			executeMutation: async () => ({ ok: false, code }),
+		});
+		assert.equal(cleaned, false, `exit ${code} must keep the payload`);
+	}
+});
+
 test("X-H05 writer identity is attested immediately before every mutation", async () => {
 	const verifyAndExecuteMutation = await exported(INDEX, "verifyAndExecuteMutation");
 	const configuredWriter = {
@@ -1460,6 +1474,37 @@ test("scheduler mutation route forwards durable id and exact source precondition
 			true,
 		);
 	});
+});
+
+test("mutation replay reaches the durable receipt even after the original operation changed state", async () => {
+	const batch = batchStatus("batch-a", "batch", { status: "active", revision: 8 });
+	await withBackendRoutes({ batches: [batch], jobs: [], gpus: [] }, async ({ request, state }) => {
+		state.commands.length = 0;
+		const result = await request("/sched/api/op", {
+			method: "POST", origin: "http://127.0.0.1:3000",
+			body: { op: "retry", id: "batch-a", requestId: "lost-reply",
+				expectedStatus: "blocked", expectedRevision: 7 },
+		});
+		assert.equal(result.body.ok, true);
+		assert.ok(state.commands.some((command) => command.includes("request 'lost-reply'") && command.includes("--expect-revision 7")));
+	});
+});
+
+test("host platform guard explains the WSL requirement before creating credential files", async () => {
+	const assertHostPlatform = await exported(INDEX, "assertHostPlatform");
+	assert.doesNotThrow(() => assertHostPlatform("linux"));
+	assert.doesNotThrow(() => assertHostPlatform("darwin"));
+	assert.throws(() => assertHostPlatform("win32"), /WSL2.*Linux filesystem/);
+});
+
+test("canonical status accepts maximum schema identifiers and dependencies independent of page size", async () => {
+	const canonicalStatusDocument = await exported(INDEX, "canonicalStatusDocument");
+	const batch = batchStatus(`${"b".repeat(128)}-20260907123000000`, "b".repeat(128));
+	batch.depends_on = ["dependency-a", "dependency-b"];
+	const job = jobStatus(batch, "t".repeat(128));
+	assert.ok(job.id.length > 256);
+	const gpus = [{ idx: 0, status: "assigned", job: `${batch.name}:${job.task}`, quarantined: 0 }];
+	assert.doesNotThrow(() => canonicalStatusDocument(statusFixture({ limit: 1, batches: [batch], jobs: [job], gpus })));
 });
 
 test("writer preflight finds an exact batch outside the first batch page", async () => {

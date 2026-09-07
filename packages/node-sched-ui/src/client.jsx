@@ -4,7 +4,6 @@ import {
 	authAudienceFrame,
 	batchCancelRequest,
 	buildAuthAnswer,
-	buildOperationRequest,
 	collectHistoryPages,
 	collectStatusPages,
 	configuredProjectNames,
@@ -2925,8 +2924,8 @@ function apply(cctx, config) {
 			pendingOps.current.add(key);
 			setPendingOpsVersion((version) => version + 1);
 			try {
-				const requestId = await durableRequests.claim(key);
-				const request = buildOperationRequest(op, entity, requestId);
+				const request = await durableRequests.claimOperation(key, op, entity);
+				const { requestId } = request;
 				const result = await post("op", request);
 				if (!result || typeof result !== "object") throw new Error("invalid JSON response");
 				if (mutationResultIsDefinitive(result)) {

@@ -3,13 +3,14 @@
 // `require` (verified against @linxin666/dsh-client-ui-task-board lib/client.js).
 import * as esbuild from "esbuild";
 import { mkdirSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 const id = "@zzc/dsh-node-sched-ui";
 mkdirSync(new URL("../packages/node-sched-ui/lib/", import.meta.url), { recursive: true });
 
 await esbuild.build({
-	entryPoints: [new URL("../packages/node-sched-ui/src/client.jsx", import.meta.url).pathname],
-	outfile: new URL("../packages/node-sched-ui/lib/client.js", import.meta.url).pathname,
+	entryPoints: [fileURLToPath(new URL("../packages/node-sched-ui/src/client.jsx", import.meta.url))],
+	outfile: fileURLToPath(new URL("../packages/node-sched-ui/lib/client.js", import.meta.url)),
 	bundle: true,
 	format: "cjs",
 	minify: false,

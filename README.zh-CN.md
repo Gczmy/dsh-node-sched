@@ -73,7 +73,7 @@ Host my-cluster
 
 复用出的 passenger 会话还会禁用本地/远程/动态、agent、X11 和 tunnel 转发，禁止本地命令及自行转入后台。普通命令与日志强制关闭 TTY；Web 终端虽分配 PTY，但禁用 OpenSSH escape command，因此浏览器输入只会进入远端 shell，不能变成本机 SSH 控制命令。
 
-系统 OpenSSH 通道支持 macOS 和 Linux。Windows OpenSSH 不支持这里依赖的 `ControlMaster` 多路复用，因此 Windows 用户应选择内置引擎。Web 终端通过原生依赖 `node-pty` 为系统 `ssh` 提供真实 PTY；普通命令和日志复用不依赖终端模拟。
+host 插件运行于 macOS 或 Linux。Windows 用户需在 WSL2 内运行 dsh，并将凭据数据保存在 Linux 文件系统：当前存储实现依赖 POSIX 私有权限和目录 fsync，选择内置引擎也需要这些能力。原生 Windows 可以构建浏览器 bundle，但不能运行 host 插件。Web 终端通过 `node-pty` 为系统 `ssh` 提供真实 PTY；普通命令和日志复用不依赖终端模拟。
 
 ## 快速开始
 
@@ -81,7 +81,7 @@ Host my-cluster
 
 - Node.js ≥ 22
 - 一台可经 SSH 访问、已部署 [sched](https://github.com/Gczmy/sched) 的主机
-- 系统 OpenSSH `ControlMaster` 复用需要 macOS 或 Linux；Windows 请使用内置引擎
+- macOS 或 Linux（Windows 使用 WSL2，并将凭据数据放在 Linux 文件系统）
 - 版本匹配的 dsh
 
 ### 安装

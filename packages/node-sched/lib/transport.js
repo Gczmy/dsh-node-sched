@@ -28,12 +28,12 @@ function runChild(command, {
 			stdio: ["pipe", "pipe", "pipe"],
 			detached: true,
 		});
-		onStart?.(child);
 		const stdout = createLimitedOutput();
 		const stderr = createLimitedOutput();
 		let timedOut = false;
 		let stdinError;
 		let settled = false;
+		let leaderExited = false;
 		const finish = (result) => {
 			if (settled) return;
 			settled = true;
@@ -49,14 +49,25 @@ function runChild(command, {
 				durationMs: Date.now() - started,
 			});
 		};
+		const stop = (reason) => {
+			if (settled) return;
+			if (!leaderExited) {
+				try { process.kill(-child.pid, "SIGKILL"); } catch { try { child.kill("SIGKILL"); } catch {} }
+			}
+			child.stdout.destroy();
+			child.stderr.destroy();
+			finish({ ok: false, code: -1, error: reason });
+		};
 		const timer = setTimeout(() => {
 			timedOut = true;
-			try { process.kill(-child.pid, "SIGKILL"); } catch { try { child.kill("SIGKILL"); } catch {} }
-			finish({ ok: false, code: -1, error: `command timed out after ${budget} ms` });
+			stop(`command timed out after ${budget} ms`);
 		}, budget);
 		child.stdout.on("data", (chunk) => appendLimitedOutput(stdout, chunk, maxOutputBytes));
 		child.stderr.on("data", (chunk) => appendLimitedOutput(stderr, chunk, maxOutputBytes));
 		child.on("error", (error) => finish({ ok: false, code: -1, error: error.message }));
+		child.on("exit", () => {
+			leaderExited = true;
+		});
 		child.on("close", (code) => {
 			if (settled) return;
 			finish({
@@ -66,6 +77,7 @@ function runChild(command, {
 			});
 		});
 		child.stdin.on("error", (error) => { stdinError = error; });
+		onStart?.(child, stop);
 		if (stdinData === undefined) child.stdin.end();
 		else child.stdin.end(stdinData);
 	});
@@ -75,7 +87,7 @@ function runChild(command, {
 export class LocalTransport {
 	constructor(options = {}) {
 		this.options = { ...options };
-		this.children = new Set();
+		this.children = new Map();
 		this.streams = new Set();
 	}
 
@@ -83,7 +95,7 @@ export class LocalTransport {
 		return runChild(String(command), {
 			...this.options,
 			...options,
-			onStart: (child) => this.children.add(child),
+			onStart: (child, stop) => this.children.set(child, stop),
 			onClose: (child) => this.children.delete(child),
 		});
 	}
@@ -93,7 +105,7 @@ export class LocalTransport {
 			...this.options,
 			...options,
 			stdinData: data,
-			onStart: (child) => this.children.add(child),
+			onStart: (child, stop) => this.children.set(child, stop),
 			onClose: (child) => this.children.delete(child),
 		});
 	}
@@ -109,13 +121,19 @@ export class LocalTransport {
 		let closeNotified = false;
 		let onData;
 		let onClose;
-		const pendingChunks = [];
+		let leaderExited = false;
+		let killTimer;
+		let pending = createLimitedOutput();
+		const pendingLimit = this.options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
 		const session = {
 			get onData() { return onData; },
 			set onData(handler) {
 				onData = typeof handler === "function" ? handler : undefined;
 				if (onData) {
-					for (const chunk of pendingChunks.splice(0)) onData(chunk);
+					finalizeLimitedOutput(pending);
+					const text = limitedOutputText(pending);
+					pending = createLimitedOutput();
+					if (text) onData(Buffer.from(text, "utf8"));
 				}
 			},
 			get onClose() { return onClose; },
@@ -127,15 +145,30 @@ export class LocalTransport {
 				}
 			},
 			close: () => {
-				if (closed) return;
+				if (closed || killTimer !== undefined) return;
+				if (leaderExited) {
+					child.stdout.destroy();
+					child.stderr.destroy();
+					ended();
+					return;
+				}
 				try { process.kill(-child.pid, "SIGTERM"); } catch { try { child.kill("SIGTERM"); } catch {} }
+				killTimer = setTimeout(() => {
+					if (!leaderExited) {
+						try { process.kill(-child.pid, "SIGKILL"); } catch { try { child.kill("SIGKILL"); } catch {} }
+					}
+					child.stdout.destroy();
+					child.stderr.destroy();
+					ended();
+				}, 1000);
+				killTimer.unref?.();
 			},
 			pause: () => { child.stdout.pause(); child.stderr.pause(); },
 			resume: () => { child.stdout.resume(); child.stderr.resume(); },
 		};
 		const deliver = (chunk) => {
 			if (onData) onData(chunk);
-			else pendingChunks.push(chunk);
+			else appendLimitedOutput(pending, chunk, pendingLimit);
 		};
 		child.stdout.on("data", (chunk) => {
 			const text = stdoutDecoder.write(chunk);
@@ -147,6 +180,7 @@ export class LocalTransport {
 		});
 		const ended = () => {
 			if (closed) return;
+			clearTimeout(killTimer);
 			const stdoutTail = stdoutDecoder.end();
 			const stderrTail = stderrDecoder.end();
 			if (stdoutTail) deliver(Buffer.from(stdoutTail, "utf8"));
@@ -160,14 +194,13 @@ export class LocalTransport {
 		};
 		child.on("close", ended);
 		child.on("error", ended);
+		child.on("exit", () => { leaderExited = true; });
 		this.streams.add(session);
 		return session;
 	}
 
 	dispose() {
-		for (const child of this.children) {
-			try { process.kill(-child.pid, "SIGTERM"); } catch { try { child.kill("SIGTERM"); } catch {} }
-		}
+		for (const stop of this.children.values()) stop("local transport disposed");
 		for (const stream of this.streams) stream.close();
 		this.children.clear();
 		this.streams.clear();

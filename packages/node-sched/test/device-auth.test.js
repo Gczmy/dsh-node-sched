@@ -470,7 +470,12 @@ test("pair durably prunes expired devices before enforcing the device limit", as
 	}
 });
 
-test("device expiry caps the short bearer and authenticated websocket lifetime", async () => {
+test("device expiry caps the short bearer and authenticated websocket lifetime", async (t) => {
+	// A real WebSocket keeps the event loop alive; this EventEmitter does not.
+	// Bound the wait with a referenced timer so the unref'ed expiry timer runs.
+	let expiryTimeout;
+	t.after(() => clearTimeout(expiryTimeout));
+	const now = Date.now();
 	const temporary = temporaryStore();
 	try {
 		const identity = await signingIdentity();
@@ -479,6 +484,7 @@ test("device expiry caps the short bearer and authenticated websocket lifetime",
 			file: temporary.file,
 			deviceTtlMs: 25,
 			sessionTtlMs: 1_000,
+			now: () => now,
 		});
 		const paired = auth.pair({
 			clientId: CLIENT_ID,
@@ -500,7 +506,13 @@ test("device expiry caps the short bearer and authenticated websocket lifetime",
 			socket.close = (...args) => resolve(args);
 		});
 		auth.trackConnection(socket, principal);
-		assert.deepEqual(await closed, [1008, "authentication expired"]);
+		const boundedClose = Promise.race([
+			closed,
+			new Promise((_, reject) => {
+				expiryTimeout = setTimeout(() => reject(new Error("WebSocket expiry did not close the connection")), 1_000);
+			}),
+		]);
+		assert.deepEqual(await boundedClose, [1008, "authentication expired"]);
 		auth.close();
 	} finally {
 		temporary.cleanup();

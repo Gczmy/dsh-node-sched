@@ -65,8 +65,8 @@ const name = "node-sched";
 /**
  * Config is deployment truth only — no account/node/path may leak into code
  * (same discipline as sched's own I/J-class config separation). The ssh entry
- * MUST be explicit: HPDC (campus) vs HPDC_outside; the plugin never switches
- * entries on its own (AGENTS.md §1 discipline).
+ * remains explicitly configured; the plugin never switches entries on its
+ * own. The HPDC deployment currently uses only ssh HPDC.
  */
 const Config = z.object({
 	/** ssh entry alias; probed at activation with a short ConnectTimeout. */
@@ -558,7 +558,7 @@ async function verifyAndExecuteMutation({
 	}
 	const result = await executeMutation(writer, prepared.command, timeoutMs);
 	const definitive = result?.ok === true
-		|| (Number.isInteger(result?.code) && result.code !== -1 && result.code !== 75);
+		|| (Number.isInteger(result?.code) && result.code > 0 && result.code < 128 && result.code !== 75);
 	if (definitive) {
 		try { await prepared.cleanup?.(); } catch { /* age GC removes retained cleanup failures */ }
 	}
@@ -1401,7 +1401,7 @@ function canonicalStatusDocument(document) {
 		if (!Number.isInteger(batch.revision) || batch.revision < 0) {
 			throw new TypeError(`status.batches[${index}].revision is invalid`);
 		}
-		if (!Array.isArray(batch.depends_on) || batch.depends_on.length > document.limit) {
+		if (!Array.isArray(batch.depends_on)) {
 			throw new TypeError(`status.batches[${index}].depends_on is invalid`);
 		}
 		for (const dependency of batch.depends_on) statusText(dependency, `status.batches[${index}].depends_on`);
@@ -1413,7 +1413,7 @@ function canonicalStatusDocument(document) {
 	for (const [index, job] of document.jobs.entries()) {
 		statusRecord(job, `status.jobs[${index}]`);
 		statusKnownKeys(job, STATUS_JOB_KEYS, `status.jobs[${index}]`);
-		const id = statusText(job.id, `status.jobs[${index}].id`);
+		const id = statusText(job.id, `status.jobs[${index}].id`, { max: 512 });
 		const batchId = statusText(job.batch_id, `status.jobs[${index}].batch_id`);
 		const batchName = statusText(job.batch_name, `status.jobs[${index}].batch_name`);
 		statusText(job.task, `status.jobs[${index}].task`);
@@ -1446,7 +1446,7 @@ function canonicalStatusDocument(document) {
 		) {
 			throw new TypeError(`status.gpus[${index}] state is invalid`);
 		}
-		if (gpu.job !== null) statusText(gpu.job, `status.gpus[${index}].job`);
+		if (gpu.job !== null) statusText(gpu.job, `status.gpus[${index}].job`, { max: 512 });
 		try {
 			canonicalGpuAssignments(gpu.assignments);
 		} catch (error) {
@@ -1687,6 +1687,7 @@ function summarizeStatus(document) {
 		"blocked",
 		"cancelled",
 		"timed_out",
+		"interrupted",
 	]);
 	const live = jobs.filter((job) => job.status === "pending" || job.status === "running");
 	const byStatus = {};
@@ -1951,7 +1952,14 @@ async function serveTerminalWebSocket({
  * The activation probe therefore runs in the background and degrades loudly
  * instead of failing the mount.
  */
+export function assertHostPlatform(platform = process.platform) {
+	if (platform !== "linux" && platform !== "darwin") {
+		throw new Error("node-sched host requires Linux or macOS for private file permissions and durable directory commits; on Windows, run dsh inside WSL2 with its data in the Linux filesystem.");
+	}
+}
+
 function apply(ctx, config) {
+	assertHostPlatform();
 	const accessToken = ctx.webServer ? loadOrCreateAccessToken() : null;
 	const browserAuth = ctx.webServer
 		? new TrustedBrowserAuth({ masterToken: accessToken })
@@ -2231,7 +2239,7 @@ function apply(ctx, config) {
 			if (!probe.ok) {
 				ctx.logger.error(
 					"[node-sched] PROBE FAILED via ssh entry \"%s\" (code %d) — check network environment " +
-					"(campus=HPDC / outside=HPDC_outside) before retrying. stderr: %s",
+						"and the configured alias before retrying (HPDC uses ssh HPDC). stderr: %s",
 					config.sshEntry, probe.code, (probe.stderr || "").trim().slice(0, 400),
 				);
 				return;
@@ -2322,7 +2330,9 @@ function apply(ctx, config) {
 							error.httpStatus = 503;
 							throw error;
 						}
-						assertMutationPreconditions(statusDocument, precondition);
+						// sched request checks its durable receipt before atomically
+						// comparing preconditions. Comparing them here would block a
+						// replay after the original operation changed the revision.
 						if (preflight) await preflight(writer, preflightTimeoutMs, statusDocument);
 					},
 					executeMutation: async (writer, command, operationTimeoutMs) => {
@@ -3140,7 +3150,7 @@ function apply(ctx, config) {
 						expectedRevision,
 						expectedAssignments,
 					} = body && typeof body === "object" ? body : {};
-					const spec = OPS[op];
+					const spec = Object.hasOwn(OPS, op) ? OPS[op] : undefined;
 					if (!spec || typeof (id ?? "") !== "string") {
 						return void json(res, { ok: false, error: "bad op/id" }, 400);
 					}

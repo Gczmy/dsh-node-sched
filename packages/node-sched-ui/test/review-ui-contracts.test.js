@@ -463,9 +463,47 @@ test("unknown transport and sched outcomes retain request ids; definitive outcom
 	const { mutationResultIsDefinitive } = await loadContracts();
 	assert.equal(mutationResultIsDefinitive({ code: -1 }), false);
 	assert.equal(mutationResultIsDefinitive({ code: 75 }), false);
-	assert.equal(mutationResultIsDefinitive({ code: 0 }), true);
+	assert.equal(mutationResultIsDefinitive({ code: 255 }), false);
+	assert.equal(mutationResultIsDefinitive({ code: 137 }), false);
+	assert.equal(mutationResultIsDefinitive({ ok: true, code: 0 }), true);
+	assert.equal(mutationResultIsDefinitive({ ok: false, code: 0 }), false);
 	assert.equal(mutationResultIsDefinitive({ code: 64 }), true);
 	assert.equal(mutationResultIsDefinitive({ code: 65 }), true);
+});
+
+test("operation replay retains its full original binding across reload and state changes", async () => {
+	const { DurableRequestStore } = await loadContracts();
+	const values = new Map();
+	let tail = Promise.resolve();
+	const transact = (fn) => {
+		const next = tail.then(() => fn({ get: async (key) => values.get(key),
+			put: async (key, value) => values.set(key, structuredClone(value)),
+			delete: async (key) => values.delete(key) }));
+		tail = next.catch(() => {});
+		return next;
+	};
+	const firstTab = new DurableRequestStore(transact);
+	const entity = { batch_id: "b", task: "t", status: "failed", version: 1, revision: 2 };
+	const request = await firstTab.claimOperation("retry:b:t", "retry", entity, () => "original-id");
+	entity.status = "pending";
+	entity.revision = 3;
+	const replacementTab = new DurableRequestStore(transact);
+	const replay = await replacementTab.claimOperation("retry:b:t", "retry", entity, () => "new-id");
+	assert.deepEqual(replay, request);
+	assert.equal(replay.expectedRevision, 2);
+	assert.equal(replay.expectedStatus, "failed");
+	await firstTab.claim("legacy:b:t", () => "legacy-id");
+	await assert.rejects(replacementTab.claimOperation("legacy:b:t", "retry", entity), /原始前置条件/);
+	assert.equal(values.get("legacy:b:t").requestId, "legacy-id");
+});
+
+test("page collectors reject truncated responses without a continuation cursor", async () => {
+	const { collectStatusPages, collectHistoryPages } = await loadContracts();
+	const page = { schema_version: 1, batches: [], jobs: [], gpus: [],
+		truncated: { batches: true, jobs: false }, next_cursor: null, next_job_cursor: null };
+	await assert.rejects(collectStatusPages(async () => page), /next_cursor/);
+	await assert.rejects(collectHistoryPages(async () => ({ schema_version: 1, history: [], truncated: true, next_cursor: null })), /next_cursor/);
+	await assert.rejects(collectStatusPages(async () => ({ ...page, truncated: { batches: 0, jobs: false } })), /invalid status page/);
 });
 
 test("status paging follows independent batch and job cursors without exposing page lengths as totals", async () => {

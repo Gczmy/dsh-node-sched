@@ -2017,6 +2017,8 @@ async function withClient(engine, alias, fn, attempts = 1, openOptions = {}) {
 	for (let attempt = 1; attempt <= attempts; attempt += 1) {
 		let record;
 		try {
+			if (engine.disposed) throw new Error("SSH engine disposed");
+			refreshEngineStore(engine);
 			record = engine.pool.get(alias);
 			if (record === undefined || record.broken) {
 				if (record !== undefined) disposeRecord(engine, alias, record);
@@ -2304,6 +2306,8 @@ function attachEarlyStreamReplay({
 
 
 export async function openExecStream(engine, alias, command, options = {}) {
+	if (engine.disposed) throw new Error("SSH engine disposed");
+	refreshEngineStore(engine);
 	const entry = engine.store.find(alias);
 	if (!entry) throw new Error(`alias '${alias}' not found — add it first`);
 	const context = sshOpenContext(engine, options);
@@ -2358,6 +2362,8 @@ export async function openExecStream(engine, alias, command, options = {}) {
  * never tear down a pooled exec/tunnel sharing the alias).
  */
 export async function openShell(engine, alias, size, options = {}) {
+	if (engine.disposed) throw new Error("SSH engine disposed");
+	refreshEngineStore(engine);
 	const entry = engine.store.find(alias);
 	if (!entry) throw new Error(`alias '${alias}' not found — add it first`);
 	const context = sshOpenContext(engine, options);

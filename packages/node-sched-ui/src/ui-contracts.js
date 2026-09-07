@@ -253,6 +253,22 @@ export class DurableRequestStore {
 			return true;
 		});
 	}
+
+	claimOperation(key, op, entity, create = () => crypto.randomUUID()) {
+		if (typeof key !== "string" || !key) throw new Error("durable request key is required");
+		return this.transact(async (store) => {
+			const existing = await store.get(key);
+			if (existing) {
+				if (!existing.request || existing.request.requestId !== existing.requestId) {
+					throw new Error("旧操作缺少原始前置条件，请先通过 sched CLI 确认结果；不能自动重发。");
+				}
+				return structuredClone(existing.request);
+			}
+			const request = buildOperationRequest(op, entity, String(create()));
+			await store.put(key, { requestId: request.requestId, request, createdAt: Date.now() });
+			return structuredClone(request);
+		});
+	}
 }
 
 function requestPromise(request) {
@@ -336,7 +352,9 @@ function canonicalAssignments(assignments) {
 }
 
 export function mutationResultIsDefinitive(result) {
-	return Number.isInteger(result?.code) && result.code !== -1 && result.code !== 75;
+	// SSH 255 and signal exits cannot prove that the remote receipt was received.
+	return Number.isInteger(result?.code) && result.code >= 0 && result.code < 128
+		&& result.code !== 75 && (result.code !== 0 || result.ok === true);
 }
 
 export function buildOperationRequest(op, entity, requestId) {
@@ -401,7 +419,6 @@ export function buildOperationRequest(op, entity, requestId) {
 }
 
 function pageCursor(value, label) {
-	if (value === null) return null;
 	if (typeof value !== "string" || !value || value.length > 1024) {
 		throw new Error(`${label} is invalid`);
 	}
@@ -433,7 +450,10 @@ export async function collectStatusPages(fetchPage, { maxPages = 100 } = {}) {
 			seenJobCursors.add(jobCursorKey);
 			if (++calls > maxPages) throw new Error("status paging limit exceeded");
 			const page = await fetchPage({ cursor: batchCursor, jobCursor });
-			if (!page || page.schema_version !== 1 || !page.truncated) {
+			if (!page || page.schema_version !== 1
+				|| typeof page.truncated?.batches !== "boolean"
+				|| typeof page.truncated?.jobs !== "boolean"
+				|| !Array.isArray(page.batches) || !Array.isArray(page.jobs) || !Array.isArray(page.gpus)) {
 				throw new Error("invalid status page");
 			}
 			first ??= page;
