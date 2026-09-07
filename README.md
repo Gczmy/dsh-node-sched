@@ -41,6 +41,21 @@ The design principle is **strict adapter architecture**: all scheduling intellig
 - **Dry-run-gated submit** — paste a `batch.json`, preview the expansion and SKIP verdicts before committing; destructive operations (cancel / resubmit / GPU free / daemon stop) require typed confirmation.
 - **Multi-project aware** — surfaces per-project GPU quotas, priorities, and hard-affinity isolation as configured by sched's B11c multi-project mode.
 
+### Project GPU access
+
+Project settings expose `projects.<name>.gpu_enabled` (boolean, omitted means
+`true`) independently of `gpu_quota`; quota `0` remains unlimited. Disabling
+rejects new GPU submissions and manual GPU retry/resubmit, holds queued GPU work,
+and lets running jobs and CPU-only work continue. Re-enabling resumes the existing
+queued versions. The dashboard preserves explicit `false` and zero quota in the
+saved patch and shows disabled / unlimited / limited access plus task wait reasons.
+
+Deploy this plugin together with sched's project GPU access support before using
+the switch. Status remains schema 1 and adds `wait_reason: "project_gpu_disabled"`
+for pending GPU jobs; older strict plugin validators reject that new value. All
+policy decisions and writes remain in sched; see the
+[implementation notes](docs/implementation-notes.md#project-gpu-access-2026-09-07).
+
 ### Query transports and mutation targets
 
 Read-only queries and mutations are deliberately configured as separate paths. `transport` plus the current dashboard binding selects the query transport and target; `mutationMode`, `mutationTarget`, `mutationSession`, and `mutationExpectedNode` select exactly one writer. Changing a dashboard binding never changes the writer, and `sshEntry` is an explicit OpenSSH `Host` alias rather than a host discovered by fallback.

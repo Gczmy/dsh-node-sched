@@ -40,6 +40,19 @@
 - **dry-run 门控提交** — 粘贴 `batch.json`，先预览任务展开与 SKIP 判定再正式提交；高危操作（cancel / resubmit / GPU 释放 / daemon stop）需键入确认词。
 - **多项目感知** — 展示 sched B11c 多项目模式配置的每项目 GPU 配额、优先级与硬亲和隔离。
 
+### 项目 GPU 访问
+
+项目设置提供 `projects.<name>.gpu_enabled` 布尔开关，省略为 `true`，与配额独立；
+`gpu_quota:0` 仍为无限制。禁用后拒绝新 GPU 提交与手动 GPU retry/resubmit，暂停
+排队 GPU 派发；运行中任务正常结束，CPU-only 不受影响。重新启用后原排队版本
+继续运行。看板保存补丁保留显式 `false` 和零配额，并展示禁用／无限制／限额与
+任务暂停原因。
+
+使用开关前需同步更新支持项目 GPU 开关的 sched 和本插件。状态 JSON 仍为 schema 1，
+但 pending GPU 任务新增 `wait_reason: "project_gpu_disabled"`；旧插件严格校验
+会拒绝新值。策略判断与写入仍由 sched 实现，详见
+[实现笔记](docs/implementation-notes.md#project-gpu-access-2026-09-07)。
+
 ### 查询传输与写入目标
 
 只读查询和写操作采用相互独立的路径。`transport` 与当前看板绑定共同选择查询通道和目标；`mutationMode`、`mutationTarget`、`mutationSession`、`mutationExpectedNode` 则只选择一个写入端。切换看板绑定不会改变写入端，`sshEntry` 是显式配置的 OpenSSH `Host` 别名，不会通过失败回退猜测另一台主机。

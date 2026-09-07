@@ -33,6 +33,34 @@ export function configuredProjectNames(config) {
 	return [preferred, ...names.filter((name) => name !== preferred)];
 }
 
+export function projectGpuAccessLabel(project = {}) {
+	if (project.gpu_enabled === false) return "GPU 已禁用";
+	const quota = Number(project.gpu_quota || 0);
+	return quota > 0 ? `GPU 配额 ${quota}` : "GPU 无限制";
+}
+
+export function projectSettingsPatch(config) {
+	const projects = {};
+	for (const [name, project] of Object.entries(config.projects || {})) {
+		projects[name] = {};
+		for (const key of ["gpu_enabled", "gpu_quota", "priority", "max_jobs"]) {
+			if (project[key] !== undefined && project[key] !== null) projects[name][key] = project[key];
+		}
+		// Keep the existing nullable colocate patch contract.
+		if (project.colocate !== undefined) projects[name].colocate = project.colocate;
+	}
+	return { projects };
+}
+
+export function taskWaitLabel(task) {
+	if (task?.status !== "pending") return "";
+	return {
+		project_gpu_disabled: "项目 GPU 已禁用，等待启用",
+		quota: "等待 GPU 配额",
+		dependency: "等待依赖",
+	}[task.wait_reason] || "";
+}
+
 export const SUBMIT_EXAMPLE = submitExampleForProject("default");
 
 const TASK_STATUS_CONTRACTS = Object.freeze({

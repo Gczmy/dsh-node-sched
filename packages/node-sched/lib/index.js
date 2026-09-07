@@ -1425,7 +1425,7 @@ function canonicalStatusDocument(document) {
 			throw new TypeError(`status.jobs[${index}].version is invalid`);
 		}
 		if (!STATUS_JOB_STATES.has(job.status)) throw new TypeError(`status job state ${job.status} is unknown`);
-		if (job.wait_reason !== null && job.wait_reason !== "quota" && job.wait_reason !== "dependency") {
+		if (job.wait_reason !== null && job.wait_reason !== "quota" && job.wait_reason !== "dependency" && job.wait_reason !== "project_gpu_disabled") {
 			throw new TypeError(`status.jobs[${index}].wait_reason is invalid`);
 		}
 		jobIds.add(id);

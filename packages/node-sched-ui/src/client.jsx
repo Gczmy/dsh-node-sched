@@ -7,6 +7,9 @@ import {
 	collectHistoryPages,
 	collectStatusPages,
 	configuredProjectNames,
+	projectGpuAccessLabel,
+	projectSettingsPatch,
+	taskWaitLabel,
 	createIndexedDbRequestStore,
 	EnabledRequestEpoch,
 	jobsForBatch,
@@ -1734,7 +1737,7 @@ function apply(cctx, config) {
 
 					key: (t.id ?? t.task ?? i) + "",
 
-					title: `${t.task}: ${t.status}`,
+					title: `${t.task}: ${t.status}${taskWaitLabel(t) ? ` · ${taskWaitLabel(t)}` : ""}`,
 
 					style: { width: 18, height: 15, borderRadius: 3,
 
@@ -1789,6 +1792,8 @@ function apply(cctx, config) {
 			]),
 			open && jsxs2("div", { style: { marginTop: 6, marginLeft: 76, paddingLeft: 10, borderLeft: `2px solid ${T.border}` } }, [
 				b.depends_on?.length > 0 && j("div", { style: { fontSize: 12, color: T.label2 } }, `依赖: ${b.depends_on.join(", ")}`),
+				...tasks.filter((task) => taskWaitLabel(task)).map((task) =>
+					j("div", { key: task.id, style: { fontSize: 12, color: T.warn, marginTop: 4 } }, `${task.task}: ${taskWaitLabel(task)}`)),
 				...failures.map(({ task, reference, contract }) =>
 					jsxs2("div", { key: reference, style: { fontSize: 13, marginLeft: 14, marginTop: 2, display: "flex", alignItems: "center" } }, [
 						contract.controls.includes("log") && j("span", {
@@ -2296,6 +2301,14 @@ function apply(cctx, config) {
 
 			j("span", { style: { width: 80, color: T.label } }, name),
 
+			j("select", {
+				value: String(pj.gpu_enabled !== false),
+				onChange: (e) => upd((n) => { n.projects[name].gpu_enabled = e.target.value === "true"; }),
+				"aria-label": `${name} GPU 访问`,
+				title: "禁用后拒绝新的 GPU 提交并暂停排队任务；运行中任务和 CPU-only 任务不受影响",
+				style: { background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label, borderRadius: 4, fontSize: 13 },
+			}, [j("option", { value: "true" }, "允许 GPU"), j("option", { value: "false" }, "禁止 GPU")]),
+			j("span", { style: { color: pj.gpu_enabled === false ? T.warn : T.label2 } }, projectGpuAccessLabel(pj)),
 			j("span", { style: { color: T.label2 } }, "配额"),
 
 			numInput(pj.gpu_quota, (v) => upd((n) => { if (v === null) delete n.projects[name].gpu_quota; else n.projects[name].gpu_quota = v; })),
@@ -2338,31 +2351,7 @@ function apply(cctx, config) {
 
 
 
-		const buildProjectsPatch = () => {
-
-			const patch = {};
-
-			for (const [name, pj] of Object.entries(cfg.projects || {})) {
-
-				patch.projects = patch.projects || {};
-
-				patch.projects[name] = {};
-
-				for (const k of ["gpu_quota", "priority", "max_jobs"]) {
-
-					if (pj[k] !== undefined && pj[k] !== null) patch.projects[name][k] = pj[k];
-
-				}
-
-				if (pj.colocate !== undefined) patch.projects[name].colocate = pj.colocate;
-
-			}
-
-			return { projects: patch.projects };
-
-		};
-
-
+		const buildProjectsPatch = () => projectSettingsPatch(cfg);
 
 		// ---- co-location 区 ----
 

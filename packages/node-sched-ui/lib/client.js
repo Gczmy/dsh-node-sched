@@ -6378,6 +6378,30 @@ function configuredProjectNames(config) {
   if (!preferred || !names.includes(preferred)) return names;
   return [preferred, ...names.filter((name2) => name2 !== preferred)];
 }
+function projectGpuAccessLabel(project = {}) {
+  if (project.gpu_enabled === false) return "GPU \u5DF2\u7981\u7528";
+  const quota = Number(project.gpu_quota || 0);
+  return quota > 0 ? `GPU \u914D\u989D ${quota}` : "GPU \u65E0\u9650\u5236";
+}
+function projectSettingsPatch(config) {
+  const projects = {};
+  for (const [name2, project] of Object.entries(config.projects || {})) {
+    projects[name2] = {};
+    for (const key of ["gpu_enabled", "gpu_quota", "priority", "max_jobs"]) {
+      if (project[key] !== void 0 && project[key] !== null) projects[name2][key] = project[key];
+    }
+    if (project.colocate !== void 0) projects[name2].colocate = project.colocate;
+  }
+  return { projects };
+}
+function taskWaitLabel(task) {
+  if (task?.status !== "pending") return "";
+  return {
+    project_gpu_disabled: "\u9879\u76EE GPU \u5DF2\u7981\u7528\uFF0C\u7B49\u5F85\u542F\u7528",
+    quota: "\u7B49\u5F85 GPU \u914D\u989D",
+    dependency: "\u7B49\u5F85\u4F9D\u8D56"
+  }[task.wait_reason] || "";
+}
 var SUBMIT_EXAMPLE = submitExampleForProject("default");
 var TASK_STATUS_CONTRACTS = Object.freeze({
   pending: Object.freeze({
@@ -8910,7 +8934,7 @@ function apply(cctx, config) {
     } }, [
       ...tasks.slice(0, shown).map((t, i) => j("span", {
         key: (t.id ?? t.task ?? i) + "",
-        title: `${t.task}: ${t.status}`,
+        title: `${t.task}: ${t.status}${taskWaitLabel(t) ? ` \xB7 ${taskWaitLabel(t)}` : ""}`,
         style: {
           width: 18,
           height: 15,
@@ -8959,6 +8983,7 @@ function apply(cctx, config) {
       ]),
       open && jsxs2("div", { style: { marginTop: 6, marginLeft: 76, paddingLeft: 10, borderLeft: `2px solid ${T.border}` } }, [
         b.depends_on?.length > 0 && j("div", { style: { fontSize: 12, color: T.label2 } }, `\u4F9D\u8D56: ${b.depends_on.join(", ")}`),
+        ...tasks.filter((task) => taskWaitLabel(task)).map((task) => j("div", { key: task.id, style: { fontSize: 12, color: T.warn, marginTop: 4 } }, `${task.task}: ${taskWaitLabel(task)}`)),
         ...failures.map(({ task, reference, contract }) => jsxs2("div", { key: reference, style: { fontSize: 13, marginLeft: 14, marginTop: 2, display: "flex", alignItems: "center" } }, [
           contract.controls.includes("log") && j("span", {
             style: { fontFamily: "monospace", cursor: "pointer", textDecoration: "underline", marginRight: 6 },
@@ -9358,6 +9383,16 @@ function apply(cctx, config) {
     const projects = cfg.projects || {};
     const projRows = Object.entries(projects).map(([name2, pj]) => jsxs2("div", { key: name2, style: rowStyle }, [
       j("span", { style: { width: 80, color: T.label } }, name2),
+      j("select", {
+        value: String(pj.gpu_enabled !== false),
+        onChange: (e) => upd((n) => {
+          n.projects[name2].gpu_enabled = e.target.value === "true";
+        }),
+        "aria-label": `${name2} GPU \u8BBF\u95EE`,
+        title: "\u7981\u7528\u540E\u62D2\u7EDD\u65B0\u7684 GPU \u63D0\u4EA4\u5E76\u6682\u505C\u6392\u961F\u4EFB\u52A1\uFF1B\u8FD0\u884C\u4E2D\u4EFB\u52A1\u548C CPU-only \u4EFB\u52A1\u4E0D\u53D7\u5F71\u54CD",
+        style: { background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label, borderRadius: 4, fontSize: 13 }
+      }, [j("option", { value: "true" }, "\u5141\u8BB8 GPU"), j("option", { value: "false" }, "\u7981\u6B62 GPU")]),
+      j("span", { style: { color: pj.gpu_enabled === false ? T.warn : T.label2 } }, projectGpuAccessLabel(pj)),
       j("span", { style: { color: T.label2 } }, "\u914D\u989D"),
       numInput(pj.gpu_quota, (v) => upd((n) => {
         if (v === null) delete n.projects[name2].gpu_quota;
@@ -9387,18 +9422,7 @@ function apply(cctx, config) {
       ]),
       j("span", { style: { color: T.label2 } }, "\u4EB2\u548C\u5361 " + JSON.stringify(pj.gpu_affinity || []))
     ]));
-    const buildProjectsPatch = () => {
-      const patch = {};
-      for (const [name2, pj] of Object.entries(cfg.projects || {})) {
-        patch.projects = patch.projects || {};
-        patch.projects[name2] = {};
-        for (const k of ["gpu_quota", "priority", "max_jobs"]) {
-          if (pj[k] !== void 0 && pj[k] !== null) patch.projects[name2][k] = pj[k];
-        }
-        if (pj.colocate !== void 0) patch.projects[name2].colocate = pj.colocate;
-      }
-      return { projects: patch.projects };
-    };
+    const buildProjectsPatch = () => projectSettingsPatch(cfg);
     const cl = cfg.co_locate;
     const clPatch = () => ({ co_locate: !!cl, co_locate_safety: Number(cfg.co_locate_safety ?? 0.7), co_locate_max_jobs: Number(cfg.co_locate_max_jobs ?? 3) });
     const nf = cfg.notify || {};

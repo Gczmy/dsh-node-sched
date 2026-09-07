@@ -2,6 +2,29 @@
 
 > 按 M 里程碑滚动记录。每条 = 现象 / 根因 / 定案，供后续开发避坑。
 
+## Project GPU access (2026-09-07)
+
+项目 GPU 开关使用 `projects.<name>.gpu_enabled`，布尔值、省略为 `true`；独立于
+零值表示无限制的 `gpu_quota`。后端严格校验为 schema 1 的 `wait_reason` 增加
+`project_gpu_disabled`，不修改 pending 状态或在插件内重新判定调度策略。
+
+看板项目设置提供开关和禁用／无限制／配额标签，`projectSettingsPatch` 明确保留
+`false` 和 `0`。任务分段提示、展开的批次显示等待启用原因。写操作仍通过既有
+config set 转发与 writer 检查，禁用不改变 writer 目标。
+
+sched 在提交和最终派发前检查最新配置：拒绝新 GPU submit/run/retry/resubmit，
+已排队 GPU 暂停、运行任务继续、CPU-only 正常执行；重新启用恢复原排队版本。
+配置更新与派发共用 submission gate；网关已投递但消费时遭拒绝的请求可通过
+`sched verify <full-batch-id>` 查询原因。批量重跑不会只执行 CPU 子集后再拒绝 GPU。
+
+部署时需配套升级：旧插件的严格枚举校验不接受新等待原因。本次仅修改本地代码和
+运行本地测试，未连接、部署或操作 HPDC。
+
+验收：两包 `test/project-gpu.test.js` 覆盖新枚举、摘要、分页、快照写入资格、显示
+文本和保存补丁；sched 的真实 daemon/fake GPU CLI 验收输出另经
+`canonicalStatusDocument`、`collectStatusPages` 和 `taskWaitLabel` 联调通过。
+前端生成文件由构建脚本生成，Windows 与 Linux 产物一致。
+
 ## 2026-09-07 联合代码审查修复
 
 看板曾只保存未决请求的 ID，重试时用刷新后的 revision 重建前置条件；服务端又
