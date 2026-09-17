@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { EventEmitter } from "node:events";
 import {
 	NoOpenSshMasterError,
@@ -435,5 +436,53 @@ test("openPty never loads node-pty or starts ssh when the ControlMaster is missi
 	);
 	assert.equal(loaderCalls, 0);
 	assert.equal(childProcess.calls.length, 2);
+	transport.dispose();
+});
+
+test("missing-master diagnosis explains a missing mux socket and a too-long ControlPath", async () => {
+	const missing = closeWith(255, { stderr: "Control socket connect: No such file" });
+	const childProcess = new ScriptedChildProcess([configReady(), missing]);
+	const transport = new SystemOpenSshTransport({ sshEntry: "HPDC_outside", childProcess });
+	const status = await transport.checkMaster();
+	assert.equal(status.ready, false);
+	assert.match(status.error, /mux socket .* does not exist/);
+	assert.match(status.error, /no ControlMaster for this host is running|ControlPersist/i);
+	transport.dispose();
+});
+
+test("missing-master diagnosis explains an existing but stale mux socket", async () => {
+	const stale = closeWith(255, { stderr: "Control socket connect: Connection refused" });
+	const childProcess = new ScriptedChildProcess([
+		closeWith(0, { stdout: `host HPDC_outside\ncontrolpath ${CONTROL_PATH}\n` }),
+		stale,
+	]);
+	const transport = new SystemOpenSshTransport({ sshEntry: "HPDC_outside", childProcess });
+	// The mux socket must exist on disk for the stale-socket branch; fake it
+	// through the fs seam used by socketExists.
+	const originalExists = fs.existsSync;
+	fs.existsSync = () => true;
+	try {
+		const status = await transport.checkMaster();
+		assert.equal(status.ready, false);
+		assert.match(status.error, /mux socket .* exists but 'ssh -O check' failed/);
+		assert.match(status.error, /stale|reconnect/i);
+	} finally {
+		fs.existsSync = originalExists;
+		transport.dispose();
+	}
+});
+
+test("missing-master diagnosis flags a ControlPath above the Unix-socket length limit", async () => {
+	const longPath = "/tmp/dsh-" + "p".repeat(120) + ".sock";
+	const childProcess = new ScriptedChildProcess([
+		closeWith(0, { stdout: `host HPDC_outside\ncontrolpath ${longPath}\n` }),
+		closeWith(255, { stderr: "Control socket connect: No such file" }),
+	]);
+	const transport = new SystemOpenSshTransport({ sshEntry: "HPDC_outside", childProcess });
+	const status = await transport.checkMaster();
+	assert.equal(status.ready, false);
+	assert.match(status.error, /does not exist/);
+	assert.match(status.error, /~104 bytes/);
+	assert.match(status.error, /shorten ControlPath/);
 	transport.dispose();
 });

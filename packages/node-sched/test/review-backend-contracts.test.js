@@ -17,6 +17,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Client } from "ssh2";
+import { WebSocketServer } from "ws";
 
 const INDEX = "../lib/index.js";
 const SSH_ENGINE = "../lib/ssh-engine.js";
@@ -27,6 +28,37 @@ async function exported(modulePath, name) {
 	assert.equal(typeof module[name], "function", `${name} must be an exported function`);
 	return module[name];
 }
+
+test("all sched tools propagate cancellation through the query and OpenSSH process", async () => {
+	await withBackendRoutes({}, async ({ state }) => {
+		assert.equal(state.tools.size, 6);
+		for (const [name, tool] of state.tools) {
+			const args = { task_id: "batch:task" };
+			const preAborted = new AbortController();
+			const reason = new Error(`cancel ${name}`);
+			preAborted.abort(reason);
+			const before = state.spawnCalls.length;
+			await assert.rejects(tool.execute(args, { signal: preAborted.signal }), (error) => error === reason);
+			assert.equal(state.spawnCalls.length, before, `${name} must not spawn after cancellation`);
+
+			state.hangCommands = true;
+			const controller = new AbortController();
+			const pending = tool.execute(args, { signal: controller.signal });
+			const rejected = assert.rejects(pending, (error) => error === reason);
+			let call;
+			for (let tick = 0; tick < 30 && !call; tick += 1) {
+				await new Promise((resolve) => setImmediate(resolve));
+				call = state.spawnCalls.slice(before).find(({ args }) => !args.includes("-G") && !args.includes("-O"));
+			}
+			assert.ok(call, `${name} must start its command`);
+			controller.abort(reason);
+			await rejected;
+			assert.deepEqual(call.child.killCalls, ["SIGTERM"], `${name} must terminate its SSH child`);
+			assert.equal(state.spawnCalls.slice(before).filter(({ args }) => !args.includes("-G") && !args.includes("-O")).length, 1);
+			state.hangCommands = false;
+		}
+	});
+});
 
 function responseRecorder() {
 	return Object.assign(new EventEmitter(), {
@@ -148,6 +180,9 @@ async function withBackendRoutes(statusDocument, callback, { beforeApply } = {})
 	const home = mkdtempSync(path.join(tmpdir(), "nodesched-review-"));
 	const routes = new Map();
 	const state = {
+		tools: new Map(),
+		upgrades: new Map(),
+		hangCommands: false,
 		commands: [],
 		statusOutage: false,
 		masterOutage: false,
@@ -217,7 +252,13 @@ async function withBackendRoutes(statusDocument, callback, { beforeApply } = {})
 		const hangingMasterCheck = args.includes("-O")
 			&& args.includes("check")
 			&& state.hangMasterAliases.has(String(args.at(-1)));
-		if (!hangingMasterCheck) queueMicrotask(() => {
+		const hangingCommand = state.hangCommands && !args.includes("-G") && !args.includes("-O");
+		if (hangingCommand) child.kill = (signal) => {
+			child.killCalls.push(signal);
+			queueMicrotask(() => child.emit("close", null, signal));
+			return true;
+		};
+		if (!hangingMasterCheck && !hangingCommand) queueMicrotask(() => {
 			if (stdout) child.stdout.emit("data", Buffer.from(stdout));
 			if (stderr) child.stderr.emit("data", Buffer.from(stderr));
 			child.emit("close", code);
@@ -228,13 +269,16 @@ async function withBackendRoutes(statusDocument, callback, { beforeApply } = {})
 		dispose = apply({
 			logger: { info() {}, warn() {}, error() {} },
 			systemPrompt: { section() {} },
-			tools: { register() { return () => {}; } },
+			tools: { register(tool) { state.tools.set(tool.name, tool); return () => {}; } },
 			webServer: {
 				register(route) {
 					routes.set(route.path, route.handler);
 					return () => routes.delete(route.path);
 				},
-				registerUpgrade() { return () => {}; },
+				registerUpgrade(route) {
+					state.upgrades.set(route.path, route.handler);
+					return () => state.upgrades.delete(route.path);
+				},
 			},
 		}, {
 			sshEntry: "gateway",
@@ -269,7 +313,7 @@ async function withBackendRoutes(statusDocument, callback, { beforeApply } = {})
 		// background. system-openssh first performs a local mux check, so allow
 		// that promise chain to settle before an assertion resets command history.
 		await new Promise((resolve) => setImmediate(resolve));
-		await callback({ request, state, home });
+		await callback({ request, state, home, token });
 	} finally {
 		try {
 			dispose?.();
@@ -281,6 +325,61 @@ async function withBackendRoutes(statusDocument, callback, { beforeApply } = {})
 		}
 	}
 }
+
+test("event tail resolves config without authentication and shares only the existing SSH connection", async (t) => {
+	const { SshEngine } = await import(SSH_ENGINE);
+	const configCalls = [];
+	const streamCommands = [];
+	let clientEndCalls = 0;
+	let record;
+	const client = new EventEmitter();
+	const channel = Object.assign(new EventEmitter(), {
+		stderr: new EventEmitter(),
+		closeCalls: 0,
+		close() { this.closeCalls++; this.emit("close"); },
+	});
+	client.exec = (command, callback) => { streamCommands.push(command); callback(null, channel); };
+	client.end = () => { clientEndCalls++; };
+	t.mock.method(Client.prototype, "connect", () => { assert.fail("event tail must never create a new SSH connection"); });
+	t.mock.method(SshEngine.prototype, "execRetryable", async () => ({ success: true, stdout: JSON.stringify(statusFixture()), stderr: "" }));
+	t.mock.method(SshEngine.prototype, "execOnce", async function (alias, command, _timeout, options) {
+		if (command !== "cat $HOME/.sched/config.json") return { success: true, stdout: "ok", stderr: "" };
+		configCalls.push(options);
+		assert.equal(options.interactiveAuth, false);
+		assert.equal(options.requireExistingConnection, true);
+		assert.ok(options.signal instanceof AbortSignal);
+		record = { client, hops: [], inFlight: 0, idleAt: Date.now(), broken: false, disposed: false, closed: false };
+		this.pool.set(alias, record);
+		return { success: true, stdout: '{"node":"compute-01"}', stderr: "" };
+	});
+	t.mock.method(WebSocketServer.prototype, "handleUpgrade", (_req, socket, _head, done) => done(socket.webSocket));
+	await withBackendRoutes(statusFixture(), async ({ state, token }) => {
+		const ws = Object.assign(new EventEmitter(), {
+			OPEN: 1, readyState: 1, bufferedAmount: 0, sent: [],
+			send(value) { this.sent.push(JSON.parse(value)); },
+			close() { if (this.readyState !== 1) return; this.readyState = 3; this.emit("close"); },
+		});
+		const req = requestFor("/sched/ws/events", { origin: "http://127.0.0.1:3000" });
+		req.headers["sec-websocket-protocol"] = `sched-auth, ${token}`;
+		state.upgrades.get("/sched/ws/events")(req, { webSocket: ws, destroy() { assert.fail("authenticated socket rejected"); } }, Buffer.alloc(0));
+		for (let tick = 0; tick < 20 && !streamCommands.length; tick++) await new Promise((resolve) => setImmediate(resolve));
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.equal(configCalls.length, 1);
+		assert.deepEqual(streamCommands, ["tail -n 50 -F $HOME/.sched/compute-01/scheduler.log 2>/dev/null"]);
+		assert.equal(record.inFlight, 1);
+		channel.emit("data", Buffer.from("decision sample\n"));
+		assert.ok(ws.sent.some((frame) => frame.type === "log" && frame.line === "decision sample"));
+		ws.close();
+		assert.equal(channel.closeCalls, 1);
+		assert.equal(record.inFlight, 0);
+		assert.equal(clientEndCalls, 0, "closing the dashboard must not close the shared SSH connection");
+	}, {
+		beforeApply({ home }) {
+			mkdirSync(path.join(home, ".dsh"), { recursive: true, mode: 0o700 });
+			writeFileSync(path.join(home, ".dsh", "nodesched_entry.json"), JSON.stringify({ sshEntry: "gateway", schedAlias: "compute" }), { mode: 0o600 });
+		},
+	});
+});
 
 test("X-H01 cancel consumer always passes the confirmed --yes flag", async () => {
 	const buildOperationCommand = await exported(INDEX, "buildOperationCommand");

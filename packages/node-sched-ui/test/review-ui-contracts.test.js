@@ -20,23 +20,23 @@ test("style injection refreshes the existing node during client hot reload", asy
 
 test("dashboard authentication stays dormant until the panel is visible and authenticated", async () => {
 	const source = await readFile(new URL("../src/client.jsx", import.meta.url), "utf8");
-	const hostStart = source.indexOf("\tfunction DashboardHost({ panel })");
-	const hostEnd = source.indexOf("\n\t// ── sidebar footer entry", hostStart);
+	const hostStart = source.indexOf("\tfunction DashboardHost({ usePanelInfo })");
+	const hostEnd = source.indexOf("\n\t// ── settings card:", hostStart);
 	const host = source.slice(hostStart, hostEnd);
-	const mountStart = source.indexOf("\t// 页面视图：centerCol");
-	const mountEnd = source.indexOf("\n\t\t// 外壳启动晚于插件 apply", mountStart);
+	const mountStart = source.indexOf("\tconst disposeMain = cctx.slots.inject(\"main\"");
+	const mountEnd = source.indexOf("\n\t// B25c:", mountStart);
 	const mount = source.slice(mountStart, mountEnd);
 	const telemetryStart = source.indexOf("\t// B25c: 渲染树异常遥测");
 	const telemetryEnd = source.indexOf("\n\tconst disposeSettings", telemetryStart);
 	const telemetry = source.slice(telemetryStart, telemetryEnd);
-	const statusCardStart = source.indexOf("\tfunction StatusCard()");
-	const statusCardEnd = source.indexOf("\n\t// ── sidebar footer entry", statusCardStart);
+	const statusCardStart = source.indexOf("\tfunction StatusCard({ close })");
+	const statusCardEnd = source.indexOf("\n\t// DSH 0.1.6:", statusCardStart);
 	const statusCard = source.slice(statusCardStart, statusCardEnd);
 
 	assert.ok(hostStart >= 0 && hostEnd > hostStart);
 	assert.match(host, /if \(!visible\) return null;/);
-	assert.match(host, /if \(auth\.status !== "ready"\)/);
-	assert.match(host, /return j\(AuthenticationRequiredView,/);
+	assert.match(host, /auth\.status !== "ready"/);
+	assert.match(host, /\? j\(AuthenticationRequiredView,/);
 	assert.doesNotMatch(host, /return j\(AuthenticationGate,/);
 	assert.match(host, /if \(visible\) void authGate\.restore\(\);/);
 	assert.match(host, /visible && auth\.status === "locked" && auth\.hasTrustedDevice/);
@@ -44,7 +44,7 @@ test("dashboard authentication stays dormant until the panel is visible and auth
 	assert.match(host, /auth\.status !== "ready" \|\| reportedOpen\.current/);
 	assert.match(host, /authFetch\("\/sched\/api\/client-log"/);
 	assert.doesNotMatch(mount, /authFetch\(/);
-	assert.match(telemetry, /if \(!panel\.isOpen\(\)\) return;/);
+	assert.match(telemetry, /if \(!panelVisible\) return;/);
 	assert.match(statusCard, /open && auth\.status === "ready"/);
 	assert.doesNotMatch(source, /window\.prompt\s*\(/);
 	assert.match(source, /authGate\.authorizedFetch\(input, init\)/);
@@ -182,7 +182,7 @@ test("SSH authentication challenges stay in a banner until the user opens the mo
 	const bannerEnd = source.indexOf("\n\t// B24c: SSH 交互式身份认证弹窗", bannerStart);
 	const banner = source.slice(bannerStart, bannerEnd);
 	const dashboardStart = source.indexOf("\tfunction Dashboard({ onClose, visible, auth })");
-	const dashboardEnd = source.indexOf("\n\tfunction DashboardHost({ panel })", dashboardStart);
+	const dashboardEnd = source.indexOf("\n\tfunction DashboardHost({ usePanelInfo })", dashboardStart);
 	const dashboard = source.slice(dashboardStart, dashboardEnd);
 
 	assert.ok(bannerStart >= 0 && bannerEnd > bannerStart);
@@ -668,7 +668,7 @@ test("every dashboard multiline text box has a bounded vertical resize grip", as
 
 	assert.ok(start >= 0 && end > start);
 	assert.match(source, /\.nsResizableTextBox::\-webkit-resizer/);
-	assert.match(source, /right bottom \/ 14px 14px no-repeat/);
+	assert.match(source, /backgroundSize: "12px 12px"/);
 	assert.match(component, /className: \[className, "nsResizableTextBox"\]/);
 	assert.match(component, /boxSizing: "border-box"/);
 	assert.match(component, /minHeight/);
@@ -681,6 +681,53 @@ test("every dashboard multiline text box has a bounded vertical resize grip", as
 	assert.doesNotMatch(source, /j\("pre"/);
 	assert.match(source, /"aria-label": "批次 JSON"/);
 	assert.match(source, /"aria-label": "配置 JSON"/);
+});
+
+test("resize grips render at one unified size on every resizable text box", async () => {
+	const source = await readFile(new URL("../src/client.jsx", import.meta.url), "utf8");
+
+	// 原生 resizer 完全透明化（textarea 上会叠加尺寸不一的原生抓手）
+	assert.match(source, /\.nsResizableTextBox::-webkit-resizer \{ -webkit-appearance: none; appearance: none; background: transparent !important; \}/);
+	// 抓手统一画在元素自身背景上，唯一尺寸声明（12px）
+	assert.equal((source.match(/backgroundSize: "12px 12px"/g) ?? []).length, 1);
+	assert.match(source, /backgroundPosition: "right bottom"/);
+	assert.match(source, /backgroundRepeat: "no-repeat"/);
+	assert.doesNotMatch(source, /right bottom \/ \d+px \d+px no-repeat/);
+});
+
+test("in-page buttons expose unified hover feedback aligned with the sidebar entries", async () => {
+	const source = await readFile(new URL("../src/client.jsx", import.meta.url), "utf8");
+
+	// btn()/ghostBtn 注入 .nsBtn；悬停/按压反馈；禁用态无反馈
+	assert.match(source, /\.nsBtn::after \{ content:/);
+	assert.match(source, /\.nsBtn:not\(:disabled\):hover::after \{ opacity: 0\.15; \}/);
+	assert.match(source, /\.nsBtn:not\(:disabled\):active::after \{ opacity: 0\.3; \}/);
+	assert.match(source, /className: "nsBtn", "--ns-btn-hover": color/);
+	assert.match(source, /className: "nsBtn", "--ns-btn-hover": "var\(--dsw-alias-label-secondary, #6b7280\)"/);
+	// tab：未选中悬停预览选中态（色值/描边切到品牌色）；已选中悬停/按压不再叠加反馈层
+	assert.match(source, /\.nsBtn\.nsTab:not\(:disabled\):hover \{ color: var\(--ns-btn-hover, #3b82f6\) !important/);
+	assert.match(source, /\.nsBtn\.nsTabOn:not\(:disabled\):hover::after/);
+	assert.match(source, /className: selected \? "nsBtn nsTab nsTabOn" : "nsBtn nsTab"/);
+	assert.match(source, /const tabBtn = \(color, selected\) =>/);
+	assert.match(source, /style: tabBtn\(T\.brand, tab === t\)/);
+});
+
+test("history tab renders a sticky column header row with overflow-safe cells", async () => {
+	const source = await readFile(new URL("../src/client.jsx", import.meta.url), "utf8");
+	const start = source.indexOf("\tfunction HistoryTab()");
+	const end = source.indexOf("\n\tfunction AuthenticationGate", start);
+	const historyTab = source.slice(start, end);
+
+	assert.ok(start >= 0 && end > start);
+	assert.match(historyTab, /const HISTORY_GRID = "minmax\(0,2fr\) minmax\(0,1\.4fr\) minmax\(0,1fr\) minmax\(0,\.7fr\)"/);
+	assert.match(historyTab, /j\("span", null, "batch"\)/);
+	assert.match(historyTab, /j\("span", null, "task"\)/);
+	assert.match(historyTab, /j\("span", null, "status"\)/);
+	assert.match(historyTab, /j\("span", null, "version"\)/);
+	assert.match(historyTab, /position: "sticky"/);
+	assert.match(historyTab, /gridTemplateColumns: HISTORY_GRID/);
+	assert.equal((historyTab.match(/textOverflow: "ellipsis"/g) ?? []).length, 4);
+	assert.equal((historyTab.match(/whiteSpace: "nowrap"/g) ?? []).length, 4);
 });
 
 test("SSH host trust UI reuses known_hosts, supports zero-credential confirmation, and truly cancels", async () => {

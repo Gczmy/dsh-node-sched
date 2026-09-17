@@ -29,7 +29,7 @@
 | 包 | 类型 | 说明 |
 |---|---|---|
 | [`packages/node-sched`](packages/node-sched) | host 插件 | 远程 `sched` CLI 的 SSH 代理、只读 agent 工具、看板 RPC/WS 管道、写操作并发门 + 审计日志 |
-| [`packages/node-sched-ui`](packages/node-sched-ui) | client 插件 | 全屏看板：分段进度条批次网格、GPU 面板、实时事件流、dry-run 门控提交 |
+| [`packages/node-sched-ui`](packages/node-sched-ui) | client 插件 | 原生主面板看板：分段进度条批次网格、GPU 面板、实时事件流、dry-run 门控提交 |
 
 ## 功能特性
 
@@ -95,16 +95,17 @@ host 插件运行于 macOS 或 Linux。Windows 用户需在 WSL2 内运行 dsh�
 - Node.js ≥ 22
 - 一台可经 SSH 访问、已部署 [sched](https://github.com/Gczmy/sched) 的主机
 - macOS 或 Linux（Windows 使用 WSL2，并将凭据数据放在 Linux 文件系统）
-- 版本匹配的 dsh
+- dsh `0.1.6-alpha.1`（本轮适配目标，为预发布版本）
 
 ### 安装
 
 ```bash
-# 将两个包加入 dsh profile
-dsh plugin --profile nodesched add ./packages/node-sched ./packages/node-sched-ui
+# 在本仓库根目录执行，将两个插件链接到指定 profile
+npx @deepseek-ai/dsh@0.1.6-alpha.1 plugin --profile nodesched add \
+  link:./packages/node-sched link:./packages/node-sched-ui
 ```
 
-在 profile 的 `package.json` 中声明 bundle 顺序：
+本示例的 `dsh.profile.bundles` 只保留官方 base 和 Web bundle。将以下字段合并到 profile 的现有 `package.json`（通常为 `~/.dsh/profiles/nodesched/package.json`），保留其 dependencies 和其他配置：
 
 ```json
 {
@@ -112,16 +113,14 @@ dsh plugin --profile nodesched add ./packages/node-sched ./packages/node-sched-u
     "profile": {
       "bundles": [
         "@deepseek-ai/dsh-base",
-        "@deepseek-ai/dsh-web-app",
-        "@zzc/dsh-node-sched",
-        "@zzc/dsh-node-sched-ui"
+        "@deepseek-ai/dsh-web-app"
       ]
     }
   }
 }
 ```
 
-在 `cordis.patch.yml` 中配置 SSH 入口（完整示例见 [`profile/cordis.patch.yml`](profile/cordis.patch.yml)）：
+两个 sched 包是普通的 link 插件依赖，没有声明 `dsh.bundle`，不能加入 `dsh.profile.bundles`，否则加载器找不到 bundle patch 并拒绝启动。安装时出现 `declares no dsh.bundle` 提示是预期行为。将下面的 `insert` 条目合并到该 profile 的 `cordis.patch.yml` 才会挂载插件，同时配置 SSH 入口（完整示例见 [`profile/cordis.patch.yml`](profile/cordis.patch.yml)）。只修改本仓库的示例文件不会更新实际生效的 profile：
 
 ```yaml
 - insert:
@@ -147,11 +146,17 @@ dsh plugin --profile nodesched add ./packages/node-sched ./packages/node-sched-u
 ### 运行
 
 ```bash
-dsh --profile nodesched
-# 打开 http://127.0.0.1:<端口>，点击侧栏底部的 ⚡ sched 入口
+npx @deepseek-ai/dsh@0.1.6-alpha.1 --profile nodesched
+# 打开 http://127.0.0.1:<端口>，点击侧栏的 sched 入口
 ```
 
+如果 `dsh` 命令已经指向该版本，也可以用 `dsh --profile nodesched`。`--profile` 接收 profile 名称，不是 YAML 路径；`dsh web --profile ...` 不是支持的启动方式。该 profile 中的 Web bundle 负责加载网页界面。
+
+在适配目标版本中，sched 接入 DSH 原生主面板与设置页。点击会话或顶部 Logo 新建会话时，DSH 会切走 sched 主面板，不会留下遮挡对话的独立覆盖层；设置页显示 sched 状态及看板入口。聊天中的“停止”会把取消信号传到正在执行的 sched 查询，终止其等待及对应通道或子进程。
+
 加载外围 DSH 页面不会触发 sched 认证、轮询或 WebSocket。打开看板但没有可用浏览器会话时，只显示不遮挡内容的横幅；点击横幅上的连接按钮后才打开令牌表单。取消表单会回到横幅，并且不会启动受保护的看板请求。首次连接从 `~/.dsh/node-sched-access-token` 粘贴 master token；默认情况下浏览器只持久化 origin 内不可导出的 P-256 设备密钥，后续可在设备信任有效期内静默换取短期会话，master token 本身不会保存在浏览器中。
+
+内置 SSH 引擎中，取消认证会结束当前尝试并暂停该主机的自动认证，后台轮询不会重新弹出验证。需要恢复时，在 SSH 面板显式测试主机、重新绑定、执行命令或打开终端。实时事件流只在已有的、已认证连接池连接上打开通道；没有可复用连接时等待显式连接，不另建密码/2FA 登录。
 
 ## HTTP API
 

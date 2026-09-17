@@ -1,4 +1,5 @@
 import cp from "node:child_process";
+import fs from "node:fs";
 import os from "node:os";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -264,7 +265,7 @@ function runProcess({
 	});
 }
 
-function masterFailure(sshEntry, result, checkedAt) {
+function masterFailure(sshEntry, result, checkedAt, controlPath) {
 	if (result.aborted) {
 		return {
 			ready: false,
@@ -273,15 +274,44 @@ function masterFailure(sshEntry, result, checkedAt) {
 			error: "OpenSSH ControlMaster check was aborted.",
 		};
 	}
-	const suffix = result.timedOut
+	// Diagnose WHY the mux check failed so the dashboard banner says more than
+	// "log in first": the common real-world causes (master never started,
+	// ControlPersist expired, stale socket, ControlPath longer than the OS
+	// Unix-socket limit) are otherwise indistinguishable.
+	let diagnosis = "";
+	if (result.timedOut) {
+		diagnosis = "The ControlMaster check timed out.";
+	} else if (controlPath) {
+		const stderr = String(result.stderr ?? result.error ?? "").trim();
+		const controlPathBytes = Buffer.byteLength(controlPath, "utf8");
+		if (!socketExists(controlPath)) {
+			diagnosis = `mux socket ${controlPath} does not exist — no ControlMaster for this host is running (or ControlPersist already expired). Connect with ssh ${sshEntry} in a terminal first.`;
+			if (controlPathBytes > 100) {
+				diagnosis += ` ControlPath is ${controlPathBytes} bytes; most platforms cannot bind sockets above ~104 bytes, so shorten ControlPath in ~/.ssh/config.`;
+			}
+		} else if (stderr) {
+			diagnosis = `mux socket ${controlPath} exists but 'ssh -O check' failed: ${stderr}. The socket may be stale — reconnect with ssh ${sshEntry}.`;
+		} else {
+			diagnosis = `mux socket ${controlPath} exists but 'ssh -O check' failed (exit code ${result.code ?? "?"}). The socket may be stale — reconnect with ssh ${sshEntry}.`;
+		}
+	}
+	const suffix = result.timedOut && !diagnosis
 		? " (ControlMaster check timed out)"
 		: "";
 	return {
 		ready: false,
 		checkedAt,
 		code: "no_control_master",
-		error: `No active OpenSSH ControlMaster for ${sshEntry}${suffix}. Connect with ssh ${sshEntry} in a terminal first.`,
+		error: `No active OpenSSH ControlMaster for ${sshEntry}${suffix}. ${diagnosis || `Connect with ssh ${sshEntry} in a terminal first.`}`.trim(),
 	};
+}
+
+function socketExists(controlPath, fsModule = fs) {
+	try {
+		return Boolean(fsModule.existsSync?.(controlPath));
+	} catch {
+		return false;
+	}
 }
 
 function controlPathFailure(sshEntry, result, checkedAt, detail) {
@@ -298,7 +328,7 @@ function controlPathFailure(sshEntry, result, checkedAt, detail) {
 		ready: false,
 		checkedAt,
 		code: "no_control_master",
-		error: `No usable OpenSSH ControlPath for ${sshEntry}${suffix}. ${detail || `Configure ControlMaster/ControlPath and connect with ssh ${sshEntry} first.`}`,
+		error: `No usable OpenSSH ControlPath for ${sshEntry}${suffix}. ${detail || `Configure ControlMaster/ControlPath and connect with ssh ${sshEntry} first.`}`.trim(),
 	};
 }
 
@@ -467,7 +497,10 @@ export class SystemOpenSshTransport {
 		} catch (error) {
 			return controlPathFailure(this.sshEntry, configResult, checkedAt, errorText(error));
 		}
-		if (!controlPath) return controlPathFailure(this.sshEntry, configResult, checkedAt);
+		if (!controlPath) {
+			return controlPathFailure(this.sshEntry, configResult, checkedAt,
+				"ssh -G reports no ControlPath (none) for this host — add 'ControlMaster auto' and 'ControlPath' under this Host in ~/.ssh/config, then connect with ssh once.");
+		}
 		const remainingMs = Math.max(1, timeoutMs - (Date.now() - started));
 		const result = await this._run(this._masterCheckArgs(controlPath), {
 			...options,
@@ -475,7 +508,7 @@ export class SystemOpenSshTransport {
 			stdinData: undefined,
 		});
 		if (result.ok) return { ready: true, checkedAt, controlPath };
-		return masterFailure(this.sshEntry, result, checkedAt);
+		return masterFailure(this.sshEntry, result, checkedAt, controlPath);
 	}
 
 	_waitForMasterProbe(record, { signal, timeoutMs } = {}) {
@@ -530,6 +563,7 @@ export class SystemOpenSshTransport {
 				this.sshEntry,
 				{ timedOut: true },
 				new Date().toISOString(),
+				undefined,
 			)), Math.max(1, waiterDeadlineAt - Date.now()));
 		});
 	}

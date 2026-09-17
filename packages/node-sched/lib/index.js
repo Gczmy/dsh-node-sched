@@ -1226,6 +1226,23 @@ class AuthChallengeBroker {
 		for (const id of [...this.pending.keys()]) this.finish(id, "cancelled");
 	}
 
+	/** Cancel every pending challenge that targets one of the given aliases.
+	 * Transport switches invalidate the connections these challenges were
+	 * authenticating; without this, a stale modal lingers until its 180s
+	 * deadline for a host the dashboard is no longer using. */
+	cancelAllForAliases(aliases) {
+		const wanted = new Set((Array.isArray(aliases) ? aliases : [])
+			.filter((alias) => typeof alias === "string" && alias)
+			.map((alias) => String(alias)));
+		if (wanted.size === 0) return [];
+		const cancelled = [];
+		for (const [id, pending] of [...this.pending]) {
+			if (!wanted.has(pending.event.alias)) continue;
+			if (this.finish(id, "cancelled")) cancelled.push(id);
+		}
+		return cancelled;
+	}
+
 	pendingIds() {
 		return [...this.pending.keys()];
 	}
@@ -2023,6 +2040,12 @@ function apply(ctx, config) {
 		broadcast: (event) => broadcastFn?.(event),
 	});
 	sshEngine.setInteractivePrompter((request) => authBroker.request(request));
+	// Transport switches drop the old alias's connections (dropAlias); cancel
+	// its pending challenges too, so a stale "等待输入<old host>" banner cannot
+	// linger for up to 3 minutes after switching transports.
+	sshEngine.onAliasDrop = (alias) => {
+		try { authBroker.cancelAllForAliases([alias]); } catch { /* broker keeps its own invariants */ }
+	};
 
 	const runRemoteCli = makeRunner(cp, config);
 	/**
@@ -2067,6 +2090,7 @@ function apply(ctx, config) {
 				(error) => ({
 					ok: false,
 					code: -1,
+					errorCode: error?.code,
 					stdout: "",
 					stderr: `[ssh-engine:${target.alias}] ${formatSshError(error)}`,
 				}),
@@ -2250,15 +2274,19 @@ function apply(ctx, config) {
 
 	/** Read-only remote query; only this path may retry transient failures. */
 	async function query(args, opts = {}) {
+		opts.signal?.throwIfAborted();
 		const target = opts.target ?? captureTransportTarget();
 		const runOpts = {
 			...(opts.timeoutMs === undefined ? {} : { timeoutMs: opts.timeoutMs }),
+			signal: opts.signal,
 			retryable: true,
 		};
 		let res = await runOnTarget(target, args, runOpts);
+		opts.signal?.throwIfAborted();
 		if (target.mode === "cli" && !res.ok && isTransientSshError(res.stderr)) {
 			res = await runOnTarget(target, args, runOpts);
 		}
+		opts.signal?.throwIfAborted();
 		return envelope(res, opts);
 	}
 
@@ -2391,13 +2419,13 @@ function apply(ctx, config) {
 					job_cursor: { type: "string", description: "Previous page next_job_cursor for job paging." },
 				},
 				output: textOutput,
-				execute: async (args) => {
+				execute: async (args, exec) => {
 					const { raw, text } = await query(buildStatusCommand({
 						schedBin: S,
 						limit: args.limit,
 						cursor: args.cursor,
 						jobCursor: args.job_cursor,
-					}));
+					}), { signal: exec?.signal });
 					return { text: raw ? summarizeStatus(raw) : text };
 				},
 				presentCall: presentRead("Query sched status"),
@@ -2410,7 +2438,7 @@ function apply(ctx, config) {
 					"memory capacity, and owning job.",
 				parameters: {},
 				output: textOutput,
-				execute: async () => ({ text: (await query(`${S} list-gpus`, { json: false })).text }),
+				execute: async (_args, exec) => ({ text: (await query(`${S} list-gpus`, { json: false, signal: exec?.signal })).text }),
 				presentCall: presentRead("List scheduler GPUs"),
 			})),
 
@@ -2423,8 +2451,8 @@ function apply(ctx, config) {
 					task_id: { type: "string", required: true, description: "`<batch>:<task>` identifier." },
 				},
 				output: textOutput,
-				execute: async (args) => {
-					const result = await query(buildTaskCommand("task", args.task_id, { schedBin: S }));
+				execute: async (args, exec) => {
+					const result = await query(buildTaskCommand("task", args.task_id, { schedBin: S }), { signal: exec?.signal });
 					return { text: result.raw ? JSON.stringify(result.raw, null, 2) : result.text };
 				},
 			})),
@@ -2438,13 +2466,13 @@ function apply(ctx, config) {
 					cursor: { type: "string", description: "Previous page next_cursor." },
 				},
 				output: textOutput,
-				execute: async (args) => ({
+				execute: async (args, exec) => ({
 					text: (await query(buildHistoryCommand({
 						schedBin: S,
 						batch: args.batch,
 						limit: args.limit === undefined ? undefined : clamp(args.limit, 1, 200),
 						cursor: args.cursor,
-					}))).text,
+					}), { signal: exec?.signal })).text,
 				}),
 				presentCall: presentRead("Query sched history"),
 			})),
@@ -2459,8 +2487,8 @@ function apply(ctx, config) {
 					lines: { type: "number", description: "Tail length, clamped to [1, 2000]." },
 				},
 				output: textOutput,
-				execute: async (args) => ({
-					text: (await query(`${S} log ${shellQuote(args.task_id)} -n ${clamp(args.lines ?? 100, 1, 2000)}`, { json: false })).text,
+				execute: async (args, exec) => ({
+					text: (await query(`${S} log ${shellQuote(args.task_id)} -n ${clamp(args.lines ?? 100, 1, 2000)}`, { json: false, signal: exec?.signal })).text,
 				}),
 				presentCall: (a) => ({ card: "generic", title: `Tail log ${a.task_id}`, kind: "read" }),
 			})),
@@ -2470,7 +2498,7 @@ function apply(ctx, config) {
 				description: "One-line-per-batch terminal-state markers (done/blocked) across history.",
 				parameters: {},
 				output: textOutput,
-				execute: async () => ({ text: (await query(`${S} markers`, { json: false })).text }),
+				execute: async (_args, exec) => ({ text: (await query(`${S} markers`, { json: false, signal: exec?.signal })).text }),
 				presentCall: presentRead("Batch terminal markers"),
 			})),
 		];
@@ -3279,7 +3307,8 @@ function apply(ctx, config) {
 		};
 		const recordTailFailure = (code, message) => {
 			const failureCode = code || "tail_unavailable";
-			tailRetryMs = failureCode === "no_control_master"
+			tailRetryMs = failureCode === "no_control_master" || failureCode === "SSH_NO_EXISTING_CONNECTION"
+				|| failureCode.startsWith("SSH_INTERACTIVE_AUTH_")
 				? NO_MASTER_TAIL_RETRY_MS
 				: NORMAL_TAIL_RETRY_MS;
 			if (tailLastFailureCode !== failureCode) {
@@ -3315,6 +3344,8 @@ function apply(ctx, config) {
 				signal,
 				deadlineAt,
 				timeoutMs: Math.max(1, deadlineAt - Date.now()),
+				interactiveAuth: false,
+				requireExistingConnection: true,
 			});
 			if (!res.ok) {
 				return {
@@ -3354,7 +3385,6 @@ function apply(ctx, config) {
 				releaseOpening();
 				return;
 			}
-			recordTailReady();
 			const safeNode = String(nodeName).replace(/[^a-zA-Z0-9.-]/g, "");
 			const remoteCmd = `tail -n 50 -F $HOME/.sched/${safeNode}/scheduler.log 2>/dev/null`;
 			const framer = new ByteLineFramer({
@@ -3381,6 +3411,7 @@ function apply(ctx, config) {
 			if (target.mode === "local") {
 				localTransport.openStream(remoteCmd).then((stream) => {
 					if (tailDisposed || generation !== tailGeneration || tailChild || tailStream || clients.size === 0) { stream.close(); return; }
+					recordTailReady();
 					tailStream = stream;
 					stream.onData = onData;
 					stream.onClose = onEnd;
@@ -3392,20 +3423,26 @@ function apply(ctx, config) {
 			}
 			if (target.mode === "engine") {
 				const { controller } = opening;
+				// The tail is an invisible background poller: a mid-session SSH
+				// reconnect here must fail fast instead of raising a challenge
+				// modal nobody can see.
 				openExecStream(sshEngine, target.alias, remoteCmd, {
 					signal: controller.signal,
 					deadlineAt: openDeadlineAt,
+					interactiveAuth: false,
+					requireExistingConnection: true,
 				}).then((stream) => {
 					if (tailDisposed || generation !== tailGeneration || tailChild || tailStream || clients.size === 0) {
 						try { stream.close(); } catch {}
 						return;
 					}
+					recordTailReady();
 					tailStream = stream;
 					stream.onData = onData;
 					stream.onClose = onEnd;
 				}).catch((e) => {
 					if (!controller.signal.aborted) {
-						ctx.logger.warn("[node-sched] engine tail failed (%s): %s", target.alias, safeError(e));
+						recordTailFailure(e?.code, safeError(e));
 					}
 					onEnd();
 				}).finally(releaseOpening);
@@ -3420,6 +3457,7 @@ function apply(ctx, config) {
 					try { stream.close(); } catch { /* stale open */ }
 					return;
 				}
+				recordTailReady();
 				tailStream = stream;
 				stream.onData = onData;
 				stream.onClose = onEnd;
@@ -3977,6 +4015,7 @@ function apply(ctx, config) {
 						refreshSshStore();
 						const body = await readBodyJson(req);
 						const result = await sshEngine.test(String(body.alias ?? ""));
+						if (result.ok && String(body.alias ?? "") === boundAlias) invalidateTargetCaches();
 						if (!result.ok && result.error) result.error = safeError(result.error);
 						json(res, result);
 					} catch (e) {
@@ -4000,6 +4039,7 @@ function apply(ctx, config) {
 							redactCommand(body.alias, 80),
 							redactCommand(command),
 						);
+						sshEngine.resumeAuthentication(String(body.alias ?? ""));
 						const result = await executeGenericSsh(
 							sshEngine,
 							String(body.alias ?? ""),

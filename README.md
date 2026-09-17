@@ -29,7 +29,7 @@ The design principle is **strict adapter architecture**: all scheduling intellig
 | Package | Type | Description |
 |---|---|---|
 | [`packages/node-sched`](packages/node-sched) | host plugin | SSH proxy to the remote `sched` CLI, read-only agent tools, dashboard RPC/WS plumbing, write-op concurrency gate + audit log |
-| [`packages/node-sched-ui`](packages/node-sched-ui) | client plugin | Full-screen dashboard: batch grid with segmented progress bars, GPU panel, live event stream, dry-run-gated submit |
+| [`packages/node-sched-ui`](packages/node-sched-ui) | client plugin | Native main-panel dashboard: batch grid with segmented progress bars, GPU panel, live event stream, dry-run-gated submit |
 
 ## Features
 
@@ -40,6 +40,7 @@ The design principle is **strict adapter architecture**: all scheduling intellig
 - **Task log viewer** — click any task to stream its stdout/stderr.
 - **Dry-run-gated submit** — paste a `batch.json`, preview the expansion and SKIP verdicts before committing; destructive operations (cancel / resubmit / GPU free / daemon stop) require typed confirmation.
 - **Multi-project aware** — surfaces per-project GPU quotas, priorities, and hard-affinity isolation as configured by sched's B11c multi-project mode.
+- **DSH navigation and cancellation** — the dashboard participates in the host's main-panel navigation and settings page; stopping an agent turn cancels its in-flight sched query.
 
 ### Project GPU access
 
@@ -65,6 +66,8 @@ The dashboard offers three query transports:
 - **System OpenSSH** (`system-openssh`) reuses an already-authenticated OpenSSH `ControlMaster` for `sshEntry`. It is the recommended mode on macOS and Linux when a terminal login already completed password or 2FA authentication.
 - **Embedded engine** (`engine`) keeps the existing ssh2 connection-pool, host-pin, and in-dashboard authentication path as an explicit alternative.
 - **Local** (`local`) runs the sched CLI directly when dsh and sched are on the same node.
+
+In embedded-engine mode, cancelling an SSH authentication challenge stops that attempt and suspends automatic authentication for that host. Background polling does not reopen the challenge. Use an explicit host test, bind, command, or terminal action in the SSH panel to try again. The live event stream opens a channel only on an already-authenticated pooled connection; if none is available, it waits for an explicit connection instead of creating a separate password/2FA login.
 
 Mutations are disabled by default. The optional `screen` writer is a compatibility transport only: it has no built-in session name and cannot run until both its SSH target and session are explicitly configured. Operators should use the plugin or `sched` CLI rather than attaching to or typing into an infrastructure screen.
 
@@ -98,16 +101,17 @@ The host plugin runs on macOS or Linux. On Windows, run dsh inside WSL2 and keep
 - Node.js ≥ 22
 - A reachable host running [sched](https://github.com/Gczmy/sched) with SSH access configured
 - macOS or Linux (WSL2 on Windows, with credential data in the Linux filesystem)
-- dsh ≥ matching your installed version
+- dsh `0.1.6-alpha.1` (the prerelease targeted by this compatibility update)
 
 ### Install
 
 ```bash
-# add both packages to a dsh profile
-dsh plugin --profile nodesched add ./packages/node-sched ./packages/node-sched-ui
+# run from this checkout; link both plugins into the named profile
+npx @deepseek-ai/dsh@0.1.6-alpha.1 plugin --profile nodesched add \
+  link:./packages/node-sched link:./packages/node-sched-ui
 ```
 
-Declare bundle order in the profile's `package.json`:
+Keep only the official base and Web bundles in this example's `dsh.profile.bundles`. Merge this field into the profile's existing `package.json` (normally `~/.dsh/profiles/nodesched/package.json`), preserving its dependencies and other settings:
 
 ```json
 {
@@ -115,16 +119,14 @@ Declare bundle order in the profile's `package.json`:
     "profile": {
       "bundles": [
         "@deepseek-ai/dsh-base",
-        "@deepseek-ai/dsh-web-app",
-        "@zzc/dsh-node-sched",
-        "@zzc/dsh-node-sched-ui"
+        "@deepseek-ai/dsh-web-app"
       ]
     }
   }
 }
 ```
 
-Configure every deployment-facing value in `cordis.patch.yml` (see [`profile/cordis.patch.yml`](profile/cordis.patch.yml)):
+The two sched packages are ordinary linked plugin dependencies and do not declare `dsh.bundle`. Do not add them to `dsh.profile.bundles`: the profile loader expects a bundle patch and will reject them. A `declares no dsh.bundle` message during installation is expected. Activate both plugins by merging the following `insert` entries into the named profile's `cordis.patch.yml`, configuring every deployment-facing value (see [`profile/cordis.patch.yml`](profile/cordis.patch.yml)). Editing the example in this checkout alone does not update the active profile:
 
 ```yaml
 - insert:
@@ -161,9 +163,14 @@ Immediately before every mutation, the selected writer runs `hostname` and `sche
 ### Run
 
 ```bash
-dsh --profile nodesched
-# open http://127.0.0.1:<port> and click the ⚡ sched entry in the sidebar footer
+npx @deepseek-ai/dsh@0.1.6-alpha.1 --profile nodesched
+# open http://127.0.0.1:<port> and click the sched entry in the sidebar
 ```
+
+If the `dsh` executable already resolves to this version, `dsh --profile nodesched` is equivalent. `--profile` takes a profile name, not a YAML path; `dsh web --profile ...` is not a supported invocation. The Web bundle in the named profile supplies the browser UI.
+
+On the targeted DSH version, sched uses the native main panel and settings section. Switching to a conversation or using the DSH logo to start one leaves the sched panel through the host's navigation, so a separate overlay cannot continue covering the conversation. The settings page also exposes the sched status and dashboard entry.
+
 Loading the surrounding DSH page does not authenticate, poll, or open a sched WebSocket. Opening the dashboard without a usable browser session shows a non-blocking banner, so the rest of the page remains visible; only clicking its connection button opens the token form. Cancelling that form returns to the banner and starts no protected dashboard work. Paste the master token from `~/.dsh/node-sched-access-token` once. By default the browser generates a non-exportable P-256 signing key, stores that private key in origin-scoped IndexedDB, and registers only its public key with the host for 30 days. Later opens reuse an unexpired short session or silently sign a one-time challenge to receive a new 15-minute bearer. The master token is never persisted in the browser. Uncheck **Trust this browser** to exchange it for a short session without registering a device.
 
 Trusted-browser records are stored by the host in `~/.dsh/node-sched-trusted-browsers.json` with mode `0600` and are invalidated when the master token changes. **Forget this device** revokes its sessions and closes its authenticated WebSockets. Browser trust belongs to one browser profile and origin: changing between `localhost` and `127.0.0.1`, changing the port, using a private window, or clearing site data requires pairing again. A normal web page cannot read `~/.dsh/node-sched-access-token`, so the first pairing cannot safely be made silent without a separate trusted native/CLI hand-off.

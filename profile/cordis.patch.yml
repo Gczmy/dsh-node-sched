@@ -1,8 +1,12 @@
 # nodesched profile — 用户层 cordis.patch.yml 示例。
-# 安装方式（首次）：
-#   dsh plugin --profile nodesched add <path-to>/packages/node-sched <path-to>/packages/node-sched-ui
-# 并在 profile 目录 package.json 的 dsh.profile.bundles 中按序声明：
-#   ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "@zzc/dsh-node-sched", "@zzc/dsh-node-sched-ui"]
+# 适配目标：DSH 0.1.6-alpha.1（预发布版）。在本仓库根目录首次安装：
+#   npx @deepseek-ai/dsh@0.1.6-alpha.1 plugin --profile nodesched add link:./packages/node-sched link:./packages/node-sched-ui
+# 本示例的 profile package.json 中，dsh.profile.bundles 仅按序声明：
+#   ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"]
+# 两个 sched 包没有 dsh.bundle，保留为 link 依赖，通过下面的 insert 挂载；不要加入 bundles。
+# 将本例合并到实际 profile 的 cordis.patch.yml，保留既有配置；只编辑仓库示例不会自动生效。
+# 启动：npx @deepseek-ai/dsh@0.1.6-alpha.1 --profile nodesched
+# --profile 是 profile 名称，不是 YAML 路径；不要使用 web --profile。
 #
 # 查询入口必须显式配置：校园网用 HPDC，校外用 HPDC_outside。
 # 本插件绝不自动切换入口；探活失败会直接提示检查网络环境。

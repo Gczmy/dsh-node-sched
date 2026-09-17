@@ -43,6 +43,35 @@ Windows 的前端构建使用 `fileURLToPath`；host 运行边界见下文，使
 构建依赖 `esbuild` 升级至 `0.25.12`，消除 `GHSA-67mh-4wv8-2f99`；本仓库使用
 build，未启用该公告涉及的开发服务器。升级后重新生成 bundle，并核对双平台构建一致。
 
+## DSH 0.1.6-alpha.1 适配（2026-09-17）
+
+本轮以已安装的 `0.1.6-alpha.1` 预发布版接口为适配目标。下方早期 M3a/M4 的
+`web-ui.plugin.item` 与独立 overlay 描述保留为历史记录，当前 UI 以本节为准。
+本节描述实现契约，不代表已经重启 DSH 或完成远程 2FA/集群生产验收。
+
+- **加载**：`@zzc/dsh-node-sched` 和 `@zzc/dsh-node-sched-ui` 都没有 `dsh.bundle`，
+  应作为普通 link 依赖安装，再由用户 profile 的 `cordis.patch.yml` 使用 `insert` 挂载。
+  本仓库示例的 `dsh.profile.bundles` 只放官方 base/Web bundle；把双插件加入该数组
+  会使加载器查找不存在的 bundle patch。安装时 `declares no dsh.bundle` 是预期提示。
+- **启动**：`npx @deepseek-ai/dsh@0.1.6-alpha.1 --profile nodesched`，profile 参数是
+  配置名称，不是 `cordis.patch.yml` 的文件路径，也不是 `web` 子命令的选项。
+- **主面板与设置**：使用宿主原生布局注册 sched 主面板及侧栏入口，并通过新版设置页
+  注册契约显示状态卡。会话切换与顶部 Logo 导航由宿主控制，不再依赖捕获 DOM 点击
+  来关闭全屏覆盖层。旧 `web-ui.plugin.item` 不作为新版设置页的挂载点。
+- **工具取消**：六个只读 `sched_*` 工具接收宿主调用的取消信号，并逐层传到查询与
+  local/OpenSSH/内置引擎执行。取消不能被普通网络错误重试，也不能继续等到默认超时；
+  释放的是该次查询的通道/子进程，不应关闭其他查询共用的已认证连接。
+- **认证取消**：用户取消 challenge 后，停止当前尝试，并暂停对应主机的自动认证；
+  轮询和事件流不重新开启密码/2FA。用户显式测试主机、重新绑定、执行命令或打开终端
+  才恢复该主机的认证尝试。切换主机后旧请求不得重新接回旧主机。
+- **事件流**：内置引擎只在已有的已认证池连接上开 `exec` 通道，不为 `tail -F` 新建
+  一条可能再次要求 2FA 的连接。池为空、断线或认证暂停时等待用户显式恢复；关闭流时
+  只关闭其通道，不能销毁仍被快照查询使用的共享 SSH client。
+- **系统 OpenSSH**：仍只复用既有 `ControlMaster`，不缓存密码或 OTP，不因本次适配
+  自动发起终端认证；找不到 master 时仍使用原有非阻塞提示。
+- **样式属性**：按钮 CSS 类放在元素的 `className`，不放进 React `style` 对象，
+  使 hover、active 和 focus-visible 状态能匹配样式表。
+
 ## M1：host 插件 + agent 工具（2026-08-24）
 
 ### 加载契约（对照 @deepseek-ai/dsh-tool-jobs 0.1.0-rc.7 核实）

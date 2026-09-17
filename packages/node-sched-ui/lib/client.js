@@ -6480,10 +6480,6 @@ function authAnswerErrorText({ status, statusText, body, cause } = {}) {
     responseDetails ? `Authentication answer failed: ${responseDetails}` : "Authentication answer failed"
   );
 }
-function listenCaptured(target, type, listener) {
-  target.addEventListener(type, listener, true);
-  return () => target.removeEventListener(type, listener, true);
-}
 function normalizeAuthPrompts(request) {
   if (Array.isArray(request?.prompts)) return request.prompts;
   if (!request) return [];
@@ -7594,15 +7590,11 @@ var BrowserAuthGate = class {
 };
 
 // packages/node-sched-ui/src/client.jsx
-var ENTRY_ATTR = "data-dsh-sched-entry";
-var VIEW_ATTR = "data-dsh-sched-view";
-var ACTIVE_ATTR = "data-dsh-sched-active";
-var PANEL_ACTIVATE_EVENT = "dsh-panel-activate";
 var PANEL_NAME = "sched";
-var SLOT_SETTINGS = "web-ui.plugin.item";
+var SLOT_SETTINGS = "settings.section";
 var NS = "nodesched";
 var name = "@zzc/dsh-node-sched-ui";
-var inject = ["slots"];
+var inject = ["slots", "layout"];
 var T = {
   brand: "var(--dsw-alias-brand-primary, #3b82f6)",
   ok: "var(--dsw-alias-state-success-primary, #22c55e)",
@@ -7644,30 +7636,25 @@ function injectStyles() {
     document.head.appendChild(el);
   }
   el.textContent = [
-    "/* --- center-column takeover (attribute-scoped) --- */",
-    "[data-pane='conversation'], [class*='centerCol'] { position: relative; }",
-    "[" + VIEW_ATTR + "] { position: absolute; inset: 0; display: none; z-index: 60; overflow-y: auto; background: var(--dsw-alias-bg-base); }",
-    "html[" + ACTIVE_ATTR + "] [" + VIEW_ATTR + "] { display: block; }",
-    // 中央列单占位：面板打开时隐藏对话内容（!important 压过外壳 inline display:contents）
-    "html[" + ACTIVE_ATTR + "] [data-pane='conversation'] > :not([" + VIEW_ATTR + "]),",
-    "html[" + ACTIVE_ATTR + "] [class*='centerCol'] > :not([" + VIEW_ATTR + "]) { display: none !important; }",
-    "",
-    "/* --- sidebar entry row --- */",
-    ".nsEntry { box-sizing: border-box; display: flex; align-items: center; gap: 8px; width: 100%; height: 36px; padding: 0 10px; background: transparent; border: none; border-radius: 8px; color: var(--dsw-alias-label-secondary); cursor: pointer; font-size: 13px; white-space: nowrap; transition: background-color 120ms ease, color 120ms ease; }",
-    ".nsEntry:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }",
-    ".nsEntry[data-active] { background: var(--dsw-alias-interactive-bg-active); color: var(--dsw-alias-label-primary); font-weight: 600; }",
-    ".nsEntry[data-active]:hover { background: var(--dsw-specific-sidebar-nav-item-active); }",
-    ".nsEntryIcon { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; flex: none; }",
-    ".nsEntryIcon svg { display: block; width: 18px; height: 18px; }",
-    ".nsEntryLabel { overflow: hidden; text-overflow: ellipsis; }",
-    "",
     "/* --- bounded vertical resize grip for multiline text panels --- */",
     ".nsResizableTextBox { display: block; resize: vertical !important; overflow: auto !important; }",
-    ".nsResizableTextBox::-webkit-resizer { background: linear-gradient(135deg, transparent 0 35%, var(--dsw-alias-label-secondary, #6b7280) 35% 43%, transparent 43% 53%, var(--dsw-alias-label-secondary, #6b7280) 53% 61%, transparent 61% 71%, var(--dsw-alias-label-secondary, #6b7280) 71% 79%, transparent 79%) right bottom / 14px 14px no-repeat; }",
+    // 原生 resizer 在 textarea/pre 上的可视尺寸不一致（submit 的 textarea 会叠加原生抓手），
+    // 统一策略：原生 ::-webkit-resizer 完全透明化，抓手统一画在元素自身背景上（12px）。
+    ".nsResizableTextBox::-webkit-resizer { -webkit-appearance: none; appearance: none; background: transparent !important; }",
     "",
-    "/* --- collapsed rail: icon-only --- */",
-    "[data-sidebar-collapsed] .nsEntry { justify-content: center; padding: 0; width: 36px; height: 36px; margin: 0 auto 12px; border-radius: 50%; }",
-    "[data-sidebar-collapsed] .nsEntryLabel { display: none; }"
+    "/* --- unified in-page button hover feedback (className injected by j()) --- */",
+    ".nsBtn { position: relative; isolation: isolate; }",
+    '.nsBtn::after { content: ""; position: absolute; inset: 0; z-index: -1; border-radius: inherit; background: var(--ns-btn-hover, currentColor); opacity: 0; pointer-events: none; transition: opacity 140ms ease; }',
+    ".nsBtn:not(:disabled):hover::after { opacity: 0.15; }",
+    ".nsBtn:not(:disabled):active::after { opacity: 0.3; }",
+    ".nsBtn:focus-visible { outline: 2px solid color-mix(in srgb, var(--ns-btn-hover, currentColor) 55%, transparent); outline-offset: 1px; }",
+    // 未选中 tab 悬停 → 预览选中态（品牌底纹/描边/文字色）；选中态自身不再变化（悬停=点击态）。
+    ".nsBtn.nsTab:not(:disabled):hover { color: var(--ns-btn-hover, #3b82f6) !important; border-color: color-mix(in srgb, var(--ns-btn-hover, #3b82f6) 32%, transparent) !important; }",
+    // 已选中 tab：悬停/按压外观与选中态完全一致（不再叠加反馈层）
+    ".nsBtn.nsTabOn:not(:disabled):hover::after, .nsBtn.nsTabOn:not(:disabled):active::after { opacity: 0; }",
+    // 实底按钮（如设置卡片“打开面板”）：悬停提亮 + 轻微上移
+    ".nsBtnSolid:not(:disabled):hover { filter: brightness(1.12); transform: translateY(-1px); }",
+    ".nsBtnSolid { transition: filter 140ms ease, transform 140ms ease; }"
   ].join("\n");
 }
 var xtermCssInjected = false;
@@ -7697,6 +7684,11 @@ function apply(cctx, config) {
   const { jsx: _jsx } = require("react/jsx-runtime");
   const j = (tag, props, ...kids) => {
     const p = { ...props ?? {} };
+    if (p.style && Object.hasOwn(p.style, "className")) {
+      const { className, ...style } = p.style;
+      p.style = style;
+      p.className = [p.className, className].filter(Boolean).join(" ");
+    }
     if (kids.length === 1) p.children = kids[0];
     else if (kids.length > 1) p.children = kids;
     return _jsx(tag, p);
@@ -7705,9 +7697,11 @@ function apply(cctx, config) {
   const pre = { margin: "4px 0", whiteSpace: "pre-wrap", background: T.bgLayer, border: `1px solid ${T.border}`, borderRadius: 8, padding: 10, fontSize: 13, color: T.label };
   const btn = (color = T.brand, disabled) => {
     if (disabled) {
-      return { background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label2, borderRadius: 8, padding: "6px 14px", fontSize: 13, cursor: "default", marginRight: 4 };
+      return { className: "nsBtn", "--ns-btn-hover": color, background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label2, borderRadius: 8, padding: "6px 14px", fontSize: 13, cursor: "default", marginRight: 4 };
     }
     return {
+      className: "nsBtn",
+      "--ns-btn-hover": color,
       background: `color-mix(in srgb, ${color} 12%, transparent)`,
       border: `1px solid color-mix(in srgb, ${color} 32%, transparent)`,
       color,
@@ -7716,10 +7710,12 @@ function apply(cctx, config) {
       fontSize: 13,
       cursor: "pointer",
       marginRight: 4,
-      transition: "background .15s"
+      transition: "background-color 140ms ease, border-color 140ms ease, color 140ms ease"
     };
   };
   const ghostBtn = {
+    className: "nsBtn",
+    "--ns-btn-hover": "var(--dsw-alias-label-secondary, #6b7280)",
     background: "var(--dsw-alias-interactive-bg-hover, transparent)",
     border: `1px solid ${T.border2}`,
     color: T.label,
@@ -7730,6 +7726,11 @@ function apply(cctx, config) {
     marginRight: 4,
     transition: "background-color 120ms ease"
   };
+  const tabBtn = (color, selected) => ({
+    ...selected ? btn(color) : ghostBtn,
+    className: selected ? "nsBtn nsTab nsTabOn" : "nsBtn nsTab",
+    "--ns-btn-hover": color
+  });
   const backBtn = { ...ghostBtn, display: "inline-flex", alignItems: "center", gap: 4, fontWeight: 500 };
   const boardTitleStyle = { margin: 0, fontSize: 16, fontWeight: 700, color: T.label, whiteSpace: "nowrap" };
   const badge = (s) => {
@@ -7778,6 +7779,7 @@ function apply(cctx, config) {
   const bar = (pct) => ({ height: 6, background: "rgba(127,127,127,.2)", borderRadius: 3, overflow: "hidden", flex: 1, margin: "0 8px", display: "flex" });
   const barFill = (pct) => ({ height: "100%", width: `${Math.max(0, Math.min(100, pct))}%`, background: T.brand });
   const resizeHint = "\u62D6\u52A8\u53F3\u4E0B\u89D2\u659C\u7EBF\u8C03\u6574\u9AD8\u5EA6";
+  const resizeGripImage = "linear-gradient(135deg, transparent 0 35%, var(--dsw-alias-label-secondary, #6b7280) 35% 43%, transparent 43% 53%, var(--dsw-alias-label-secondary, #6b7280) 53% 61%, transparent 61% 71%, var(--dsw-alias-label-secondary, #6b7280) 71% 79%, transparent 79%)";
   function ResizableTextBox({
     as = "pre",
     className,
@@ -7801,7 +7803,11 @@ function apply(cctx, config) {
         maxHeight,
         height: initialHeight ?? style?.height,
         resize: "vertical",
-        overflow: "auto"
+        overflow: "auto",
+        backgroundImage: resizeGripImage,
+        backgroundRepeat: "no-repeat",
+        backgroundPosition: "right bottom",
+        backgroundSize: "12px 12px"
       }
     }, children);
   }
@@ -9630,6 +9636,7 @@ function apply(cctx, config) {
     ]);
   }
   function HistoryTab() {
+    const HISTORY_GRID = "minmax(0,2fr) minmax(0,1.4fr) minmax(0,1fr) minmax(0,.7fr)";
     const [state, setState] = useState({ loading: true, document: null, error: "" });
     const load = useCallback(async () => {
       setState((current) => ({ ...current, loading: true, error: "" }));
@@ -9660,21 +9667,43 @@ function apply(cctx, config) {
       ]),
       state.error && j("div", { role: "alert", style: { color: T.err } }, state.error),
       !state.loading && !state.error && rows.length === 0 && j("div", null, "(no history)"),
+      // 列名行（与数据行同一套网格，粘性吸顶，滚动时始终可见）
+      jsxs2("div", {
+        style: {
+          display: "grid",
+          gridTemplateColumns: HISTORY_GRID,
+          gap: 8,
+          padding: "6px 8px",
+          borderBottom: `1px solid ${T.border2}`,
+          fontSize: 13,
+          fontWeight: 600,
+          color: T.label2,
+          position: "sticky",
+          top: 0,
+          zIndex: 1,
+          background: "var(--dsw-alias-bg-base)"
+        }
+      }, [
+        j("span", null, "batch"),
+        j("span", null, "task"),
+        j("span", null, "status"),
+        j("span", null, "version")
+      ]),
       ...rows.map((row, index) => jsxs2("div", {
         key: `${row.batch_id}:${row.task}:v${row.version}:${index}`,
         style: {
           display: "grid",
-          gridTemplateColumns: "minmax(160px,2fr) minmax(90px,1fr) minmax(80px,1fr) minmax(70px,.7fr)",
+          gridTemplateColumns: HISTORY_GRID,
           gap: 8,
           padding: "6px 8px",
           borderBottom: `1px solid ${T.border}`,
           fontSize: 13
         }
       }, [
-        j("span", { title: row.batch_id }, row.batch_name || row.batch_id),
-        j("span", null, row.task),
-        j("span", { style: { color: COLORS[row.status] ?? T.label2 } }, row.status),
-        j("span", null, `v${row.version}`)
+        j("span", { title: row.batch_id, style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 } }, row.batch_name || row.batch_id),
+        j("span", { title: row.task, style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 } }, row.task),
+        j("span", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0, color: COLORS[row.status] ?? T.label2 } }, row.status),
+        j("span", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 } }, `v${row.version}`)
       ]))
     ]);
   }
@@ -9915,7 +9944,7 @@ function apply(cctx, config) {
             j("option", { value: "" }, "all projects"),
             ...projects.map((pr) => j("option", { key: pr, value: pr }, pr))
           ]),
-          ...["batches", "history", "gpus", "events", "submit", "config", "incidents", "ssh"].map((t) => j("button", { key: t, onClick: () => setTab(t), style: tab === t ? btn(T.brand) : ghostBtn }, t))
+          ...["batches", "history", "gpus", "events", "submit", "config", "incidents", "ssh"].map((t) => j("button", { key: t, onClick: () => setTab(t), style: tabBtn(T.brand, tab === t) }, t))
         ]),
         // B24c: SSH 交互式身份验证先显示横幅，用户主动打开后才挂载弹窗。
         j(AuthPromptBanner, {
@@ -10000,14 +10029,18 @@ function apply(cctx, config) {
       ])
     ]);
   }
-  function DashboardHost({ panel: panel2 }) {
-    const [visible, setVisible] = useState(panel2.isOpen());
+  function DashboardHost({ usePanelInfo }) {
+    const visible = usePanelInfo((info) => info.activePanelId === PANEL_NAME);
     const auth = useAuthGateState();
     const reportedOpen = useRef(false);
-    useEffect(() => panel2.subscribe(() => setVisible(panel2.isOpen())), [panel2]);
     useEffect(() => {
+      panelVisible = visible;
       if (visible) void authGate.restore();
       else authGate.cancelPending();
+      return () => {
+        panelVisible = false;
+        authGate.cancelPending();
+      };
     }, [visible]);
     useEffect(() => {
       if (visible && auth.status === "locked" && auth.hasTrustedDevice) {
@@ -10025,12 +10058,13 @@ function apply(cctx, config) {
       });
     }, [auth.status, visible]);
     if (!visible) return null;
-    if (auth.status !== "ready") {
-      return j(AuthenticationRequiredView, { auth, onClose: () => panel2.hide() });
-    }
-    return j(Dashboard, { visible: true, auth, onClose: () => panel2.hide() });
+    const onClose = () => cctx.layout.selectPanel(null);
+    return j("section", {
+      "aria-label": "sched \u770B\u677F",
+      style: { position: "relative", flex: 1, width: "100%", height: "100%", minHeight: 0 }
+    }, auth.status !== "ready" ? j(AuthenticationRequiredView, { auth, onClose }) : j(Dashboard, { visible: true, auth, onClose }));
   }
-  function StatusCard() {
+  function StatusCard({ close }) {
     const [open, setOpen] = useState(false);
     const auth = useAuthGateState();
     const [snap] = useSnapshot("/sched/api/status", 3e4, open && auth.status === "ready");
@@ -10157,7 +10191,11 @@ function apply(cctx, config) {
           } }, `\u6279\u6B21: \u6D3B\u8DC3 ${act} \xB7 \u963B\u585E ${blk} \xB7 \u5B8C\u6210 ${done}`),
           j("span", { style: { flex: 1 } }),
           j("button", {
-            onClick: () => window.dispatchEvent(new CustomEvent("nodesched-open")),
+            onClick: () => {
+              close();
+              cctx.layout.selectPanel(PANEL_NAME);
+            },
+            className: "nsBtnSolid",
             style: {
               appearance: "none",
               font: "inherit",
@@ -10177,158 +10215,40 @@ function apply(cctx, config) {
   }
   injectStyles();
   const disposersUI = [];
-  const panel = {
-    open: false,
-    listeners: /* @__PURE__ */ new Set(),
-    isOpen() {
-      return this.open;
-    },
-    subscribe(fn) {
-      this.listeners.add(fn);
-      return () => this.listeners.delete(fn);
-    },
-    emit() {
-      for (const fn of [...this.listeners]) {
-        try {
-          fn();
-        } catch (_) {
-        }
-      }
-    },
-    show() {
-      this.open = true;
-      document.documentElement.setAttribute(ACTIVE_ATTR, "");
-      document.dispatchEvent(new CustomEvent(PANEL_ACTIVATE_EVENT, { detail: PANEL_NAME }));
-      this.emit();
-    },
-    hide() {
-      authGate.cancelPending();
-      this.open = false;
-      document.documentElement.removeAttribute(ACTIVE_ATTR);
-      this.emit();
-    },
-    toggle() {
-      if (this.open) this.hide();
-      else this.show();
-    }
-  };
-  {
-    let root = null, container = null;
-    const ensure = () => {
-      if (container !== null) return;
-      try {
-        const col = document.querySelector('[data-pane="conversation"], [class*="centerCol"]');
-        if (!col) return;
-        container = document.createElement("div");
-        container.setAttribute(VIEW_ATTR, "");
-        col.appendChild(container);
-        root = require("react-dom/client").createRoot(container);
-        root.render(j(DashboardHost, { panel }));
-      } catch (e) {
-        cctx.logger?.warn?.("[node-sched-ui] view mount failed:", e?.message);
-      }
-    };
-    const viewWaitObs = new MutationObserver(() => ensure());
-    viewWaitObs.observe(document.body, { childList: true, subtree: true });
-    ensure();
-    const onOtherActivate = (e) => {
-      if (e.detail !== PANEL_NAME && panel.isOpen()) panel.hide();
-    };
-    document.addEventListener(PANEL_ACTIVATE_EVENT, onOtherActivate);
-    const SIDEBAR_ROW = '[class*="sessionRow"], [class*="projectRow"], [class*="searchResultRow"], [class*="searchResultWorkspace"], [class*="newSession"]';
-    const onSidebarClick = (ev) => {
-      if (!panel.isOpen()) return;
-      const t = ev.target;
-      if (t && t.closest && t.closest(SIDEBAR_ROW)) panel.hide();
-    };
-    const disposeSidebarClick = listenCaptured(document, "click", onSidebarClick);
-    disposersUI.push(() => {
-      viewWaitObs.disconnect();
-      document.removeEventListener(PANEL_ACTIVATE_EVENT, onOtherActivate);
-      disposeSidebarClick();
-      document.documentElement.removeAttribute(ACTIVE_ATTR);
-      try {
-        root?.unmount();
-      } catch (_) {
-      }
-      container?.remove();
-    });
+  let panelVisible = false;
+  function SchedPanelIcon({ size }) {
+    return j("svg", {
+      width: size,
+      height: size,
+      viewBox: "0 0 16 16",
+      fill: "none",
+      stroke: "currentColor",
+      strokeWidth: 1.3,
+      strokeLinecap: "round",
+      strokeLinejoin: "round",
+      "aria-hidden": true
+    }, [
+      j("rect", { x: 2, y: 2.5, width: 12, height: 11, rx: 1.5 }),
+      j("path", { d: "M2 6.5h12M6.5 6.5v7" })
+    ]);
   }
-  {
-    if (document.querySelector("[" + ENTRY_ATTR + "]") === null) {
-      const entry = document.createElement("button");
-      entry.type = "button";
-      entry.setAttribute(ENTRY_ATTR, "");
-      entry.className = "nsEntry";
-      entry.setAttribute("aria-label", "sched \u770B\u677F");
-      entry.title = "node-sched GPU/CPU \u8C03\u5EA6\u770B\u677F";
-      entry.innerHTML = '<span class="nsEntryIcon"><svg viewBox="0 0 16 16" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="2.5" width="12" height="11" rx="1.5"/><path d="M2 6.5h12M6.5 6.5v7"/></svg></span><span class="nsEntryLabel">sched \u770B\u677F</span>';
-      entry.addEventListener("click", () => panel.toggle());
-      let rootEl, placed = false;
-      const sidebarRoot = () => {
-        const col = document.querySelector('[data-pane="sidebar"], [class*="sidebarCol"]');
-        if (!col) return void 0;
-        return col.querySelector('[class*="logoRow"]')?.parentElement ?? col.firstElementChild;
-      };
-      const newSessionButton = (root) => {
-        const nested = root.querySelector('button[class*="newSession"]');
-        if (nested) return nested;
-        for (const child of root.children) if (child.tagName === "BUTTON") return child;
-        return void 0;
-      };
-      const placeEntry = (root) => {
-        const btn2 = newSessionButton(root);
-        if (!btn2) return false;
-        if (entry.parentElement !== root) {
-          const row = btn2.closest('[class*="logoRow"]');
-          const base = row && row.parentElement === root ? row : btn2;
-          root.insertBefore(entry, base.nextElementSibling);
-        }
-        return true;
-      };
-      const tryPlace = () => {
-        if (rootEl !== void 0 && !rootEl.isConnected) {
-          rootObs.disconnect();
-          rootEl = void 0;
-          placed = false;
-        }
-        if (placed) {
-          if (document.body.contains(entry)) return;
-          rootObs.disconnect();
-          rootEl = void 0;
-          placed = false;
-        }
-        rootEl ??= sidebarRoot();
-        if (!rootEl) return;
-        placed = placeEntry(rootEl);
-        if (placed) rootObs.observe(rootEl, { childList: true, subtree: true });
-      };
-      const waitObs = new MutationObserver(() => tryPlace());
-      waitObs.observe(document.body, { childList: true, subtree: true });
-      const rootObs = new MutationObserver(() => {
-        if (!rootEl || !rootEl.isConnected) {
-          placed = false;
-          tryPlace();
-          return;
-        }
-        if (!rootEl.contains(entry)) placeEntry(rootEl);
-      });
-      const unsubActive = panel.subscribe(() => {
-        if (panel.isOpen()) entry.dataset.active = "true";
-        else delete entry.dataset.active;
-      });
-      tryPlace();
-      disposersUI.push(() => {
-        waitObs.disconnect();
-        rootObs.disconnect();
-        unsubActive();
-        entry.remove();
-      });
-    }
-  }
+  const disposeMain = cctx.slots.inject("main", () => {
+    const disposePanel = cctx.slots.register({ name: "main", key: PANEL_NAME }, DashboardHost);
+    const disposeSidebar = cctx.slots.inject("sidebar.panellist", () => cctx.slots.register({
+      name: "sidebar.panellist",
+      id: PANEL_NAME,
+      order: 90,
+      label: "sched \u770B\u677F"
+    }, SchedPanelIcon));
+    return () => {
+      disposeSidebar();
+      disposePanel();
+    };
+  });
+  disposersUI.push(disposeMain);
   {
     const report = (kind, detail) => {
-      if (!panel.isOpen()) return;
+      if (!panelVisible) return;
       try {
         authFetch("/sched/api/client-log", {
           method: "POST",
@@ -10351,7 +10271,7 @@ function apply(cctx, config) {
       window.removeEventListener("unhandledrejection", onUnhandledRejection);
     });
   }
-  const disposeSettings = cctx.slots.inject(SLOT_SETTINGS, () => cctx.slots.register({ name: SLOT_SETTINGS, id: NS, order: 90 }, StatusCard));
+  const disposeSettings = cctx.slots.inject(SLOT_SETTINGS, () => cctx.slots.register({ name: SLOT_SETTINGS, id: NS, order: 90, label: "sched \u8C03\u5EA6\u5668" }, StatusCard));
   disposersUI.push(disposeSettings);
   disposersUI.push(() => authGate.dispose());
   return () => {

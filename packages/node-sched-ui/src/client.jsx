@@ -13,7 +13,6 @@ import {
 	createIndexedDbRequestStore,
 	EnabledRequestEpoch,
 	jobsForBatch,
-	listenCaptured,
 	mutationResultIsDefinitive,
 	normalizeAuthPrompts,
 	PollGate,
@@ -34,17 +33,9 @@ import {
 
  * Surfaces:
 
- *  - Sidebar nav entry row (plain DOM injection between New Session and the
+ *  - `main` + `sidebar.panellist`: a host-owned central panel and navigation icon.
 
- *    workspace browser; dual MutationObserver self-healing, task-board
-
- *    sidebar-entry-core pattern) toggling a full-page view that takes over
-
- *    the center column via its own React root (React never manages the
-
- *    injected container, so shell reconciliation cannot evict it).
-
- *  - `web-ui.plugin.item`: compact status card in Settings → Web UI 插件.
+ *  - `settings.section`: a compact scheduler status page in Settings.
 
  *
 
@@ -54,17 +45,9 @@ import {
 
  */
 
-const ENTRY_ATTR = "data-dsh-sched-entry";
-
-const VIEW_ATTR = "data-dsh-sched-view";
-
-const ACTIVE_ATTR = "data-dsh-sched-active";
-
-const PANEL_ACTIVATE_EVENT = "dsh-panel-activate";
-
 const PANEL_NAME = "sched";
 
-const SLOT_SETTINGS = "web-ui.plugin.item";
+const SLOT_SETTINGS = "settings.section";
 
 const NS = "nodesched";
 
@@ -74,7 +57,7 @@ const name = "@zzc/dsh-node-sched-ui";
 
 
 
-const inject = ["slots"];
+const inject = ["slots", "layout"];
 
 
 
@@ -121,7 +104,7 @@ const COLORS = {
 
 
 
-// ── 样式注入（模块级一次）：侧栏入口行 + 中央列接管规则 ─────────────────
+// ── 看板局部样式：布局与侧栏按钮由宿主管理 ──────────────────────────
 
 function injectStyles() {
 
@@ -137,53 +120,25 @@ function injectStyles() {
 
 	el.textContent = [
 
-		"/* --- center-column takeover (attribute-scoped) --- */",
-
-		"[data-pane='conversation'], [class*='centerCol'] { position: relative; }",
-
-		"[" + VIEW_ATTR + "] { position: absolute; inset: 0; display: none; z-index: 60; overflow-y: auto; background: var(--dsw-alias-bg-base); }",
-
-		"html[" + ACTIVE_ATTR + "] [" + VIEW_ATTR + "] { display: block; }",
-
-		// 中央列单占位：面板打开时隐藏对话内容（!important 压过外壳 inline display:contents）
-
-		"html[" + ACTIVE_ATTR + "] [data-pane='conversation'] > :not([" + VIEW_ATTR + "]),",
-
-		"html[" + ACTIVE_ATTR + "] [class*='centerCol'] > :not([" + VIEW_ATTR + "]) { display: none !important; }",
-
-		"",
-
-		"/* --- sidebar entry row --- */",
-
-		".nsEntry { box-sizing: border-box; display: flex; align-items: center; gap: 8px; width: 100%; height: 36px; padding: 0 10px; background: transparent; border: none; border-radius: 8px; color: var(--dsw-alias-label-secondary); cursor: pointer; font-size: 13px; white-space: nowrap; transition: background-color 120ms ease, color 120ms ease; }",
-
-		".nsEntry:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }",
-
-		".nsEntry[data-active] { background: var(--dsw-alias-interactive-bg-active); color: var(--dsw-alias-label-primary); font-weight: 600; }",
-
-		".nsEntry[data-active]:hover { background: var(--dsw-specific-sidebar-nav-item-active); }",
-
-		".nsEntryIcon { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; flex: none; }",
-
-		".nsEntryIcon svg { display: block; width: 18px; height: 18px; }",
-
-		".nsEntryLabel { overflow: hidden; text-overflow: ellipsis; }",
-
-		"",
-
 		"/* --- bounded vertical resize grip for multiline text panels --- */",
-
 		".nsResizableTextBox { display: block; resize: vertical !important; overflow: auto !important; }",
-
-		".nsResizableTextBox::-webkit-resizer { background: linear-gradient(135deg, transparent 0 35%, var(--dsw-alias-label-secondary, #6b7280) 35% 43%, transparent 43% 53%, var(--dsw-alias-label-secondary, #6b7280) 53% 61%, transparent 61% 71%, var(--dsw-alias-label-secondary, #6b7280) 71% 79%, transparent 79%) right bottom / 14px 14px no-repeat; }",
-
+		// 原生 resizer 在 textarea/pre 上的可视尺寸不一致（submit 的 textarea 会叠加原生抓手），
+		// 统一策略：原生 ::-webkit-resizer 完全透明化，抓手统一画在元素自身背景上（12px）。
+		".nsResizableTextBox::-webkit-resizer { -webkit-appearance: none; appearance: none; background: transparent !important; }",
 		"",
-
-		"/* --- collapsed rail: icon-only --- */",
-
-		"[data-sidebar-collapsed] .nsEntry { justify-content: center; padding: 0; width: 36px; height: 36px; margin: 0 auto 12px; border-radius: 50%; }",
-
-		"[data-sidebar-collapsed] .nsEntryLabel { display: none; }",
+		"/* --- unified in-page button hover feedback (className injected by j()) --- */",
+		".nsBtn { position: relative; isolation: isolate; }",
+		".nsBtn::after { content: \"\"; position: absolute; inset: 0; z-index: -1; border-radius: inherit; background: var(--ns-btn-hover, currentColor); opacity: 0; pointer-events: none; transition: opacity 140ms ease; }",
+		".nsBtn:not(:disabled):hover::after { opacity: 0.15; }",
+		".nsBtn:not(:disabled):active::after { opacity: 0.3; }",
+		".nsBtn:focus-visible { outline: 2px solid color-mix(in srgb, var(--ns-btn-hover, currentColor) 55%, transparent); outline-offset: 1px; }",
+		// 未选中 tab 悬停 → 预览选中态（品牌底纹/描边/文字色）；选中态自身不再变化（悬停=点击态）。
+		".nsBtn.nsTab:not(:disabled):hover { color: var(--ns-btn-hover, #3b82f6) !important; border-color: color-mix(in srgb, var(--ns-btn-hover, #3b82f6) 32%, transparent) !important; }",
+		// 已选中 tab：悬停/按压外观与选中态完全一致（不再叠加反馈层）
+		".nsBtn.nsTabOn:not(:disabled):hover::after, .nsBtn.nsTabOn:not(:disabled):active::after { opacity: 0; }",
+		// 实底按钮（如设置卡片“打开面板”）：悬停提亮 + 轻微上移
+		".nsBtnSolid:not(:disabled):hover { filter: brightness(1.12); transform: translateY(-1px); }",
+		".nsBtnSolid { transition: filter 140ms ease, transform 140ms ease; }",
 
 	].join("\n");
 
@@ -258,6 +213,13 @@ function apply(cctx, config) {
 	const j = (tag, props, ...kids) => {
 
 		const p = { ...(props ?? {}) };
+		// Button recipes carry their class beside CSS values. Normalize the
+		// recipe here so React receives className as a prop, never as CSS.
+		if (p.style && Object.hasOwn(p.style, "className")) {
+			const { className, ...style } = p.style;
+			p.style = style;
+			p.className = [p.className, className].filter(Boolean).join(" ");
+		}
 
 		if (kids.length === 1) p.children = kids[0];
 
@@ -275,43 +237,34 @@ function apply(cctx, config) {
 
 	const pre = { margin: "4px 0", whiteSpace: "pre-wrap", background: T.bgLayer, border: `1px solid ${T.border}`, borderRadius: 8, padding: 10, fontSize: 13, color: T.label };
 
-	// 柔和按钮：状态色 12% 底纹 + 同色文字，双主题自动柔和（不再用高饱和实底）
-
+	// 柔和按钮：状态色 12% 底纹 + 同色文字，双主题自动柔和（不再用高饱和实底）。
+	// 悬停反馈由 .nsBtn::after 提供（同色 15% 叠加，类似侧栏条目 hover），禁用态无反馈。
 	const btn = (color = T.brand, disabled) => {
-
 		if (disabled) {
-
 			// 几何尺寸与 enabled 分支一致（radius/padding/fontSize），仅配色降级
-
-			return { background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label2, borderRadius: 8, padding: "6px 14px", fontSize: 13, cursor: "default", marginRight: 4 };
-
+			return { className: "nsBtn", "--ns-btn-hover": color, background: T.bgLayer, border: `1px solid ${T.border}`, color: T.label2, borderRadius: 8, padding: "6px 14px", fontSize: 13, cursor: "default", marginRight: 4 };
 		}
-
 		return {
-
+			className: "nsBtn", "--ns-btn-hover": color,
 			background: `color-mix(in srgb, ${color} 12%, transparent)`,
-
 			border: `1px solid color-mix(in srgb, ${color} 32%, transparent)`,
-
 			color, borderRadius: 8, padding: "6px 14px", fontSize: 13,
-
-			cursor: "pointer", marginRight: 4, transition: "background .15s",
-
+			cursor: "pointer", marginRight: 4, transition: "background-color 140ms ease, border-color 140ms ease, color 140ms ease",
 		};
-
 	};
-
-	// web-ui ghostButton 对齐：13px 字号 + 8px 圆角 + hover 反馈
-
+	// web-ui ghostButton 对齐：13px 字号 + 8px 圆角 + hover 反馈（.nsBtn::after 中性灰叠加）
 	const ghostBtn = {
-
+		className: "nsBtn", "--ns-btn-hover": "var(--dsw-alias-label-secondary, #6b7280)",
 		background: "var(--dsw-alias-interactive-bg-hover, transparent)", border: `1px solid ${T.border2}`,
-
 		color: T.label, borderRadius: 8, padding: "6px 14px", fontSize: 13,
-
 		cursor: "pointer", marginRight: 4, transition: "background-color 120ms ease",
-
 	};
+	// 顶部 tab 按钮：未选中悬停 → 预览选中态（与点击后的选中外观一致）；
+	// 已选中的悬停/按压不再叠加反馈层（悬停=点击态）。
+	const tabBtn = (color, selected) => ({
+		...(selected ? btn(color) : ghostBtn),
+		className: selected ? "nsBtn nsTab nsTabOn" : "nsBtn nsTab", "--ns-btn-hover": color,
+	});
 
 	const backBtn = { ...ghostBtn, display: "inline-flex", alignItems: "center", gap: 4, fontWeight: 500 };
 
@@ -333,7 +286,7 @@ function apply(cctx, config) {
 
 	};
 
-	// 页面视图：填满接管容器（不再是 fixed 弹窗；显隐由 html data 属性驱动）
+	// 页面视图：填满宿主 main 槽内的定位容器。
 
 	const overlayStyle = {
 
@@ -361,9 +314,10 @@ function apply(cctx, config) {
 
 	const bar = (pct) => ({ height: 6, background: "rgba(127,127,127,.2)", borderRadius: 3, overflow: "hidden", flex: 1, margin: "0 8px", display: "flex" });
 
-	const barFill = (pct) => ({ height: "100%", width: `${Math.max(0, Math.min(100, pct))}%`, background: T.brand });
-	const resizeHint = "拖动右下角斜线调整高度";
-
+	const barFill = (pct) => ({ height: "100%", width: `${Math.max(0, Math.min(100, pct))}%`, background: T.brand });	const resizeHint = "拖动右下角斜线调整高度";
+	// 统一抓手：所有 ResizableTextBox 的右下角斜线画在元素自身背景上（12px），
+	// 原生 ::-webkit-resizer 已透明化 —— textarea/pre 的原生抓手尺寸不再不一致。
+	const resizeGripImage = "linear-gradient(135deg, transparent 0 35%, var(--dsw-alias-label-secondary, #6b7280) 35% 43%, transparent 43% 53%, var(--dsw-alias-label-secondary, #6b7280) 53% 61%, transparent 61% 71%, var(--dsw-alias-label-secondary, #6b7280) 71% 79%, transparent 79%)";
 	function ResizableTextBox({
 		as = "pre",
 		className,
@@ -388,6 +342,10 @@ function apply(cctx, config) {
 				height: initialHeight ?? style?.height,
 				resize: "vertical",
 				overflow: "auto",
+				backgroundImage: resizeGripImage,
+				backgroundRepeat: "no-repeat",
+				backgroundPosition: "right bottom",
+				backgroundSize: "12px 12px",
 			},
 		}, children);
 	}
@@ -2668,6 +2626,8 @@ function apply(cctx, config) {
 
 
 	function HistoryTab() {
+		// 列网格与列名行共用，minmax(0,·) 让单元格可收缩，长 batch/task 名出省略号而非溢出重叠
+		const HISTORY_GRID = "minmax(0,2fr) minmax(0,1.4fr) minmax(0,1fr) minmax(0,.7fr)";
 		const [state, setState] = useState({ loading: true, document: null, error: "" });
 		const load = useCallback(async () => {
 			setState((current) => ({ ...current, loading: true, error: "" }));
@@ -2696,21 +2656,43 @@ function apply(cctx, config) {
 			]),
 			state.error && j("div", { role: "alert", style: { color: T.err } }, state.error),
 			!state.loading && !state.error && rows.length === 0 && j("div", null, "(no history)"),
+			// 列名行（与数据行同一套网格，粘性吸顶，滚动时始终可见）
+			jsxs2("div", {
+				style: {
+					display: "grid",
+					gridTemplateColumns: HISTORY_GRID,
+					gap: 8,
+					padding: "6px 8px",
+					borderBottom: `1px solid ${T.border2}`,
+					fontSize: 13,
+					fontWeight: 600,
+					color: T.label2,
+					position: "sticky",
+					top: 0,
+					zIndex: 1,
+					background: "var(--dsw-alias-bg-base)",
+				},
+			}, [
+				j("span", null, "batch"),
+				j("span", null, "task"),
+				j("span", null, "status"),
+				j("span", null, "version"),
+			]),
 			...rows.map((row, index) => jsxs2("div", {
 				key: `${row.batch_id}:${row.task}:v${row.version}:${index}`,
 				style: {
 					display: "grid",
-					gridTemplateColumns: "minmax(160px,2fr) minmax(90px,1fr) minmax(80px,1fr) minmax(70px,.7fr)",
+					gridTemplateColumns: HISTORY_GRID,
 					gap: 8,
 					padding: "6px 8px",
 					borderBottom: `1px solid ${T.border}`,
 					fontSize: 13,
 				},
 			}, [
-				j("span", { title: row.batch_id }, row.batch_name || row.batch_id),
-				j("span", null, row.task),
-				j("span", { style: { color: COLORS[row.status] ?? T.label2 } }, row.status),
-				j("span", null, `v${row.version}`),
+				j("span", { title: row.batch_id, style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 } }, row.batch_name || row.batch_id),
+				j("span", { title: row.task, style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 } }, row.task),
+				j("span", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0, color: COLORS[row.status] ?? T.label2 } }, row.status),
+				j("span", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 } }, `v${row.version}`),
 			])),
 		]);
 	}
@@ -2992,10 +2974,8 @@ function apply(cctx, config) {
 						...projects.map((pr) => j("option", { key: pr, value: pr }, pr)),
 
 					]),
-
 					...["batches", "history", "gpus", "events", "submit", "config", "incidents", "ssh"].map((t) =>
-
-						j("button", { key: t, onClick: () => setTab(t), style: tab === t ? btn(T.brand) : ghostBtn }, t)),
+						j("button", { key: t, onClick: () => setTab(t), style: tabBtn(T.brand, tab === t) }, t)),
 
 				]),
 
@@ -3117,15 +3097,19 @@ function apply(cctx, config) {
 
 	}
 
-	function DashboardHost({ panel }) {
-		const [visible, setVisible] = useState(panel.isOpen());
+	function DashboardHost({ usePanelInfo }) {
+		const visible = usePanelInfo((info) => info.activePanelId === PANEL_NAME);
 		const auth = useAuthGateState();
 		const reportedOpen = useRef(false);
 
-		useEffect(() => panel.subscribe(() => setVisible(panel.isOpen())), [panel]);
 		useEffect(() => {
+			panelVisible = visible;
 			if (visible) void authGate.restore();
 			else authGate.cancelPending();
+			return () => {
+				panelVisible = false;
+				authGate.cancelPending();
+			};
 		}, [visible]);
 		useEffect(() => {
 			if (visible && auth.status === "locked" && auth.hasTrustedDevice) {
@@ -3143,17 +3127,18 @@ function apply(cctx, config) {
 		}, [auth.status, visible]);
 
 		if (!visible) return null;
-		if (auth.status !== "ready") {
-			return j(AuthenticationRequiredView, { auth, onClose: () => panel.hide() });
-		}
-		return j(Dashboard, { visible: true, auth, onClose: () => panel.hide() });
+		const onClose = () => cctx.layout.selectPanel(null);
+		return j("section", {
+			"aria-label": "sched 看板",
+			style: { position: "relative", flex: 1, width: "100%", height: "100%", minHeight: 0 },
+		}, auth.status !== "ready"
+			? j(AuthenticationRequiredView, { auth, onClose })
+			: j(Dashboard, { visible: true, auth, onClose }));
 	}
-
-	// ── sidebar footer entry: button toggling the fullscreen dashboard ──────
 
 	// ── settings card: 手风琴卡片 (收起=摘要行 / 展开=完整面板入口) ────────
 	// ── settings card: 与 PluginSettingsCard 完全同构 (1:1 样式) ──────────
-	function StatusCard() {
+	function StatusCard({ close }) {
 		const [open, setOpen] = useState(false);
 		const auth = useAuthGateState();
 		const [snap] = useSnapshot("/sched/api/status", 30000, open && auth.status === "ready");
@@ -3244,7 +3229,8 @@ function apply(cctx, config) {
 					} }, `批次: 活跃 ${act} \u00b7 阻塞 ${blk} \u00b7 完成 ${done}`),
 					j("span", { style: { flex: 1 } }),
 					j("button", {
-						onClick: () => window.dispatchEvent(new CustomEvent("nodesched-open")),
+						onClick: () => { close(); cctx.layout.selectPanel(PANEL_NAME); },
+						className: "nsBtnSolid",
 						style: {
 							appearance: "none", font: "inherit", cursor: "pointer",
 							border: "1px solid #0000", borderRadius: 8, padding: "5px 14px",
@@ -3259,155 +3245,40 @@ function apply(cctx, config) {
 	}
 
 
-	// ── sidebar footer entry: button toggling the fullscreen dashboard ──────
-
-
-	// ── B21: 侧栏入口 + 页面视图 (task-board 同构) ──────────────────────
+	// DSH 0.1.6: the host owns panel selection, mounting, and sidebar chrome.
 	injectStyles();
 	const disposersUI = [];
+	let panelVisible = false;
 
-	// 面板开关控制器：纯 JS 非 React；容器保持挂载，但看板子树仅在
-	// 面板打开时存在，避免隐藏看板请求令牌或启动后台轮询。
-	const panel = {
-		open: false,
-		listeners: new Set(),
-		isOpen() { return this.open; },
-		subscribe(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn); },
-		emit() { for (const fn of [...this.listeners]) { try { fn(); } catch (_) {} } },
-		show() {
-			this.open = true;
-			document.documentElement.setAttribute(ACTIVE_ATTR, "");
-			document.dispatchEvent(new CustomEvent(PANEL_ACTIVATE_EVENT, { detail: PANEL_NAME }));
-			this.emit();
-		},
-		hide() {
-			authGate.cancelPending();
-			this.open = false;
-			document.documentElement.removeAttribute(ACTIVE_ATTR);
-			this.emit();
-		},
-		toggle() { if (this.open) this.hide(); else this.show(); },
-	};
-
-	// 页面视图：centerCol 内追加 React 永不管理的容器 + 自建 root。
-	// 外壳 reconciliation 不认识这个节点所以不会驱逐它；子树由 DashboardHost 懒挂载。
-	{
-		let root = null, container = null;
-		const ensure = () => {
-			if (container !== null) return;
-			try {
-				const col = document.querySelector('[data-pane="conversation"], [class*="centerCol"]');
-				if (!col) return;
-				container = document.createElement("div");
-				container.setAttribute(VIEW_ATTR, "");
-				col.appendChild(container);
-				root = require("react-dom/client").createRoot(container);
-				root.render(j(DashboardHost, { panel }));
-			} catch (e) {
-				cctx.logger?.warn?.("[node-sched-ui] view mount failed:", e?.message);
-			}
-		};
-		// 外壳启动晚于插件 apply；监听 body 直到中央列出现。
-		const viewWaitObs = new MutationObserver(() => ensure());
-		viewWaitObs.observe(document.body, { childList: true, subtree: true });
-		ensure();
-
-		// 兄弟面板激活 → 关闭自己；侧栏行点击 → 交还对话区 (capture 先于外壳处理)
-		const onOtherActivate = (e) => { if (e.detail !== PANEL_NAME && panel.isOpen()) panel.hide(); };
-		document.addEventListener(PANEL_ACTIVATE_EVENT, onOtherActivate);
-		const SIDEBAR_ROW = '[class*="sessionRow"], [class*="projectRow"], [class*="searchResultRow"], [class*="searchResultWorkspace"], [class*="newSession"]';
-		const onSidebarClick = (ev) => {
-			if (!panel.isOpen()) return;
-			const t = ev.target;
-			if (t && t.closest && t.closest(SIDEBAR_ROW)) panel.hide();
-		};
-		const disposeSidebarClick = listenCaptured(document, "click", onSidebarClick);
-
-		disposersUI.push(() => {
-			viewWaitObs.disconnect();
-			document.removeEventListener(PANEL_ACTIVATE_EVENT, onOtherActivate);
-			disposeSidebarClick();
-			document.documentElement.removeAttribute(ACTIVE_ATTR);
-			try { root?.unmount(); } catch (_) {}
-			container?.remove();
-		});
+	function SchedPanelIcon({ size }) {
+		return j("svg", {
+			width: size, height: size, viewBox: "0 0 16 16",
+			fill: "none", stroke: "currentColor", strokeWidth: 1.3,
+			strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true,
+		}, [
+			j("rect", { x: 2, y: 2.5, width: 12, height: 11, rx: 1.5 }),
+			j("path", { d: "M2 6.5h12M6.5 6.5v7" }),
+		]);
 	}
 
-	// 侧栏入口行：纯 DOM 注入 + 双 Observer 自愈 (sidebar-entry-core 模式)。
-	// 行是普通 DOM 而非 React 节点，永不干扰外壳 reconciliation；
-	// 重渲染驱逐后在同一微任务内重插 (绘制前，无闪烁)。
-	{
-		if (document.querySelector("[" + ENTRY_ATTR + "]") === null) {
-			const entry = document.createElement("button");
-			entry.type = "button";
-			entry.setAttribute(ENTRY_ATTR, "");
-			entry.className = "nsEntry";
-			entry.setAttribute("aria-label", "sched 看板");
-			entry.title = "node-sched GPU/CPU 调度看板";
-			entry.innerHTML = '<span class="nsEntryIcon"><svg viewBox="0 0 16 16" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="2.5" width="12" height="11" rx="1.5"/><path d="M2 6.5h12M6.5 6.5v7"/></svg></span><span class="nsEntryLabel">sched 看板</span>';
-			entry.addEventListener("click", () => panel.toggle());
-
-			let rootEl, placed = false;
-
-			const sidebarRoot = () => {
-				const col = document.querySelector('[data-pane="sidebar"], [class*="sidebarCol"]');
-				if (!col) return undefined;
-				// 当前外壳包了一层 wrapper; logoRow 的属主才是真正的 UI root
-				return col.querySelector('[class*="logoRow"]')?.parentElement ?? col.firstElementChild;
-			};
-			const newSessionButton = (root) => {
-				const nested = root.querySelector('button[class*="newSession"]');
-				if (nested) return nested;
-				for (const child of root.children) if (child.tagName === "BUTTON") return child;
-				return undefined;
-			};
-			const placeEntry = (root) => {
-				const btn = newSessionButton(root);
-				if (!btn) return false;
-				if (entry.parentElement !== root) {
-					// 锚定 New Session 所在 logoRow 之后 (workspace 浏览区之前),
-					// 不依赖瞬态几何位置，重渲染后顺序稳定
-					const row = btn.closest('[class*="logoRow"]');
-					const base = row && row.parentElement === root ? row : btn;
-					root.insertBefore(entry, base.nextElementSibling);
-				}
-				return true;
-			};
-			const tryPlace = () => {
-				if (rootEl !== undefined && !rootEl.isConnected) {
-					// 外壳重建了整个侧栏 pane: root observer 随旧树消亡，重新查询
-					rootObs.disconnect(); rootEl = undefined; placed = false;
-				}
-				if (placed) {
-					// 廉价短路：已挂载且仍在 DOM 中 → 只花一次 contains 检查
-					if (document.body.contains(entry)) return;
-					rootObs.disconnect(); rootEl = undefined; placed = false;
-				}
-				rootEl ??= sidebarRoot();
-				if (!rootEl) return;
-				placed = placeEntry(rootEl);
-				if (placed) rootObs.observe(rootEl, { childList: true, subtree: true });
-			};
-			const waitObs = new MutationObserver(() => tryPlace());
-			waitObs.observe(document.body, { childList: true, subtree: true });
-			const rootObs = new MutationObserver(() => {
-				if (!rootEl || !rootEl.isConnected) { placed = false; tryPlace(); return; }
-				if (!rootEl.contains(entry)) placeEntry(rootEl);
-			});
-			// active 高亮同步 (delete 属性而非赋 undefined，避免永久高亮 bug)
-			const unsubActive = panel.subscribe(() => {
-				if (panel.isOpen()) entry.dataset.active = "true"; else delete entry.dataset.active;
-			});
-			tryPlace();
-
-			disposersUI.push(() => { waitObs.disconnect(); rootObs.disconnect(); unsubActive(); entry.remove(); });
-		}
-	}
+	const disposeMain = cctx.slots.inject("main", () => {
+		const disposePanel = cctx.slots.register({ name: "main", key: PANEL_NAME }, DashboardHost);
+		// Install navigation only while its matching main entry exists.
+		const disposeSidebar = cctx.slots.inject("sidebar.panellist", () =>
+			cctx.slots.register({
+				name: "sidebar.panellist", id: PANEL_NAME, order: 90, label: "sched 看板",
+			}, SchedPanelIcon));
+		return () => {
+			disposeSidebar();
+			disposePanel();
+		};
+	});
+	disposersUI.push(disposeMain);
 
 	// B25c: 渲染树异常遥测 —— 掀树根因捕获 (错误对象回传 host 落盘)
 	{
 		const report = (kind, detail) => {
-			if (!panel.isOpen()) return;
+			if (!panelVisible) return;
 			try {
 				authFetch("/sched/api/client-log", {
 					method: "POST", headers: { "content-type": "application/json" },
@@ -3429,7 +3300,7 @@ function apply(cctx, config) {
 	}
 
 	const disposeSettings = cctx.slots.inject(SLOT_SETTINGS, () =>
-		cctx.slots.register({ name: SLOT_SETTINGS, id: NS, order: 90 }, StatusCard));
+		cctx.slots.register({ name: SLOT_SETTINGS, id: NS, order: 90, label: "sched 调度器" }, StatusCard));
 	disposersUI.push(disposeSettings);
 	disposersUI.push(() => authGate.dispose());
 	return () => { for (const d of disposersUI) { try { d?.(); } catch (_) {} } };

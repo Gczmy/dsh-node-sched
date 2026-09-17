@@ -962,3 +962,104 @@ test("dropAlias and dispose abort pending acquires and discard late clients", as
 		assert.equal(client.endCalls, 1);
 	}
 });
+
+test("cancelAllForAliases cancels only the challenges targeting the dropped alias", async () => {
+	const { broker, events } = await createBroker();
+	const dropped = broker.request({ alias: "Kelvin2_outside", method: "keyboard-interactive", prompts: [{ prompt: "OTP" }] });
+	const kept = broker.request({ alias: "HPDC_outside", method: "keyboard-interactive", prompts: [{ prompt: "OTP" }] });
+	const droppedEvent = authEvent(events.filter((e) => e.alias === "Kelvin2_outside"), "keyboard-interactive");
+
+	const cancelled = broker.cancelAllForAliases(["Kelvin2_outside"]);
+	assert.deepEqual(cancelled, [droppedEvent.id]);
+	assert.deepEqual(await dropped, { state: "cancelled" });
+	assert.ok(events.some((candidate) => candidate.id === droppedEvent.id && candidate.state === "cancelled"));
+
+	// The untouched alias still resolves normally.
+	const keptEvent = authEvent(events.filter((e) => e.alias === "HPDC_outside"), "keyboard-interactive");
+	broker.answer(keptEvent.id, ["123456"]);
+	assert.deepEqual(await kept, { state: "answered", answers: ["123456"] });
+});
+
+test("cancelAllForAliases tolerates bad input and unknown aliases", async () => {
+	const { broker } = await createBroker();
+	assert.deepEqual(broker.cancelAllForAliases(), []);
+	assert.deepEqual(broker.cancelAllForAliases([]), []);
+	assert.deepEqual(broker.cancelAllForAliases(["", 42, null]), []);
+	assert.deepEqual(broker.cancelAllForAliases(["ghost"]), []);
+});
+
+test("dropAlias fires the host hook so stale challenges are cancelled", async (t) => {
+	const { SshEngine } = await import(SSH_ENGINE);
+	const engine = new SshEngine(
+		{ find: () => undefined },
+		{ connectTimeoutMs: 1_000, defaultExecTimeoutMs: 1_000, idleTimeoutMs: 60_000 },
+	);
+	t.after(() => engine.dispose());
+	const dropped = [];
+	engine.onAliasDrop = (alias) => dropped.push(alias);
+	engine.dropAlias("Kelvin2_outside");
+	engine.dropAlias("Kelvin2_outside"); // idempotent path must still notify once more, harmlessly
+	assert.ok(dropped.includes("Kelvin2_outside"));
+	// A throwing hook must not break teardown.
+	engine.onAliasDrop = () => { throw new Error("boom"); };
+	assert.doesNotThrow(() => engine.dropAlias("Kelvin2_outside"));
+});
+
+test("openExecStream with interactiveAuth:false never reaches the interactive prompter", async (t) => {
+	const [{ Client }, openExecStream] = await Promise.all([
+		import("ssh2"),
+		exported(SSH_ENGINE, "openExecStream"),
+	]);
+	const originalConnect = Client.prototype.connect;
+	const originalExec = Client.prototype.exec;
+	const originalDestroy = Client.prototype.destroy;
+	const originalEnd = Client.prototype.end;
+	const challenges = [];
+	let client;
+	Client.prototype.connect = function connect(config) {
+		client = this;
+		this.testConfig = config;
+		queueMicrotask(() => this.emit("ready"));
+		return this;
+	};
+	Client.prototype.exec = function exec(_command, callback) {
+		const stream = new EventEmitter();
+		stream.close = () => {};
+		stream.on("error", () => {});
+		callback(null, stream);
+		queueMicrotask(() => stream.emit("close"));
+	};
+	Client.prototype.destroy = function destroy() { return this; };
+	Client.prototype.end = function end() { return this; };
+	t.after(() => {
+		Client.prototype.connect = originalConnect;
+		Client.prototype.exec = originalExec;
+		Client.prototype.destroy = originalDestroy;
+		Client.prototype.end = originalEnd;
+	});
+
+	const clock = new FakeClock();
+	const entry = {
+		alias: "compute",
+		host: "compute.invalid",
+		hostKey: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+		port: 22,
+		user: "runner",
+		auth: { kind: "password", password: "secret" },
+		proxyJump: [],
+	};
+	const engine = {
+		store: { find: (alias) => alias === entry.alias ? entry : undefined },
+		opts: { connectTimeoutMs: 1_000, maxOutputBytes: 4, clock },
+		interactivePrompter: (request) => { challenges.push(request); return Promise.resolve({ state: "answered", answers: ["x"] }); },
+	};
+	const session = await openExecStream(engine, entry.alias, "tail -f log", {
+		clock,
+		deadlineAt: clock.now() + 1_000,
+		interactiveAuth: false,
+	});
+	session.onData = () => {};
+	await new Promise((resolve) => { session.onClose = resolve; });
+	assert.deepEqual(challenges, [], "a background open must never raise an auth challenge");
+	assert.equal(client.testConfig.tryKeyboard, undefined, "tryKeyboard must stay off for non-interactive opens");
+});

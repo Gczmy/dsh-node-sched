@@ -18,11 +18,17 @@ function runChild(command, {
 	timeoutMs = DEFAULT_TIMEOUT_MS,
 	stdinData,
 	maxOutputBytes = DEFAULT_MAX_OUTPUT_BYTES,
+	signal,
 	onStart,
 	onClose,
 } = {}) {
 	const started = Date.now();
 	const budget = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_TIMEOUT_MS;
+	const abortMessage = () => signal?.reason?.message || "command cancelled";
+	if (signal?.aborted) return Promise.resolve({
+		ok: false, code: -1, stdout: "", stderr: abortMessage(),
+		aborted: true, timedOut: false, durationMs: 0,
+	});
 	return new Promise((resolve) => {
 		const child = cp.spawn("/bin/bash", ["-c", command], {
 			stdio: ["pipe", "pipe", "pipe"],
@@ -31,6 +37,7 @@ function runChild(command, {
 		const stdout = createLimitedOutput();
 		const stderr = createLimitedOutput();
 		let timedOut = false;
+		let aborted = false;
 		let stdinError;
 		let settled = false;
 		let leaderExited = false;
@@ -38,6 +45,7 @@ function runChild(command, {
 			if (settled) return;
 			settled = true;
 			clearTimeout(timer);
+			signal?.removeEventListener("abort", onAbort);
 			finalizeLimitedOutput(stdout);
 			finalizeLimitedOutput(stderr);
 			onClose?.(child);
@@ -46,6 +54,7 @@ function runChild(command, {
 				stdout: limitedOutputText(stdout),
 				stderr: limitedOutputText(stderr) || result.error || "",
 				timedOut,
+				aborted,
 				durationMs: Date.now() - started,
 			});
 		};
@@ -57,6 +66,11 @@ function runChild(command, {
 			child.stdout.destroy();
 			child.stderr.destroy();
 			finish({ ok: false, code: -1, error: reason });
+		};
+		const onAbort = () => {
+			if (settled || aborted) return;
+			aborted = true;
+			stop(abortMessage());
 		};
 		const timer = setTimeout(() => {
 			timedOut = true;
@@ -71,15 +85,19 @@ function runChild(command, {
 		child.on("close", (code) => {
 			if (settled) return;
 			finish({
-				ok: code === 0 && !timedOut && (!stdinError || isBrokenPipe(stdinError)),
-				code: timedOut ? -1 : (code ?? -1),
-				error: stdinError && !isBrokenPipe(stdinError) ? stdinError.message : undefined,
+				ok: code === 0 && !timedOut && !aborted && (!stdinError || isBrokenPipe(stdinError)),
+				code: timedOut || aborted ? -1 : (code ?? -1),
+				error: aborted ? abortMessage() : stdinError && !isBrokenPipe(stdinError) ? stdinError.message : undefined,
 			});
 		});
 		child.stdin.on("error", (error) => { stdinError = error; });
 		onStart?.(child, stop);
-		if (stdinData === undefined) child.stdin.end();
-		else child.stdin.end(stdinData);
+		signal?.addEventListener("abort", onAbort, { once: true });
+		if (signal?.aborted) onAbort();
+		if (!aborted) {
+			if (stdinData === undefined) child.stdin.end();
+			else child.stdin.end(stdinData);
+		}
 	});
 }
 

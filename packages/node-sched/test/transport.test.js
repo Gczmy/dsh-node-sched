@@ -47,6 +47,33 @@ test("LocalTransport never signals an exited leader while output pipes remain op
 	} finally { transport.dispose(); }
 });
 
+test("LocalTransport cancellation skips pre-aborted commands and kills in-flight process groups", async () => {
+	const transport = new LocalTransport();
+	try {
+		const before = new AbortController();
+		before.abort(new Error("already cancelled"));
+		const skipped = await transport.exec("exit 99", { signal: before.signal });
+		assert.equal(skipped.aborted, true);
+		assert.equal(skipped.code, -1);
+		assert.equal(transport.children.size, 0);
+
+		const controller = new AbortController();
+		const pending = transport.exec("sleep 30", { signal: controller.signal });
+		assert.equal(transport.children.size, 1);
+		const child = [...transport.children.keys()][0];
+		const closed = new Promise((resolve) => child.once("close", resolve));
+		controller.abort(new Error("user stopped query"));
+		const result = await pending;
+		await closed;
+		assert.equal(result.ok, false);
+		assert.equal(result.aborted, true);
+		assert.equal(result.timedOut, false);
+		assert.match(result.stderr, /user stopped query/);
+		assert.equal(transport.children.size, 0);
+		assert.throws(() => process.kill(child.pid, 0), { code: "ESRCH" });
+	} finally { transport.dispose(); }
+});
+
 test("LocalTransport executes commands and stdin locally", async () => {
 	const transport = new LocalTransport({ maxOutputBytes: 1024 });
 	try {

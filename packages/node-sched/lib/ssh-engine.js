@@ -972,12 +972,18 @@ export class SshEngine {
 		this.aliasGeneration = new Map();
 		this.acquireActive = new Map();
 		this.acquireControllers = new Map();
+		this.operationControllers = new Map();
+		this.authBlocks = new Map();
 		this.storeExternalGeneration = typeof store.externalGeneration === "function"
 			? store.externalGeneration()
 			: 0;
 		this.disposed = false;
 		this.sweepTimer = setInterval(() => sweepPool(this), Math.max(10_000, this.opts.idleTimeoutMs / 4));
 		this.sweepTimer.unref?.();
+		/** Optional host hook: `onAliasDrop(alias)` fires before an alias's
+		 * connections are invalidated, so the dashboard can cancel pending
+		 * interactive-auth challenges targeting the dropped alias. */
+		this.onAliasDrop = null;
 	}
 
 	/**
@@ -987,6 +993,11 @@ export class SshEngine {
 	 */
 	setInteractivePrompter(fn) {
 		this.interactivePrompter = fn;
+	}
+
+	/** Only explicit connect/test actions may resume a cancelled authentication. */
+	resumeAuthentication(alias) {
+		this.authBlocks.delete(alias);
 	}
 
 	list(query) {
@@ -1023,10 +1034,12 @@ export class SshEngine {
 	}
 
 	async openShell(alias, size, options = {}) {
+		this.resumeAuthentication(alias);
 		return openShell(this, alias, size, options);
 	}
 
 	async test(alias) {
+		this.resumeAuthentication(alias);
 		const started = Date.now();
 		try {
 			const result = await this.exec(alias, "echo ok", 10_000);
@@ -1039,6 +1052,14 @@ export class SshEngine {
 	}
 
 	dropAlias(alias) {
+		const invalidated = sshLifecycleError("SSH_ALIAS_INVALIDATED", `alias '${alias}' was invalidated`);
+		abortOperations(this, alias, invalidated);
+		// Transport switches (bind/unbind/use-system/delete) land here; a
+		// challenge pending for the dropped alias would otherwise linger in the
+		// dashboard until its own 180s deadline.
+		if (typeof this.onAliasDrop === "function") {
+			try { this.onAliasDrop(alias); } catch { /* host hook must not break teardown */ }
+		}
 		const pendingControllers = this.acquireControllers.get(alias);
 		if (
 			!this.pool.has(alias) &&
@@ -1051,20 +1072,22 @@ export class SshEngine {
 			return;
 		}
 		this.aliasGeneration.set(alias, (this.aliasGeneration.get(alias) ?? 0) + 1);
-		abortPendingAcquires(this, alias, new Error(`alias '${alias}' was invalidated while connecting`));
+		abortPendingAcquires(this, alias, invalidated);
 		disposeRecord(this, alias);
 	}
 
 	dispose() {
 		this.disposed = true;
 		clearInterval(this.sweepTimer);
+		const disposed = sshLifecycleError("SSH_ENGINE_DISPOSED", "SSH engine disposed");
+		for (const alias of this.operationControllers.keys()) abortOperations(this, alias, disposed);
 		const pendingAliases = new Set([
 			...this.acquireQueue.keys(),
 			...this.acquireControllers.keys(),
 		]);
 		for (const alias of pendingAliases) {
 			this.aliasGeneration.set(alias, (this.aliasGeneration.get(alias) ?? 0) + 1);
-			abortPendingAcquires(this, alias, new Error("SSH engine disposed"));
+			abortPendingAcquires(this, alias, disposed);
 		}
 		for (const alias of [...this.pool.keys()]) disposeRecord(this, alias, undefined, { force: true });
 	}
@@ -1593,8 +1616,11 @@ export function waitForSshOpen(begin, options) {
 }
 
 /** Attach browser-mediated keyboard-interactive auth with one absolute transport deadline. */
-export function attachInteractiveAuth(engine, config, alias, deadlineAt) {
+export function attachInteractiveAuth(engine, config, alias, deadlineAt, options = {}) {
 	if (config._kbdintAnswer !== undefined) return config;
+	// Callers that must stay invisible (event-tail pollers) opt out: a
+	// background reconnect must never surface an auth challenge modal.
+	if (options.interactiveAuth === false) return config;
 	if (typeof engine.interactivePrompter !== "function") return config;
 	const configuredTimeout = engine.opts?.interactiveAuthTimeoutMs;
 	const timeoutMs = Number.isFinite(configuredTimeout) && configuredTimeout > 0
@@ -1732,12 +1758,13 @@ export async function probeHostKey(engine, targetAlias, options = {}) {
 	const hops = [];
 	let sock;
 	const clock = options.clock ?? interactiveClock(engine);
-	const configuredTimeout = typeof engine.interactivePrompter === "function"
+	const nonInteractive = options.interactiveAuth === false;
+	const configuredTimeout = !nonInteractive && typeof engine.interactivePrompter === "function"
 		? engine.opts?.interactiveAuthTimeoutMs
 		: engine.opts?.connectTimeoutMs;
 	const timeoutMs = Number.isFinite(configuredTimeout) && configuredTimeout > 0
 		? configuredTimeout
-		: (typeof engine.interactivePrompter === "function" ? INTERACTIVE_AUTH_TIMEOUT_MS : 15_000);
+		: (!nonInteractive && typeof engine.interactivePrompter === "function" ? INTERACTIVE_AUTH_TIMEOUT_MS : 15_000);
 	const deadlineAt = options.deadlineAt ?? (clock.now() + timeoutMs);
 	const signal = options.signal;
 	const closePrefix = () => {
@@ -1749,7 +1776,7 @@ export async function probeHostKey(engine, targetAlias, options = {}) {
 			const hop = route[index];
 			const hopCfg = buildConnectConfig(hop, sock, engine.opts);
 			hopCfg.readyTimeout = Math.max(1, deadlineAt - clock.now());
-			attachInteractiveAuth(engine, hopCfg, hop.alias, deadlineAt);
+			attachInteractiveAuth(engine, hopCfg, hop.alias, deadlineAt, options);
 			const hopClient = await withSshDeadline(
 				connectWithInteractiveAuth(engine, hopCfg, hop.alias, { signal, deadlineAt, clock }),
 				{
@@ -1803,17 +1830,24 @@ export async function probeHostKey(engine, targetAlias, options = {}) {
 
 /** Build one full jump chain (ProxyJump): hop clients in order, then target. */
 export async function connectChain(engine, entry, options = {}) {
+	if (engine.disposed) throw sshLifecycleError("SSH_ENGINE_DISPOSED", "SSH engine disposed");
+	if (engine.authBlocks?.has(entry.alias)) {
+		const blocked = sshLifecycleError("SSH_AUTH_BLOCKED", `SSH authentication for '${entry.alias}' is paused; reconnect explicitly to resume`);
+		blocked.cause = engine.authBlocks.get(entry.alias);
+		throw blocked;
+	}
 	const hops = [];
 	let sock;
 	const route = resolveHostRoute(engine.store, entry);
 	const chain = route.slice(0, -1);
 	const clock = options.clock ?? interactiveClock(engine);
-	const configuredTimeout = typeof engine.interactivePrompter === "function"
+	const nonInteractive = options.interactiveAuth === false;
+	const configuredTimeout = !nonInteractive && typeof engine.interactivePrompter === "function"
 		? engine.opts?.interactiveAuthTimeoutMs
 		: engine.opts?.connectTimeoutMs;
 	const timeoutMs = Number.isFinite(configuredTimeout) && configuredTimeout > 0
 		? configuredTimeout
-		: (typeof engine.interactivePrompter === "function" ? INTERACTIVE_AUTH_TIMEOUT_MS : 15_000);
+		: (!nonInteractive && typeof engine.interactivePrompter === "function" ? INTERACTIVE_AUTH_TIMEOUT_MS : 15_000);
 	const deadlineAt = options.deadlineAt ?? (clock.now() + timeoutMs);
 	const signal = options.signal;
 	const closeChain = () => {
@@ -1826,7 +1860,7 @@ export async function connectChain(engine, entry, options = {}) {
 			const hopAlias = hop.alias;
 			const hopCfg = buildConnectConfig(hop, sock, engine.opts);
 			hopCfg.readyTimeout = Math.max(1, deadlineAt - clock.now());
-			attachInteractiveAuth(engine, hopCfg, hopAlias, deadlineAt);
+			attachInteractiveAuth(engine, hopCfg, hopAlias, deadlineAt, options);
 			const hopClient = await withSshDeadline(
 				connectWithInteractiveAuth(engine, hopCfg, hopAlias, { signal, deadlineAt, clock }),
 				{
@@ -1860,7 +1894,7 @@ export async function connectChain(engine, entry, options = {}) {
 		}
 		const targetCfg = buildConnectConfig(entry, sock, engine.opts);
 		targetCfg.readyTimeout = Math.max(1, deadlineAt - clock.now());
-		attachInteractiveAuth(engine, targetCfg, entry.alias, deadlineAt);
+		attachInteractiveAuth(engine, targetCfg, entry.alias, deadlineAt, options);
 		const target = await withSshDeadline(
 			connectWithInteractiveAuth(engine, targetCfg, entry.alias, { signal, deadlineAt, clock }),
 			{
@@ -1876,8 +1910,55 @@ export async function connectChain(engine, entry, options = {}) {
 		return { client: target, hops };
 	} catch (error) {
 		closeChain();
+		if (isInteractiveAuthTerminal(error)) (engine.authBlocks ??= new Map()).set(entry.alias, error);
 		throw error;
 	}
+}
+
+function sshLifecycleError(code, message) {
+	const error = new Error(message);
+	error.code = code;
+	return error;
+}
+
+function isInteractiveAuthTerminal(error) {
+	return typeof error?.code === "string" && error.code.startsWith("SSH_INTERACTIVE_AUTH_");
+}
+
+function isNonRetryableSshError(error) {
+	return isInteractiveAuthTerminal(error) || [
+		"SSH_OPEN_DEADLINE", "SSH_OPEN_ABORTED", "SSH_ALIAS_INVALIDATED",
+		"SSH_ENGINE_DISPOSED", "SSH_AUTH_BLOCKED", "SSH_NO_EXISTING_CONNECTION",
+	].includes(error?.code) || error?.name === "AbortError";
+}
+
+function abortOperations(engine, alias, reason) {
+	for (const controller of engine.operationControllers?.get(alias) ?? []) {
+		if (!controller.signal.aborted) controller.abort(reason);
+	}
+}
+
+// The operation's signal persists across every retry even after an idle alias's
+// generation is pruned. Dropping an alias can therefore never revive an old
+// query through a new connection, and it also stops an already-open channel.
+function beginSshOperation(engine, alias, externalSignal) {
+	if (engine.disposed) throw sshLifecycleError("SSH_ENGINE_DISPOSED", "SSH engine disposed");
+	const controller = new AbortController();
+	const operations = engine.operationControllers ??= new Map();
+	let controllers = operations.get(alias);
+	if (!controllers) operations.set(alias, controllers = new Set());
+	controllers.add(controller);
+	const onAbort = () => controller.abort(sshAbortError(externalSignal, alias));
+	externalSignal?.addEventListener?.("abort", onAbort, { once: true });
+	if (externalSignal?.aborted) onAbort();
+	return {
+		signal: controller.signal,
+		release: () => {
+			externalSignal?.removeEventListener?.("abort", onAbort);
+			controllers.delete(controller);
+			if (controllers.size === 0) operations.delete(alias);
+		},
+	};
 }
 
 function abortPendingAcquires(engine, alias, reason) {
@@ -1917,7 +1998,7 @@ function refreshEngineStore(engine) {
 }
 
 async function acquire(engine, alias, options = {}) {
-	if (engine.disposed) throw new Error("SSH engine disposed");
+	if (engine.disposed) throw sshLifecycleError("SSH_ENGINE_DISPOSED", "SSH engine disposed");
 	refreshEngineStore(engine);
 	const generation = engine.aliasGeneration.get(alias) ?? 0;
 	const pending = engine.acquireQueue.get(alias);
@@ -1961,7 +2042,8 @@ async function doAcquire(engine, alias, generation, options = {}) {
 	const { client, hops } = await connectChain(engine, entry, options);
 	if (engine.disposed || (engine.aliasGeneration.get(alias) ?? 0) !== generation) {
 		endRecordChain({ client, hops });
-		throw new Error(`alias '${alias}' was invalidated while connecting`);
+		throw sshLifecycleError(engine.disposed ? "SSH_ENGINE_DISPOSED" : "SSH_ALIAS_INVALIDATED",
+			engine.disposed ? "SSH engine disposed" : `alias '${alias}' was invalidated while connecting`);
 	}
 	const record = {
 		client, hops, idleAt: Date.now(), pinned: false, broken: false,
@@ -2008,57 +2090,69 @@ function sweepPool(engine) {
 	}
 }
 
-/**
- * Run with a live client. Replays are disabled unless the caller explicitly
- * supplies more than one attempt for an idempotent operation.
- */
-async function withClient(engine, alias, fn, attempts = 1, openOptions = {}) {
-	let lastError;
-	for (let attempt = 1; attempt <= attempts; attempt += 1) {
-		let record;
-		try {
-			if (engine.disposed) throw new Error("SSH engine disposed");
-			refreshEngineStore(engine);
-			record = engine.pool.get(alias);
-			if (record === undefined || record.broken) {
-				if (record !== undefined) disposeRecord(engine, alias, record);
-				record = undefined;
-			}
-			record = await withSshDeadline(
-				record === undefined ? acquire(engine, alias, openOptions) : Promise.resolve(record),
-				{
-					...openOptions,
-					label: `${alias} pooled connection`,
-				},
-			);
-		} catch (error) {
-			lastError = error;
-			if (
-				attempt === attempts
-				|| openOptions.signal?.aborted
-				|| error?.code === "SSH_OPEN_DEADLINE"
-				|| error?.code === "SSH_OPEN_ABORTED"
-			) {
-				throw error;
-			}
-			continue;
-		}
-		record.idleAt = Date.now();
-		record.inFlight += 1;
-		try {
-			const result = await fn(record.client);
-			record.idleAt = Date.now();
-			return result;
-		} catch (error) {
-			lastError = error;
-			if (!record.broken && error?.retryable !== true) throw error;
-			disposeRecord(engine, alias, record);
-		} finally {
-			record.inFlight -= 1;
-			if (record.disposed) closeRecordIfIdle(record);
-		}
+async function reservePooledRecord(engine, alias, options) {
+	if (engine.disposed) throw sshLifecycleError("SSH_ENGINE_DISPOSED", "SSH engine disposed");
+	refreshEngineStore(engine);
+	if (options.signal?.aborted) throw sshAbortError(options.signal, alias);
+	let record = engine.pool.get(alias);
+	if (record?.broken || record?.disposed || record?.closed) {
+		disposeRecord(engine, alias, record);
+		record = undefined;
 	}
-	throw lastError instanceof Error ? lastError : new Error(String(lastError));
+	if (!record && options.requireExistingConnection) {
+		throw sshLifecycleError("SSH_NO_EXISTING_CONNECTION", `No authenticated SSH connection for '${alias}'; connect explicitly first`);
+	}
+	record = await withSshDeadline(record ? Promise.resolve(record) : acquire(engine, alias, options), {
+		...options,
+		label: `${alias} pooled connection`,
+	});
+	if (options.signal?.aborted) throw sshAbortError(options.signal, alias);
+	if (record.disposed || record.closed) {
+		throw sshLifecycleError("SSH_ALIAS_INVALIDATED", `alias '${alias}' was invalidated while opening a channel`);
+	}
+	record.idleAt = Date.now();
+	record.inFlight += 1;
+	return record;
+}
+
+function releasePooledRecord(record) {
+	record.inFlight -= 1;
+	record.idleAt = Date.now();
+	if (record.disposed) closeRecordIfIdle(record);
+}
+
+/** Replays require an explicit idempotent caller and never replay cancellation. */
+async function withClient(engine, alias, fn, attempts = 1, openOptions = {}) {
+	if (engine.disposed) throw sshLifecycleError("SSH_ENGINE_DISPOSED", "SSH engine disposed");
+	refreshEngineStore(engine);
+	const operation = beginSshOperation(engine, alias, openOptions.signal);
+	const context = { ...openOptions, signal: operation.signal };
+	let lastError;
+	try {
+		for (let attempt = 1; attempt <= attempts; attempt += 1) {
+			let record;
+			try {
+				record = await reservePooledRecord(engine, alias, context);
+			} catch (error) {
+				lastError = error;
+				if (attempt === attempts || operation.signal.aborted || isNonRetryableSshError(error)) throw error;
+				continue;
+			}
+			try {
+				return await fn(record.client, context);
+			} catch (error) {
+				lastError = error;
+				if (operation.signal.aborted || isNonRetryableSshError(error)
+					|| (!record.broken && error?.retryable !== true)) throw error;
+				disposeRecord(engine, alias, record);
+			} finally {
+				releasePooledRecord(record);
+			}
+		}
+		throw lastError instanceof Error ? lastError : new Error(String(lastError));
+	} finally {
+		operation.release();
+	}
 }
 
 export async function execCommand(
@@ -2074,7 +2168,7 @@ export async function execCommand(
 	const budget = timeoutMs !== undefined && timeoutMs > 0 ? timeoutMs : engine.opts.defaultExecTimeoutMs;
 	const allowedAttempts = Number.isInteger(attempts) && attempts > 0 ? attempts : 1;
 	const clock = options.clock ?? interactiveClock(engine);
-	const configuredOpenTimeout = typeof engine.interactivePrompter === "function"
+	const configuredOpenTimeout = options.interactiveAuth !== false && typeof engine.interactivePrompter === "function"
 		? engine.opts?.interactiveAuthTimeoutMs
 		: budget;
 	const openTimeout = Number.isFinite(configuredOpenTimeout) && configuredOpenTimeout > 0
@@ -2084,8 +2178,10 @@ export async function execCommand(
 		clock,
 		signal: options.signal,
 		deadlineAt: options.deadlineAt ?? (clock.now() + openTimeout),
+		interactiveAuth: options.interactiveAuth,
+		requireExistingConnection: options.requireExistingConnection,
 	};
-	return withClient(engine, alias, (client) => {
+	return withClient(engine, alias, (client, openOptions) => {
 		return waitForSshOpen(
 			(callback) => client.exec(command, callback),
 			{
@@ -2137,7 +2233,7 @@ export async function execCommand(
 							reject(sshAbortError(openOptions.signal, `${alias} exec command`));
 						};
 						const commandDeadlineAt = options.deadlineAt
-							?? (typeof engine.interactivePrompter === "function"
+							?? (options.interactiveAuth !== false && typeof engine.interactivePrompter === "function"
 								? clock.now() + budget
 								: openOptions.deadlineAt);
 						const remaining = commandDeadlineAt - clock.now();
@@ -2189,22 +2285,24 @@ export async function execCommand(
 	}, allowedAttempts, openOptions);
 }
 
-/**
- * Open a long-running exec stream (log tail 等)：独立连接 + 持久通道，
- * 行数据经 onData 交付；close() 断开。与 openShell 同样的隔离原则。
- */
+/** Resolve the connection-open deadline independently of stream lifetime. */
 function sshOpenContext(engine, options = {}) {
 	const clock = options.clock ?? interactiveClock(engine);
-	const configuredTimeout = typeof engine.interactivePrompter === "function"
+	const nonInteractive = options.interactiveAuth === false;
+	const configuredTimeout = !nonInteractive && typeof engine.interactivePrompter === "function"
 		? engine.opts?.interactiveAuthTimeoutMs
 		: engine.opts?.connectTimeoutMs;
 	const timeoutMs = Number.isFinite(configuredTimeout) && configuredTimeout > 0
 		? configuredTimeout
-		: (typeof engine.interactivePrompter === "function" ? INTERACTIVE_AUTH_TIMEOUT_MS : 15_000);
+		: (!nonInteractive && typeof engine.interactivePrompter === "function" ? INTERACTIVE_AUTH_TIMEOUT_MS : 15_000);
 	return {
 		clock,
 		signal: options.signal,
 		deadlineAt: options.deadlineAt ?? (clock.now() + timeoutMs),
+		// Propagate the opt-out: connectChain/attachInteractiveAuth key off
+		// `interactiveAuth === false` to suppress challenge creation, and the
+		// context is what actually reaches connectChain.
+		interactiveAuth: options.interactiveAuth,
 	};
 }
 
@@ -2306,13 +2404,35 @@ function attachEarlyStreamReplay({
 
 
 export async function openExecStream(engine, alias, command, options = {}) {
-	if (engine.disposed) throw new Error("SSH engine disposed");
+	if (engine.disposed) throw sshLifecycleError("SSH_ENGINE_DISPOSED", "SSH engine disposed");
 	refreshEngineStore(engine);
-	const entry = engine.store.find(alias);
-	if (!entry) throw new Error(`alias '${alias}' not found — add it first`);
-	const context = sshOpenContext(engine, options);
-	const { client, hops } = await connectChain(engine, entry, context);
+	const operation = beginSshOperation(engine, alias, options.signal);
+	const context = {
+		...sshOpenContext(engine, options),
+		signal: operation.signal,
+		requireExistingConnection: options.requireExistingConnection,
+	};
+	let record;
+	let client;
+	let hops;
+	let released = false;
+	const releaseTransport = () => {
+		if (released) return;
+		released = true;
+		if (record) releasePooledRecord(record);
+		else if (client) closeStandaloneChain(client, hops);
+		operation.release();
+	};
 	try {
+		if (context.signal.aborted) throw sshAbortError(context.signal, alias);
+		if (options.requireExistingConnection || options.pooled) {
+			record = await reservePooledRecord(engine, alias, context);
+			client = record.client;
+		} else {
+			const entry = engine.store.find(alias);
+			if (!entry) throw new Error(`alias '${alias}' not found — add it first`);
+			({ client, hops } = await connectChain(engine, entry, context));
+		}
 		return await waitForSshOpen(
 			(callback) => client.exec(command, callback),
 			{
@@ -2326,14 +2446,17 @@ export async function openExecStream(engine, alias, command, options = {}) {
 					const teardown = () => {
 						if (tornDown) return;
 						tornDown = true;
-						closeStandaloneChain(client, hops);
+						context.signal.removeEventListener("abort", onAbort);
+						client.removeListener?.("close", onClientClose);
+						client.removeListener?.("error", onClientError);
+						releaseTransport();
 					};
 					let settle;
+					const onAbort = () => settle([sshAbortError(context.signal, `${alias} exec stream`)], { closeStream: true });
+					const onClientClose = () => settle([new Error("SSH connection closed during exec stream")], { closeStream: true });
+					const onClientError = (error) => settle([error], { closeStream: true });
 					const session = {
-						close: () => {
-							try { stream.close(); } catch { /* gone */ }
-							settle([undefined]);
-						},
+						close: () => settle([undefined], { closeStream: true }),
 					};
 					settle = attachEarlyStreamReplay({
 						stream,
@@ -2344,13 +2467,17 @@ export async function openExecStream(engine, alias, command, options = {}) {
 						overflowTerminal: (error) => [error],
 					});
 					stream.on("close", () => settle([undefined]));
-					stream.on("error", (streamError) => settle([streamError]));
+					stream.on("error", (streamError) => settle([streamError], { closeStream: true }));
+					client.on?.("close", onClientClose);
+					client.on?.("error", onClientError);
+					context.signal.addEventListener("abort", onAbort, { once: true });
+					if (context.signal.aborted) onAbort();
 					return session;
 				},
 			},
 		);
 	} catch (error) {
-		closeStandaloneChain(client, hops);
+		releaseTransport();
 		throw error;
 	}
 }
