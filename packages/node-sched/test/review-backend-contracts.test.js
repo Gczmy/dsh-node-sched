@@ -137,6 +137,21 @@ function statusFixture(document = {}) {
 	return fixture;
 }
 
+test("host memory reservations and resource wait reasons retain strict status validation", async () => {
+	const canonical = await exported(INDEX, "canonicalStatusDocument");
+	const batch = batchStatus("b", "train");
+	const memory = { used_gib: 32.5, total_gib: 96, reserve_gib: 16, default_job_gib: 8, available_gib: null };
+	for (const reason of ["cpu", "host_memory", "gpu", "parallel", "draining", "batch_blocked"]) {
+		const doc = statusFixture({ batches: [batch], jobs: [{ ...jobStatus(batch, "a", { status: "pending" }), wait_reason: reason }], host_memory: memory });
+		assert.equal(canonical(doc), doc);
+	}
+	for (const value of [-1, NaN, Infinity, "12", true]) {
+		assert.throws(() => canonical(statusFixture({ host_memory: { ...memory, used_gib: value } })), /host_memory/);
+	}
+	assert.throws(() => canonical(statusFixture({ host_memory: { ...memory, available_gib: undefined } })), /host_memory/);
+	assert.doesNotThrow(() => canonical(statusFixture()));
+});
+
 function batchStatus(id, name, { status = "active", revision = 1 } = {}) {
 	return {
 		id,

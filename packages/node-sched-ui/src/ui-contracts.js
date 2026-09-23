@@ -58,6 +58,12 @@ export function taskWaitLabel(task) {
 		project_gpu_disabled: "项目 GPU 已禁用，等待启用",
 		quota: "等待 GPU 配额",
 		dependency: "等待依赖",
+		cpu: "等待 CPU 预留额度",
+		host_memory: "等待主机内存",
+		gpu: "等待可用 GPU",
+		parallel: "等待批次并发名额",
+		draining: "调度器排空中，暂停派发",
+		batch_blocked: "批次尚未激活",
 	}[task.wait_reason] || "";
 }
 

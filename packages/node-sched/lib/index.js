@@ -1308,6 +1308,7 @@ const STATUS_TOP_LEVEL_KEYS = new Set([
 	"jobs",
 	"gpus",
 	"cpu",
+	"host_memory",
 ]);
 const STATUS_BATCH_KEYS = new Set([
 	"id",
@@ -1442,7 +1443,7 @@ function canonicalStatusDocument(document) {
 			throw new TypeError(`status.jobs[${index}].version is invalid`);
 		}
 		if (!STATUS_JOB_STATES.has(job.status)) throw new TypeError(`status job state ${job.status} is unknown`);
-		if (job.wait_reason !== null && job.wait_reason !== "quota" && job.wait_reason !== "dependency" && job.wait_reason !== "project_gpu_disabled") {
+		if (job.wait_reason !== null && !["quota", "dependency", "project_gpu_disabled", "cpu", "host_memory", "gpu", "parallel", "draining", "batch_blocked"].includes(job.wait_reason)) {
 			throw new TypeError(`status.jobs[${index}].wait_reason is invalid`);
 		}
 		jobIds.add(id);
@@ -1476,6 +1477,17 @@ function canonicalStatusDocument(document) {
 		statusKnownKeys(cpu, new Set(["used", "total"]), "status.cpu");
 		if (![cpu.used, cpu.total].every((value) => Number.isInteger(value) && value >= 0)) {
 			throw new TypeError("status.cpu is invalid");
+		}
+	}
+	if (document.host_memory !== undefined) {
+		const memory = statusRecord(document.host_memory, "status.host_memory");
+		statusKnownKeys(memory, new Set(["used_gib", "total_gib", "reserve_gib", "default_job_gib", "available_gib"]), "status.host_memory");
+		for (const key of ["used_gib", "total_gib", "reserve_gib", "default_job_gib", "available_gib"]) {
+			if (key === "available_gib" && memory[key] === null) continue;
+			if (typeof memory[key] !== "number" || !Number.isFinite(memory[key]) || memory[key] < 0
+				|| (["total_gib", "default_job_gib"].includes(key) && memory[key] === 0)) {
+				throw new TypeError(`status.host_memory.${key} is invalid`);
+			}
 		}
 	}
 	if (document.daemon_health !== undefined) {
@@ -1729,7 +1741,12 @@ function summarizeStatus(document) {
 			: "";
 		lines.push(`  gpu${gpu.idx} [${gpu.status}]${assignments}${gpu.quarantined ? " QUARANTINED" : ""}`);
 	}
-	if (canonical.cpu) lines.push(`cpu: ${canonical.cpu.used} in use${canonical.cpu.total ? ` / ${canonical.cpu.total} cap` : " (no cap)"}`);
+	if (canonical.cpu) lines.push(`cpu reserved: ${canonical.cpu.used}${canonical.cpu.total ? ` / ${canonical.cpu.total} cores` : " (no cap)"} (not measured utilization)`);
+	if (canonical.host_memory) {
+		const m = canonical.host_memory;
+		lines.push(`host memory reserved: ${m.used_gib} / ${m.total_gib} GiB; node available: ${m.available_gib === null ? "unknown" : m.available_gib.toFixed(1) + " GiB"}`);
+	}
+	if (canonical.daemon_health?.draining) lines.push("dispatch paused (draining)");
 	return lines.join("\n");
 }
 

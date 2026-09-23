@@ -2,6 +2,15 @@
 
 > 按 M 里程碑滚动记录。每条 = 现象 / 根因 / 定案，供后续开发避坑。
 
+## Host memory and drain status (2026-09-22)
+
+schema 1 增加可选 `host_memory`，包含 `used_gib`、`total_gib`、`reserve_gib`、
+`default_job_gib` 与可为 null 的 `available_gib`。CPU used 和内存 used 都表示
+声明预留；看板不得将其标为实测利用率。available 来自计算节点 daemon 采样。
+等待原因增加 `cpu`、`host_memory`、`gpu`、`parallel`、`draining`、`batch_blocked`；
+仅解释 sched 返回值，不在插件中复刻准入算法。`daemon_health.draining` 显示暂停状态。
+后端先接受新契约再升级 sched；CLI 的 drain/resume 暂不加入看板 writer。
+
 ## Project GPU access (2026-09-07)
 
 项目 GPU 开关使用 `projects.<name>.gpu_enabled`，布尔值、省略为 `true`；独立于

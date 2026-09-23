@@ -24,9 +24,9 @@ var __copyProps = (to, from, except, desc) => {
 };
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-// node_modules/.pnpm/@xterm+xterm@5.5.0/node_modules/@xterm/xterm/lib/xterm.js
+// ../dsh-node-sched/node_modules/.pnpm/@xterm+xterm@5.5.0/node_modules/@xterm/xterm/lib/xterm.js
 var require_xterm = __commonJS({
-  "node_modules/.pnpm/@xterm+xterm@5.5.0/node_modules/@xterm/xterm/lib/xterm.js"(exports, module2) {
+  "../dsh-node-sched/node_modules/.pnpm/@xterm+xterm@5.5.0/node_modules/@xterm/xterm/lib/xterm.js"(exports, module2) {
     !(function(e, t) {
       if ("object" == typeof exports && "object" == typeof module2) module2.exports = t();
       else if ("function" == typeof define && define.amd) define([], t);
@@ -6083,9 +6083,9 @@ WARNING: This link could potentially be dangerous`)) {
   }
 });
 
-// node_modules/.pnpm/@xterm+addon-fit@0.10.0_@xterm+xterm@5.5.0/node_modules/@xterm/addon-fit/lib/addon-fit.js
+// ../dsh-node-sched/node_modules/.pnpm/@xterm+addon-fit@0.10.0_@xterm+xterm@5.5.0/node_modules/@xterm/addon-fit/lib/addon-fit.js
 var require_addon_fit = __commonJS({
-  "node_modules/.pnpm/@xterm+addon-fit@0.10.0_@xterm+xterm@5.5.0/node_modules/@xterm/addon-fit/lib/addon-fit.js"(exports, module2) {
+  "../dsh-node-sched/node_modules/.pnpm/@xterm+addon-fit@0.10.0_@xterm+xterm@5.5.0/node_modules/@xterm/addon-fit/lib/addon-fit.js"(exports, module2) {
     !(function(e, t) {
       "object" == typeof exports && "object" == typeof module2 ? module2.exports = t() : "function" == typeof define && define.amd ? define([], t) : "object" == typeof exports ? exports.FitAddon = t() : e.FitAddon = t();
     })(self, (() => (() => {
@@ -6119,9 +6119,9 @@ var require_addon_fit = __commonJS({
   }
 });
 
-// node_modules/.pnpm/@xterm+xterm@5.5.0/node_modules/@xterm/xterm/css/xterm.css
+// ../dsh-node-sched/node_modules/.pnpm/@xterm+xterm@5.5.0/node_modules/@xterm/xterm/css/xterm.css
 var require_xterm2 = __commonJS({
-  "node_modules/.pnpm/@xterm+xterm@5.5.0/node_modules/@xterm/xterm/css/xterm.css"(exports, module2) {
+  "../dsh-node-sched/node_modules/.pnpm/@xterm+xterm@5.5.0/node_modules/@xterm/xterm/css/xterm.css"(exports, module2) {
     module2.exports = `/**
  * Copyright (c) 2014 The xterm.js authors. All rights reserved.
  * Copyright (c) 2012-2013, Christopher Jeffrey (MIT License)
@@ -6344,7 +6344,7 @@ var require_xterm2 = __commonJS({
   }
 });
 
-// packages/node-sched-ui/src/client.jsx
+// ../dsh-node-sched/packages/node-sched-ui/src/client.jsx
 var client_exports = {};
 __export(client_exports, {
   apply: () => apply,
@@ -6353,7 +6353,7 @@ __export(client_exports, {
 });
 module.exports = __toCommonJS(client_exports);
 
-// packages/node-sched-ui/src/ui-contracts.js
+// ../dsh-node-sched/packages/node-sched-ui/src/ui-contracts.js
 var TERMINAL_AUTH_STATES = /* @__PURE__ */ new Set(["resolved", "expired", "cancelled"]);
 var MAX_AUTH_ERROR_CHARS = 240;
 function boundedAuthError(text) {
@@ -6399,7 +6399,13 @@ function taskWaitLabel(task) {
   return {
     project_gpu_disabled: "\u9879\u76EE GPU \u5DF2\u7981\u7528\uFF0C\u7B49\u5F85\u542F\u7528",
     quota: "\u7B49\u5F85 GPU \u914D\u989D",
-    dependency: "\u7B49\u5F85\u4F9D\u8D56"
+    dependency: "\u7B49\u5F85\u4F9D\u8D56",
+    cpu: "\u7B49\u5F85 CPU \u9884\u7559\u989D\u5EA6",
+    host_memory: "\u7B49\u5F85\u4E3B\u673A\u5185\u5B58",
+    gpu: "\u7B49\u5F85\u53EF\u7528 GPU",
+    parallel: "\u7B49\u5F85\u6279\u6B21\u5E76\u53D1\u540D\u989D",
+    draining: "\u8C03\u5EA6\u5668\u6392\u7A7A\u4E2D\uFF0C\u6682\u505C\u6D3E\u53D1",
+    batch_blocked: "\u6279\u6B21\u5C1A\u672A\u6FC0\u6D3B"
   }[task.wait_reason] || "";
 }
 var SUBMIT_EXAMPLE = submitExampleForProject("default");
@@ -6873,7 +6879,7 @@ var PollGate = class {
   }
 };
 
-// packages/node-sched-ui/src/auth-gate.js
+// ../dsh-node-sched/packages/node-sched-ui/src/auth-gate.js
 var AUTH_API = Object.freeze({
   challenge: "/sched/api/auth/challenge",
   verify: "/sched/api/auth/verify",
@@ -7589,7 +7595,7 @@ var BrowserAuthGate = class {
   }
 };
 
-// packages/node-sched-ui/src/client.jsx
+// ../dsh-node-sched/packages/node-sched-ui/src/client.jsx
 var PANEL_NAME = "sched";
 var SLOT_SETTINGS = "settings.section";
 var NS = "nodesched";
@@ -9013,6 +9019,13 @@ function apply(cctx, config) {
       ])
     ]);
   }
+  function ResourceSummary({ raw }) {
+    return jsxs2("div", { style: { fontSize: 13, color: T.label2, marginBottom: 8 } }, [
+      raw?.cpu && j("div", null, `CPU \u9884\u7559 ${raw.cpu.used} / ${raw.cpu.total || "\u672A\u9650\u989D"} \u6838\uFF08\u975E\u5B9E\u6D4B\u5229\u7528\u7387\uFF09`),
+      raw?.host_memory && j("div", null, `\u4E3B\u673A\u5185\u5B58\u9884\u7559 ${raw.host_memory.used_gib} / ${raw.host_memory.total_gib} GiB \xB7 \u8282\u70B9\u53EF\u7528 ${raw.host_memory.available_gib === null ? "\u672A\u77E5" : raw.host_memory.available_gib.toFixed(1) + " GiB"}`),
+      raw?.daemon_health?.draining && j("div", { style: { color: T.warn } }, "\u6392\u7A7A\u4E2D\uFF1A\u8FD0\u884C\u4EFB\u52A1\u7EE7\u7EED\uFF0C\u65B0\u6D3E\u53D1\u5DF2\u6682\u505C")
+    ]);
+  }
   function GpuRow({ g, runOp }) {
     const assignmentText = (g.assignments ?? []).map((assignment) => `${assignment.job_id}${assignment.vram_gib === null ? "" : ` (${assignment.vram_gib} GiB)`}`).join(", ");
     return jsxs2("div", { style: { marginBottom: 6, display: "flex", alignItems: "center" } }, [
@@ -9971,6 +9984,7 @@ function apply(cctx, config) {
             borderRadius: 8
           }
         }, mutationAvailability.reason),
+        ["batches", "gpus"].includes(tab) && j(ResourceSummary, { raw }),
         tab === "batches" && jsxs2("fieldset", {
           disabled: !mutationAvailability.writable,
           "aria-describedby": "sched-read-only-reason",
@@ -10162,6 +10176,7 @@ function apply(cctx, config) {
         ])
       ]),
       open && jsxs2("div", { style: stBody }, [
+        j(ResourceSummary, { raw }),
         jsxs2(
           "div",
           { style: { display: "flex", gap: 6, flexWrap: "wrap" } },

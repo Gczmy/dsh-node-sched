@@ -5,6 +5,14 @@ import { readFile } from "node:fs/promises";
 const contractsUrl = new URL("../src/ui-contracts.js", import.meta.url);
 const loadContracts = () => import(contractsUrl.href);
 
+test("resource waits explain pending jobs without suggesting live utilization", async () => {
+	const { taskWaitLabel } = await loadContracts();
+	for (const reason of ["cpu", "host_memory", "gpu", "parallel", "draining", "batch_blocked"]) {
+		assert.notEqual(taskWaitLabel({ status: "pending", wait_reason: reason }), "");
+		assert.equal(taskWaitLabel({ status: "running", wait_reason: reason }), "");
+	}
+});
+
 test("style injection refreshes the existing node during client hot reload", async () => {
 	const source = await readFile(new URL("../src/client.jsx", import.meta.url), "utf8");
 	const start = source.indexOf("function injectStyles()");

@@ -1779,6 +1779,14 @@ function apply(cctx, config) {
 
 
 
+	function ResourceSummary({ raw }) {
+		return jsxs2("div", { style: { fontSize: 13, color: T.label2, marginBottom: 8 } }, [
+			raw?.cpu && j("div", null, `CPU 预留 ${raw.cpu.used} / ${raw.cpu.total || "未限额"} 核（非实测利用率）`),
+			raw?.host_memory && j("div", null, `主机内存预留 ${raw.host_memory.used_gib} / ${raw.host_memory.total_gib} GiB · 节点可用 ${raw.host_memory.available_gib === null ? "未知" : raw.host_memory.available_gib.toFixed(1) + " GiB"}`),
+			raw?.daemon_health?.draining && j("div", { style: { color: T.warn } }, "排空中：运行任务继续，新派发已暂停"),
+		]);
+	}
+
 	function GpuRow({ g, runOp }) {
 		const assignmentText = (g.assignments ?? [])
 			.map((assignment) => `${assignment.job_id}${assignment.vram_gib === null ? "" : ` (${assignment.vram_gib} GiB)`}`)
@@ -3006,6 +3014,7 @@ function apply(cctx, config) {
 					},
 				}, mutationAvailability.reason),
 
+				["batches", "gpus"].includes(tab) && j(ResourceSummary, { raw }),
 				tab === "batches" && jsxs2("fieldset", {
 					disabled: !mutationAvailability.writable,
 					"aria-describedby": "sched-read-only-reason",
@@ -3210,6 +3219,7 @@ function apply(cctx, config) {
 				]),
 			]),
 			open && jsxs2("div", { style: stBody }, [
+				j(ResourceSummary, { raw }),
 				jsxs2("div", { style: { display: "flex", gap: 6, flexWrap: "wrap" } },
 					gpus.map((g) => jsxs2("span", { key: g.idx, style: {
 						border: `1px solid ${gpuColor[g.status] || "var(--dsw-alias-border-l2)"}`, borderRadius: 4,
