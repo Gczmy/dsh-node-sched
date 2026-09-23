@@ -207,7 +207,7 @@ async function withBackendRoutes(statusDocument, callback, { beforeApply } = {})
 	};
 	let dispose;
 	process.env.HOME = home;
-	beforeApply?.({ home });
+	beforeApply?.({ home, state });
 	cp.spawn = (_command, args) => {
 		const remoteCommand = String(args.at(-1));
 		state.commands.push(remoteCommand);
@@ -229,6 +229,12 @@ async function withBackendRoutes(statusDocument, callback, { beforeApply } = {})
 				stdout = "";
 				stderr = "Master running (pid=1234)";
 			}
+		} else if (remoteCommand.includes(" daemon status --json")) {
+			stdout = `${JSON.stringify(state.daemonDocument ?? {
+				schema_version: 1, node: "compute-01", query_host: "gateway", pid: 123,
+				observed_at: Date.now() / 1000, process_state: "unknown", health_state: "healthy",
+				heartbeat_age_s: 1, tick_ok_age_s: 2, frozen: false, draining: false, read_error: null,
+			})}\n`;
 		} else if (remoteCommand.includes(" status --json")) {
 			if (state.statusOutage) {
 				code = 255;
@@ -1491,6 +1497,35 @@ test("D-H01 destructive preflight runs on the attested writer immediately before
 	assert.equal(events[1][1], configuredWriter);
 	assert.equal(events[2][1], configuredWriter);
 	assert.equal(events[1][2], 4_321);
+});
+
+test("daemon endpoint returns validated JSON and rejects legacy text-shaped data", async () => {
+	await withBackendRoutes({}, async ({ request, state }) => {
+		const response = await request("/sched/api/daemon");
+		assert.equal(response.status, 200);
+		const body = response.body;
+		assert.equal(body.raw.health_state, "healthy");
+		assert.equal(body.fresh, true);
+		assert.ok(body.ttlMs > 0);
+		assert.ok(body.sampleAgeMs >= 0);
+		assert.ok(state.commands.some((command) => command.includes("daemon status --json")));
+	});
+	await withBackendRoutes({}, async ({ request, state }) => {
+		const response = await request("/sched/api/daemon");
+		assert.equal(response.status, 503);
+		assert.equal(response.body.fresh, false);
+	}, { beforeApply: ({ state }) => { state.daemonDocument = { text: "运行中" }; } });
+});
+
+test("a failed health refresh invalidates a young cached green immediately", async () => {
+	const FreshStatusCache = await exported(INDEX, "FreshStatusCache");
+	const cache = new FreshStatusCache({ ttlMs: 30_000, now: () => 100 });
+	cache.recordSuccess("node", { ok: true });
+	cache.recordFailure("node", new Error("SSH failed"));
+	assert.equal(cache.read("node").fresh, false);
+	assert.equal(cache.read("node").stale, true);
+	cache.recordSuccess("node", { ok: true });
+	assert.equal(cache.read("node").fresh, true);
 });
 
 test("D-H01 successful status entries expire and expose stale failure metadata", async () => {

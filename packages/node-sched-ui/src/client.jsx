@@ -7,6 +7,7 @@ import {
 	collectHistoryPages,
 	collectStatusPages,
 	configuredProjectNames,
+	daemonHealthView,
 	projectGpuAccessLabel,
 	projectSettingsPatch,
 	taskWaitLabel,
@@ -1822,43 +1823,66 @@ function apply(cctx, config) {
 
 
 	function DaemonBar({ runOp }) {
-
-		const [status, setStatus] = useState(null);      // 上次成功查询的状态文本（保留不清空）
-
-		const [querying, setQuerying] = useState(true);  // 是否正在查询
-
+		const [snapshot, setSnapshot] = useState(null);
+		const [querying, setQuerying] = useState(false);
 		const [confirmStop, setConfirmStop] = useState(false);
-
-		const [channel, setChannel] = useState(null);    // B24f: 生效通道 {alias, mode, sshEntry}
-
+		const [channel, setChannel] = useState(null);
+		const gate = useRef(null);
+		if (!gate.current) gate.current = new PollGate({ ttlMs: 30_000 });
+		const inFlight = useRef(null);
+		const mounted = useRef(false);
 		const load = useCallback(() => {
-
+			if (inFlight.current) return inFlight.current.promise;
+			const sequence = gate.current.issue();
+			const controller = new AbortController();
+			const startedAt = Date.now();
+			const entry = { controller, promise: null };
+			inFlight.current = entry;
 			setQuerying(true);
-
-			authFetch("/sched/api/daemon").then((r) => r.json()).then((d) => {
-
-				if (d.ok) setStatus(d.text);
-
-				else setStatus((prev) => prev ?? ("查询失败: " + String(d.text ?? "").slice(0, 80)));
-
-				setQuerying(false);
-
-			}).catch(() => { setQuerying(false); }); // 失败保留上次值
-
-			// 只读通道徽章：单一事实来源在 ssh tab 的绑定状态条，这里仅展示
-
-			authFetch("/sched/api/entry").then((r) => r.json()).then(setChannel).catch(() => {});
-
+			const timeout = setTimeout(() => controller.abort(), 25_000);
+			entry.promise = authFetch("/sched/api/daemon", { signal: controller.signal })
+				.then(async (response) => {
+					const value = await response.json();
+					if (!mounted.current || inFlight.current !== entry) return;
+					// Keep stale evidence for inspection, but never keep its old color.
+					gate.current.succeed(sequence, { ...value, ok: response.ok && value.ok,
+						sampleAgeMs: (value.sampleAgeMs ?? 0) + Math.max(0, Date.now() - startedAt) });
+				}).catch((error) => {
+					if (mounted.current && inFlight.current === entry) gate.current.fail(sequence, error);
+				}).finally(() => {
+					clearTimeout(timeout);
+					if (inFlight.current === entry) {
+						inFlight.current = null;
+						if (mounted.current) {
+							setQuerying(false);
+							setSnapshot(gate.current.snapshot());
+						}
+					}
+				});
+			authFetch("/sched/api/entry", { signal: controller.signal }).then((r) => r.json())
+				.then((value) => { if (mounted.current && !controller.signal.aborted) setChannel(value); }).catch(() => {});
+			return entry.promise;
 		}, []);
-
-		useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, [load]);
-
-		const running = status != null && status.includes("运行中");
+		useEffect(() => {
+			mounted.current = true;
+			void load();
+			const poll = setInterval(load, 30_000);
+			const expiry = setInterval(() => setSnapshot(gate.current.snapshot()), 1_000);
+			return () => {
+				mounted.current = false;
+				inFlight.current?.controller.abort();
+				inFlight.current = null;
+				clearInterval(poll);
+				clearInterval(expiry);
+			};
+		}, [load]);
+		const health = daemonHealthView(snapshot);
+		useEffect(() => { if (!health.canStop) setConfirmStop(false); }, [health.canStop]);
 		const engineMode = channel?.mode === "engine";
 		const systemOpenSshMode = channel?.mode === "system-openssh";
 		const localMode = channel?.mode === "local";
 		const systemMasterReady = systemOpenSshMode && channel?.master?.ready === true;
-		const channelColor = engineMode || systemMasterReady ? T.ok : systemOpenSshMode ? T.warn : localMode ? T.brand : T.label2;
+		const channelColor = T.label2; // Channel selection is not a liveness probe.
 
 		return jsxs2("div", { style: { marginBottom: 8, paddingBottom: 6, borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center" } }, [
 
@@ -1890,37 +1914,29 @@ function apply(cctx, config) {
 
 			jsxs2("span", { style: { fontSize: 13, marginRight: 8, flex: 1 } }, [
 
-				j("span", { style: { color: running ? T.ok : (status ? T.err : T.label2) } },
-
-					`daemon: ${status ?? ""}`),
+				j("span", { title: health.title, role: "status", style: { color: T[health.tone] } },
+					`● daemon: ${health.label}`),
+				snapshot?.raw?.observed_at && j("span", { style: { color: T.label2, fontSize: 11, marginLeft: 8 } },
+					`采样 ${new Date(snapshot.raw.observed_at * 1000).toLocaleTimeString("zh-CN", { hour12: false })}`),
 
 				querying && j("span", { style: { color: T.label2 } }, " …等待查询"),
 
 			]),
 
-			// B14: 状态联动 —— 运行中禁用 start, 未运行禁用 stop
-
-			...(status === null ? [j("span", { key: "dw", style: btn(T.label2, true) }, "…")] : [
-
-				running
-
-					? j("button", { key: "s", disabled: true, title: "已在运行", style: btn(T.ok, true) }, "start")
-
-					: j("button", { key: "s", onClick: async () => { await runOp("daemon-start", null); setTimeout(load, 3000); }, style: btn(T.ok) }, "start"),
-
-				running
-
-					? (!confirmStop && j("button", { key: "x", onClick: () => setConfirmStop(true), style: btn(T.err) }, "stop"))
-
-					: j("button", { key: "x", disabled: true, title: "未运行", style: btn(T.err, true) }, "stop"),
-
-			]),
-
-			confirmStop && j(TypedConfirm, {
+			j("button", { disabled: querying, onClick: load, style: btn(T.label2, querying) }, "重新检测"),
+			j("button", { disabled: !health.canStart, title: "仅确认已停止时可启动",
+				onClick: async () => { if (daemonHealthView(gate.current.snapshot()).canStart) { await runOp("daemon-start", null); void load(); } },
+				style: btn(T.ok, !health.canStart) }, "start"),
+			!confirmStop && j("button", { disabled: !health.canStop, onClick: () => setConfirmStop(true),
+				title: "需要有效运行证据", style: btn(T.err, !health.canStop) }, "stop"),
+			confirmStop && health.canStop && j(TypedConfirm, {
 
 				placeholder: "输入 stop 确认（会取消未完成任务）", color: T.err,
 
-				onConfirm: async () => { await runOp("daemon-stop", null); setConfirmStop(false); },
+				onConfirm: async () => {
+					if (daemonHealthView(gate.current.snapshot()).canStop) await runOp("daemon-stop", null);
+					setConfirmStop(false); void load();
+				},
 
 			}, "确认 stop"),
 

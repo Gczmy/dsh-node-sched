@@ -12,7 +12,7 @@ const clientCode = readFile(new URL("../src/client.jsx", import.meta.url), "utf8
 // Execute the actual plugin with the 0.1.6 slot contract: main is keyed,
 // panel-list/settings entries use ids, and root props supply usePanelInfo.
 // The hook harness commits effects and their cleanups without a browser/SSH.
-async function createHarness({ ready = false, declared = true } = {}) {
+async function createHarness({ ready = false, declared = true, fetchResponse = null } = {}) {
 	let current;
 	const sameDeps = (a, b) => a && b && a.length === b.length && a.every((v, i) => Object.is(v, b[i]));
 	const react = {
@@ -63,8 +63,9 @@ async function createHarness({ ready = false, declared = true } = {}) {
 		dispose() { calls.disposed++; }
 		isReady() { return this.state.status === "ready"; }
 		webSocketProtocols() { return ["sched-auth", "test-token"]; }
-		authorizedFetch(input) {
+		authorizedFetch(input, init) {
 			calls.requests.push(input);
+			if (fetchResponse) return fetchResponse(input, init);
 			return Promise.resolve({ ok: true, json: async () => ({ ok: true, raw: { gpus: [], batches: [], jobs: [] } }) });
 		}
 	}
@@ -261,4 +262,47 @@ test("rendered dashboard button recipes expose classes as props and preserve leg
 	assert.equal(h.sockets[0].closed, true);
 	h.layout.selectPanel(null);
 	h.dispose();
+});
+
+test("rendered daemon bar clears green and disables controls on outage, then recovers", async () => {
+	let offline = false;
+	const h = await createHarness({ ready: true, fetchResponse(input) {
+		if (input === "/sched/api/daemon" && offline) return Promise.reject(new Error("SSH timeout"));
+		const value = input === "/sched/api/daemon" ? {
+			ok: true, fresh: true, stale: false, ttlMs: 30_000, ageMs: 0,
+			raw: { schema_version: 1, node: "compute", query_host: "gateway", pid: 123,
+				observed_at: Date.now() / 1000, health_state: "healthy", process_state: "unknown",
+				heartbeat_age_s: 1, tick_ok_age_s: 2, frozen: false, draining: false, read_error: null },
+		} : { ok: true, raw: { batches: [], jobs: [], gpus: [] } };
+		return Promise.resolve({ ok: true, json: async () => value });
+	} });
+	h.layout.selectPanel("sched");
+	const child = h.mainRoot.tree.props.children;
+	const dashboard = h.renderComponent(child.type, child.props);
+	const daemon = elements(dashboard.tree, (el) => el.type?.name === "DaemonBar")[0];
+	assert.ok(daemon);
+	const bar = h.renderComponent(daemon.type, daemon.props);
+	const settle = async () => { await new Promise((resolve) => setImmediate(resolve)); bar.render(); };
+	const button = (label) => elements(bar.tree, (el) => el.type === "button" && el.props.children === label)[0];
+	const light = () => elements(bar.tree, (el) => el.props?.role === "status")[0];
+	await settle();
+	assert.match(light().props.children, /调度正常/);
+	assert.equal(button("start").props.disabled, true);
+	assert.equal(button("stop").props.disabled, false);
+	offline = true;
+	await button("重新检测").props.onClick();
+	bar.render();
+	assert.match(light().props.children, /状态未知/);
+	assert.match(light().props.title, /SSH timeout/);
+	assert.equal(button("start").props.disabled, true);
+	assert.equal(button("stop").props.disabled, true);
+	offline = false;
+	await button("重新检测").props.onClick();
+	bar.render();
+	assert.match(light().props.children, /调度正常/);
+	bar.unmount();
+	dashboard.unmount();
+	h.layout.selectPanel(null);
+	h.dispose();
+	assert.equal(h.timers.size, 0);
 });

@@ -11,6 +11,7 @@
   },
   "files": [
     "lib/index.js",
+    "lib/daemon-health.js",
     "lib/device-auth.js",
     "lib/host-trust.js",
     "lib/known-hosts.js",

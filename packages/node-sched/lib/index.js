@@ -19,6 +19,7 @@
  */
 
 import cp from "node:child_process";
+import { canonicalDaemonHealth } from "./daemon-health.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -678,7 +679,7 @@ class FreshStatusCache {
 			return { body: null, fresh: false, stale: false, ageMs: null, lastError: null };
 		}
 		const ageMs = entry.successAt == null ? null : Math.max(0, this.now() - entry.successAt);
-		const fresh = entry.body != null && ageMs < this.ttlMs;
+		const fresh = entry.body != null && entry.lastError == null && ageMs < this.ttlMs;
 		const stale = entry.body != null && !fresh;
 		return {
 			body: requireFresh && !fresh ? null : entry.body,
@@ -2619,12 +2620,15 @@ function apply(ctx, config) {
 			const targetKey = statusTargetKey();
 			const epoch = _targetEpoch;
 			if (_daemonInFlight?.targetKey === targetKey) return _daemonInFlight.promise;
-			const request = query(`${S} daemon status`, { json: false }).then((result) => {
+			const startedAt = Date.now();
+			const request = query(`${S} daemon status --json`).then((result) => {
 				if (_targetEpoch !== epoch || statusTargetKey() !== targetKey) return result;
-				if (result.ok) {
-					daemonCache.recordSuccess(targetKey, { ok: true, text: result.text });
-				} else {
-					daemonCache.recordFailure(targetKey, new Error(result.text || "daemon status unavailable"));
+				try {
+					if (!result.ok) throw new Error(result.text || "daemon status unavailable");
+					const raw = canonicalDaemonHealth(result.raw);
+					daemonCache.recordSuccess(targetKey, { ok: true, raw, sampleAgeMs: Date.now() - startedAt });
+				} catch (error) {
+					daemonCache.recordFailure(targetKey, error);
 				}
 				return result;
 			}, (error) => {
@@ -3162,7 +3166,7 @@ function apply(ctx, config) {
 					}
 					json(
 						res,
-						visibleCacheBody(view, "daemon status unavailable"),
+						{ ...visibleCacheBody(view, "daemon status unavailable"), ttlMs: REFRESH_MS },
 						view.fresh ? 200 : 503,
 					);
 				},

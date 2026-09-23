@@ -1,3 +1,41 @@
+import { canonicalDaemonHealth } from "../../node-sched/lib/daemon-health.js";
+
+export function daemonHealthView(snapshot) {
+	const unknown = {
+		tone: "label2", label: "状态未知", canStart: false, canStop: false,
+		title: snapshot?.lastError || snapshot?.text || "等待有效健康数据",
+	};
+	let raw;
+	try { raw = canonicalDaemonHealth(snapshot?.raw); } catch { return unknown; }
+	const ageMs = (snapshot.ageMs ?? 0) + (snapshot.localAgeMs ?? 0) + (snapshot.sampleAgeMs ?? 0);
+	const sampled = new Date(raw.observed_at * 1000).toLocaleString("zh-CN", { hour12: false });
+	const process = { running: "存活", stopped: "已停止", unknown: "未知" }[raw.process_state];
+	const age = (value) => value === null ? "未知" : `${value} 秒前`;
+	const detail = `采样 ${sampled} · 心跳 ${age(raw.heartbeat_age_s)} · 成功调度 ${age(raw.tick_ok_age_s)} · 进程 ${process} · 查询节点 ${raw.query_host} · 目标 ${raw.node}`;
+	if (!snapshot.ok || snapshot.fresh !== true || snapshot.stale || snapshot.lastError
+		|| !Number.isFinite(ageMs) || ageMs < 0 || !Number.isFinite(snapshot.ttlMs) || snapshot.ttlMs <= 0
+		|| ageMs >= snapshot.ttlMs) {
+		return { ...unknown, title: `${unknown.title}；以下为上次数据：${detail}` };
+	}
+	// Never keep a cached healthy light beyond the evidence's own lifetime.
+	if (raw.health_state === "healthy" && (raw.heartbeat_age_s + ageMs / 1000 >= 60
+		|| raw.tick_ok_age_s + ageMs / 1000 > 90)) {
+		return { ...unknown, title: `健康数据已过期；${detail}` };
+	}
+	const [tone, label] = {
+		healthy: raw.draining ? ["brand", "已暂停新派发"] : ["ok", "调度正常"],
+		delayed: ["warn", "心跳延迟／等待确认"],
+		stalled: ["err", "调度停滞"],
+		stopped: ["label2", "已停止"],
+		unknown: ["label2", "状态未知"],
+	}[raw.health_state];
+	return {
+		tone, label, title: detail,
+		canStart: raw.health_state === "stopped" && raw.process_state === "stopped",
+		canStop: raw.health_state !== "unknown" && (raw.process_state === "running" || raw.health_state === "healthy"),
+	};
+}
+
 const TERMINAL_AUTH_STATES = new Set(["resolved", "expired", "cancelled"]);
 
 const MAX_AUTH_ERROR_CHARS = 240;

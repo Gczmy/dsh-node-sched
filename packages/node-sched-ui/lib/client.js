@@ -24,9 +24,9 @@ var __copyProps = (to, from, except, desc) => {
 };
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-// ../dsh-node-sched/node_modules/.pnpm/@xterm+xterm@5.5.0/node_modules/@xterm/xterm/lib/xterm.js
+// node_modules/.pnpm/@xterm+xterm@5.5.0/node_modules/@xterm/xterm/lib/xterm.js
 var require_xterm = __commonJS({
-  "../dsh-node-sched/node_modules/.pnpm/@xterm+xterm@5.5.0/node_modules/@xterm/xterm/lib/xterm.js"(exports, module2) {
+  "node_modules/.pnpm/@xterm+xterm@5.5.0/node_modules/@xterm/xterm/lib/xterm.js"(exports, module2) {
     !(function(e, t) {
       if ("object" == typeof exports && "object" == typeof module2) module2.exports = t();
       else if ("function" == typeof define && define.amd) define([], t);
@@ -6083,9 +6083,9 @@ WARNING: This link could potentially be dangerous`)) {
   }
 });
 
-// ../dsh-node-sched/node_modules/.pnpm/@xterm+addon-fit@0.10.0_@xterm+xterm@5.5.0/node_modules/@xterm/addon-fit/lib/addon-fit.js
+// node_modules/.pnpm/@xterm+addon-fit@0.10.0_@xterm+xterm@5.5.0/node_modules/@xterm/addon-fit/lib/addon-fit.js
 var require_addon_fit = __commonJS({
-  "../dsh-node-sched/node_modules/.pnpm/@xterm+addon-fit@0.10.0_@xterm+xterm@5.5.0/node_modules/@xterm/addon-fit/lib/addon-fit.js"(exports, module2) {
+  "node_modules/.pnpm/@xterm+addon-fit@0.10.0_@xterm+xterm@5.5.0/node_modules/@xterm/addon-fit/lib/addon-fit.js"(exports, module2) {
     !(function(e, t) {
       "object" == typeof exports && "object" == typeof module2 ? module2.exports = t() : "function" == typeof define && define.amd ? define([], t) : "object" == typeof exports ? exports.FitAddon = t() : e.FitAddon = t();
     })(self, (() => (() => {
@@ -6119,9 +6119,9 @@ var require_addon_fit = __commonJS({
   }
 });
 
-// ../dsh-node-sched/node_modules/.pnpm/@xterm+xterm@5.5.0/node_modules/@xterm/xterm/css/xterm.css
+// node_modules/.pnpm/@xterm+xterm@5.5.0/node_modules/@xterm/xterm/css/xterm.css
 var require_xterm2 = __commonJS({
-  "../dsh-node-sched/node_modules/.pnpm/@xterm+xterm@5.5.0/node_modules/@xterm/xterm/css/xterm.css"(exports, module2) {
+  "node_modules/.pnpm/@xterm+xterm@5.5.0/node_modules/@xterm/xterm/css/xterm.css"(exports, module2) {
     module2.exports = `/**
  * Copyright (c) 2014 The xterm.js authors. All rights reserved.
  * Copyright (c) 2012-2013, Christopher Jeffrey (MIT License)
@@ -6344,7 +6344,7 @@ var require_xterm2 = __commonJS({
   }
 });
 
-// ../dsh-node-sched/packages/node-sched-ui/src/client.jsx
+// packages/node-sched-ui/src/client.jsx
 var client_exports = {};
 __export(client_exports, {
   apply: () => apply,
@@ -6353,7 +6353,71 @@ __export(client_exports, {
 });
 module.exports = __toCommonJS(client_exports);
 
-// ../dsh-node-sched/packages/node-sched-ui/src/ui-contracts.js
+// packages/node-sched/lib/daemon-health.js
+function canonicalDaemonHealth(raw) {
+  const fail = () => {
+    throw new TypeError("daemon health JSON is invalid or unsupported");
+  };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw) || raw.schema_version !== 1) fail();
+  if (!["healthy", "delayed", "stalled", "stopped", "unknown"].includes(raw.health_state) || !["running", "stopped", "unknown"].includes(raw.process_state)) fail();
+  for (const key of ["node", "query_host"]) {
+    if (typeof raw[key] !== "string" || !raw[key].trim() || raw[key].length > 255) fail();
+  }
+  for (const key of ["heartbeat_age_s", "tick_ok_age_s"]) {
+    if (raw[key] !== null && (typeof raw[key] !== "number" || !Number.isFinite(raw[key]) || raw[key] < 0)) fail();
+  }
+  if (raw.pid !== null && (!Number.isSafeInteger(raw.pid) || raw.pid <= 0)) fail();
+  if (!Number.isFinite(raw.observed_at) || raw.observed_at <= 0 || typeof raw.draining !== "boolean" || typeof raw.frozen !== "boolean" || !(raw.read_error === null || ["timestamp_in_future", "health_file_unreadable"].includes(raw.read_error))) fail();
+  if (raw.frozen !== (raw.tick_ok_age_s !== null && raw.tick_ok_age_s > 90)) fail();
+  if (raw.read_error !== null && raw.health_state !== "unknown") fail();
+  if (raw.process_state === "stopped" && !["stopped", "unknown"].includes(raw.health_state)) fail();
+  if (raw.health_state === "healthy" && (raw.read_error !== null || raw.process_state === "stopped" || raw.heartbeat_age_s === null || raw.heartbeat_age_s >= 60 || raw.tick_ok_age_s === null || raw.frozen)) fail();
+  if (raw.health_state === "stopped" && raw.process_state !== "stopped") fail();
+  if (raw.health_state === "stalled" && !raw.frozen) fail();
+  return raw;
+}
+
+// packages/node-sched-ui/src/ui-contracts.js
+function daemonHealthView(snapshot) {
+  const unknown = {
+    tone: "label2",
+    label: "\u72B6\u6001\u672A\u77E5",
+    canStart: false,
+    canStop: false,
+    title: snapshot?.lastError || snapshot?.text || "\u7B49\u5F85\u6709\u6548\u5065\u5EB7\u6570\u636E"
+  };
+  let raw;
+  try {
+    raw = canonicalDaemonHealth(snapshot?.raw);
+  } catch {
+    return unknown;
+  }
+  const ageMs = (snapshot.ageMs ?? 0) + (snapshot.localAgeMs ?? 0) + (snapshot.sampleAgeMs ?? 0);
+  const sampled = new Date(raw.observed_at * 1e3).toLocaleString("zh-CN", { hour12: false });
+  const process2 = { running: "\u5B58\u6D3B", stopped: "\u5DF2\u505C\u6B62", unknown: "\u672A\u77E5" }[raw.process_state];
+  const age = (value) => value === null ? "\u672A\u77E5" : `${value} \u79D2\u524D`;
+  const detail = `\u91C7\u6837 ${sampled} \xB7 \u5FC3\u8DF3 ${age(raw.heartbeat_age_s)} \xB7 \u6210\u529F\u8C03\u5EA6 ${age(raw.tick_ok_age_s)} \xB7 \u8FDB\u7A0B ${process2} \xB7 \u67E5\u8BE2\u8282\u70B9 ${raw.query_host} \xB7 \u76EE\u6807 ${raw.node}`;
+  if (!snapshot.ok || snapshot.fresh !== true || snapshot.stale || snapshot.lastError || !Number.isFinite(ageMs) || ageMs < 0 || !Number.isFinite(snapshot.ttlMs) || snapshot.ttlMs <= 0 || ageMs >= snapshot.ttlMs) {
+    return { ...unknown, title: `${unknown.title}\uFF1B\u4EE5\u4E0B\u4E3A\u4E0A\u6B21\u6570\u636E\uFF1A${detail}` };
+  }
+  if (raw.health_state === "healthy" && (raw.heartbeat_age_s + ageMs / 1e3 >= 60 || raw.tick_ok_age_s + ageMs / 1e3 > 90)) {
+    return { ...unknown, title: `\u5065\u5EB7\u6570\u636E\u5DF2\u8FC7\u671F\uFF1B${detail}` };
+  }
+  const [tone, label] = {
+    healthy: raw.draining ? ["brand", "\u5DF2\u6682\u505C\u65B0\u6D3E\u53D1"] : ["ok", "\u8C03\u5EA6\u6B63\u5E38"],
+    delayed: ["warn", "\u5FC3\u8DF3\u5EF6\u8FDF\uFF0F\u7B49\u5F85\u786E\u8BA4"],
+    stalled: ["err", "\u8C03\u5EA6\u505C\u6EDE"],
+    stopped: ["label2", "\u5DF2\u505C\u6B62"],
+    unknown: ["label2", "\u72B6\u6001\u672A\u77E5"]
+  }[raw.health_state];
+  return {
+    tone,
+    label,
+    title: detail,
+    canStart: raw.health_state === "stopped" && raw.process_state === "stopped",
+    canStop: raw.health_state !== "unknown" && (raw.process_state === "running" || raw.health_state === "healthy")
+  };
+}
 var TERMINAL_AUTH_STATES = /* @__PURE__ */ new Set(["resolved", "expired", "cancelled"]);
 var MAX_AUTH_ERROR_CHARS = 240;
 function boundedAuthError(text) {
@@ -6879,7 +6943,7 @@ var PollGate = class {
   }
 };
 
-// ../dsh-node-sched/packages/node-sched-ui/src/auth-gate.js
+// packages/node-sched-ui/src/auth-gate.js
 var AUTH_API = Object.freeze({
   challenge: "/sched/api/auth/challenge",
   verify: "/sched/api/auth/verify",
@@ -7595,7 +7659,7 @@ var BrowserAuthGate = class {
   }
 };
 
-// ../dsh-node-sched/packages/node-sched-ui/src/client.jsx
+// packages/node-sched-ui/src/client.jsx
 var PANEL_NAME = "sched";
 var SLOT_SETTINGS = "settings.section";
 var NS = "nodesched";
@@ -9049,33 +9113,71 @@ function apply(cctx, config) {
     ]);
   }
   function DaemonBar({ runOp }) {
-    const [status, setStatus] = useState(null);
-    const [querying, setQuerying] = useState(true);
+    const [snapshot, setSnapshot] = useState(null);
+    const [querying, setQuerying] = useState(false);
     const [confirmStop, setConfirmStop] = useState(false);
     const [channel, setChannel] = useState(null);
+    const gate = useRef(null);
+    if (!gate.current) gate.current = new PollGate({ ttlMs: 3e4 });
+    const inFlight = useRef(null);
+    const mounted = useRef(false);
     const load = useCallback(() => {
+      if (inFlight.current) return inFlight.current.promise;
+      const sequence = gate.current.issue();
+      const controller = new AbortController();
+      const startedAt = Date.now();
+      const entry = { controller, promise: null };
+      inFlight.current = entry;
       setQuerying(true);
-      authFetch("/sched/api/daemon").then((r) => r.json()).then((d) => {
-        if (d.ok) setStatus(d.text);
-        else setStatus((prev) => prev ?? "\u67E5\u8BE2\u5931\u8D25: " + String(d.text ?? "").slice(0, 80));
-        setQuerying(false);
+      const timeout = setTimeout(() => controller.abort(), 25e3);
+      entry.promise = authFetch("/sched/api/daemon", { signal: controller.signal }).then(async (response) => {
+        const value = await response.json();
+        if (!mounted.current || inFlight.current !== entry) return;
+        gate.current.succeed(sequence, {
+          ...value,
+          ok: response.ok && value.ok,
+          sampleAgeMs: (value.sampleAgeMs ?? 0) + Math.max(0, Date.now() - startedAt)
+        });
+      }).catch((error) => {
+        if (mounted.current && inFlight.current === entry) gate.current.fail(sequence, error);
+      }).finally(() => {
+        clearTimeout(timeout);
+        if (inFlight.current === entry) {
+          inFlight.current = null;
+          if (mounted.current) {
+            setQuerying(false);
+            setSnapshot(gate.current.snapshot());
+          }
+        }
+      });
+      authFetch("/sched/api/entry", { signal: controller.signal }).then((r) => r.json()).then((value) => {
+        if (mounted.current && !controller.signal.aborted) setChannel(value);
       }).catch(() => {
-        setQuerying(false);
       });
-      authFetch("/sched/api/entry").then((r) => r.json()).then(setChannel).catch(() => {
-      });
+      return entry.promise;
     }, []);
     useEffect(() => {
-      load();
-      const t = setInterval(load, 3e4);
-      return () => clearInterval(t);
+      mounted.current = true;
+      void load();
+      const poll = setInterval(load, 3e4);
+      const expiry = setInterval(() => setSnapshot(gate.current.snapshot()), 1e3);
+      return () => {
+        mounted.current = false;
+        inFlight.current?.controller.abort();
+        inFlight.current = null;
+        clearInterval(poll);
+        clearInterval(expiry);
+      };
     }, [load]);
-    const running = status != null && status.includes("\u8FD0\u884C\u4E2D");
+    const health = daemonHealthView(snapshot);
+    useEffect(() => {
+      if (!health.canStop) setConfirmStop(false);
+    }, [health.canStop]);
     const engineMode = channel?.mode === "engine";
     const systemOpenSshMode = channel?.mode === "system-openssh";
     const localMode = channel?.mode === "local";
     const systemMasterReady = systemOpenSshMode && channel?.master?.ready === true;
-    const channelColor = engineMode || systemMasterReady ? T.ok : systemOpenSshMode ? T.warn : localMode ? T.brand : T.label2;
+    const channelColor = T.label2;
     return jsxs2("div", { style: { marginBottom: 8, paddingBottom: 6, borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center" } }, [
       // B24f: 只读通道徽章 —— 连接控制唯一入口在 ssh tab
       j("span", {
@@ -9095,25 +9197,41 @@ function apply(cctx, config) {
       jsxs2("span", { style: { fontSize: 13, marginRight: 8, flex: 1 } }, [
         j(
           "span",
-          { style: { color: running ? T.ok : status ? T.err : T.label2 } },
-          `daemon: ${status ?? ""}`
+          { title: health.title, role: "status", style: { color: T[health.tone] } },
+          `\u25CF daemon: ${health.label}`
+        ),
+        snapshot?.raw?.observed_at && j(
+          "span",
+          { style: { color: T.label2, fontSize: 11, marginLeft: 8 } },
+          `\u91C7\u6837 ${new Date(snapshot.raw.observed_at * 1e3).toLocaleTimeString("zh-CN", { hour12: false })}`
         ),
         querying && j("span", { style: { color: T.label2 } }, " \u2026\u7B49\u5F85\u67E5\u8BE2")
       ]),
-      // B14: 状态联动 —— 运行中禁用 start, 未运行禁用 stop
-      ...status === null ? [j("span", { key: "dw", style: btn(T.label2, true) }, "\u2026")] : [
-        running ? j("button", { key: "s", disabled: true, title: "\u5DF2\u5728\u8FD0\u884C", style: btn(T.ok, true) }, "start") : j("button", { key: "s", onClick: async () => {
-          await runOp("daemon-start", null);
-          setTimeout(load, 3e3);
-        }, style: btn(T.ok) }, "start"),
-        running ? !confirmStop && j("button", { key: "x", onClick: () => setConfirmStop(true), style: btn(T.err) }, "stop") : j("button", { key: "x", disabled: true, title: "\u672A\u8FD0\u884C", style: btn(T.err, true) }, "stop")
-      ],
-      confirmStop && j(TypedConfirm, {
+      j("button", { disabled: querying, onClick: load, style: btn(T.label2, querying) }, "\u91CD\u65B0\u68C0\u6D4B"),
+      j("button", {
+        disabled: !health.canStart,
+        title: "\u4EC5\u786E\u8BA4\u5DF2\u505C\u6B62\u65F6\u53EF\u542F\u52A8",
+        onClick: async () => {
+          if (daemonHealthView(gate.current.snapshot()).canStart) {
+            await runOp("daemon-start", null);
+            void load();
+          }
+        },
+        style: btn(T.ok, !health.canStart)
+      }, "start"),
+      !confirmStop && j("button", {
+        disabled: !health.canStop,
+        onClick: () => setConfirmStop(true),
+        title: "\u9700\u8981\u6709\u6548\u8FD0\u884C\u8BC1\u636E",
+        style: btn(T.err, !health.canStop)
+      }, "stop"),
+      confirmStop && health.canStop && j(TypedConfirm, {
         placeholder: "\u8F93\u5165 stop \u786E\u8BA4\uFF08\u4F1A\u53D6\u6D88\u672A\u5B8C\u6210\u4EFB\u52A1\uFF09",
         color: T.err,
         onConfirm: async () => {
-          await runOp("daemon-stop", null);
+          if (daemonHealthView(gate.current.snapshot()).canStop) await runOp("daemon-stop", null);
           setConfirmStop(false);
+          void load();
         }
       }, "\u786E\u8BA4 stop")
     ]);

@@ -2,6 +2,22 @@
 
 > 按 M 里程碑滚动记录。每条 = 现象 / 根因 / 定案，供后续开发避坑。
 
+## Daemon health indicators (2026-09-23)
+
+网关心跳过期曾被本机 PID 检查误报为未运行；看板依赖“运行中”文本且查询失败保留旧绿灯。
+`/sched/api/daemon` 改查 `sched daemon status --json`，通过 browser-safe 的
+`lib/daemon-health.js` 校验 schema 1。旧 CLI 或坏 JSON 显示未知，不回退解析文字。
+健康语义由 sched 给出；UI 仅映射颜色：healthy 绿、健康且 draining 蓝、delayed 黄、
+stalled 红、unknown/stopped 灰，并明确显示文字和采样时间。通道徽章表示配置，保持中性色。
+
+缓存失败立即撤销 fresh；服务端 TTL、采样/传输耗时和浏览器本地计时共同限制有效期。
+浏览器每秒检查 TTL，即使新请求挂起也不会一直绿灯；健康证据超过心跳/tick 有效期时
+先转未知，等下一次 CLI 判定。start 只在新鲜 stopped 时启用，未知不能启动；stop 保留
+输入确认和既有 writer 前置检查。gateway 无法确认已停止时需要在计算节点复核，不自动启动。
+
+发布需包含新 CLI、后端契约与重新构建的前端。修改仅涉及查询与展示，无需重启生产 daemon。
+Python 验收在计算节点隔离目录进行；不得改写正在使用的不可变 release 目录。
+
 ## Host memory and drain status (2026-09-22)
 
 schema 1 增加可选 `host_memory`，包含 `used_gib`、`total_gib`、`reserve_gib`、
