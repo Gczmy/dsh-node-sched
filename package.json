@@ -5,7 +5,8 @@
   "description": "dsh plugin suite exposing the sched node-level GPU/CPU scheduler as a web dashboard and agent tool surface",
   "type": "module",
   "scripts": {
-    "build": "pnpm -r run build"
+    "build": "pnpm -r run build",
+    "test": "node --test packages/node-sched/test/*.test.js packages/node-sched-ui/test/*.test.js"
   },
   "engines": {
     "node": ">=22"
@@ -21,5 +22,6 @@
     "dashboard",
     "ssh-proxy",
     "slurm"
-  ]
+  ],
+  "packageManager": "pnpm@11.19.0"
 }

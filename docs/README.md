@@ -5,6 +5,7 @@
 | 文档 | 用途 |
 | --- | --- |
 | [仓库 README](../README.zh-CN.md) | 安装、配置、运行平台和看板操作 |
+| [开发与提交检查](../CONTRIBUTING.md) | 本地测试、隐私规则、提交钩子与公共 CI |
 | [Implementation notes](implementation-notes.md) | 加载、传输、身份校验与 sched 接口定案 |
 | [UI 包说明](../packages/node-sched-ui/README.md) | 已实现界面与构建入口 |
 | [示例 profile](../profile/cordis.patch.yml) | 插件挂载和 writer 配置示例 |

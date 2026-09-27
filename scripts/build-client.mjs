@@ -9,6 +9,8 @@ const id = "@zzc/dsh-node-sched-ui";
 mkdirSync(new URL("../packages/node-sched-ui/lib/", import.meta.url), { recursive: true });
 
 await esbuild.build({
+	// Keep module paths stable when invoked from the root or a package script.
+	absWorkingDir: fileURLToPath(new URL("../", import.meta.url)),
 	entryPoints: [fileURLToPath(new URL("../packages/node-sched-ui/src/client.jsx", import.meta.url))],
 	outfile: fileURLToPath(new URL("../packages/node-sched-ui/lib/client.js", import.meta.url)),
 	bundle: true,

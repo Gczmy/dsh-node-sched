@@ -200,10 +200,12 @@ npx @deepseek-ai/dsh@0.1.6-alpha.1 --profile nodesched
 
 ## 开发
 
+工具版本、Linux 回归、隐私检查和本地提交钩子见[开发与提交检查](CONTRIBUTING.md)。
+
 ```bash
-pnpm install
-pnpm build          # 重新构建客户端 bundle（esbuild → __ModuleLoader__ 工厂格式）
-node --check packages/*/lib/*.js
+pnpm install --frozen-lockfile
+pnpm test
+pnpm build
 ```
 
 实现笔记与踩坑记录见 [`docs/implementation-notes.md`](docs/implementation-notes.md)。

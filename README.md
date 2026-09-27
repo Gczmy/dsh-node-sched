@@ -238,14 +238,15 @@ All endpoints are served by the host plugin under `/sched/api/*`. Read responses
 
 ## Development
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for supported tool versions, Linux regression tests, privacy checks and the optional local pre-commit hook.
+
 ```bash
-pnpm install
-node scripts/build-client.mjs                    # direct client bundle; uses already-installed deps
-pnpm build                                       # install check + rebuild every package
-node --check packages/*/lib/*.js
+pnpm install --frozen-lockfile
+pnpm test
+pnpm build
 ```
 
-If pnpm blocks installation because the approved-build policy has not authorized esbuild, stop and have the repository or policy owner approve `esbuild` with the organization-approved `pnpm approve-builds` workflow, then rerun `pnpm install`. Do not disable script controls, allow all dependency builds, or relax the approved-build policy as a workaround. When dependencies are already installed and only the client source changed, `node scripts/build-client.mjs` rebuilds that bundle without running an install or changing the approval policy.
+The workspace explicitly permits the `esbuild` install script and keeps native PTY and optional SSH acceleration build scripts disabled. Review any new dependency before changing this allowlist; do not enable all scripts or disable the policy. With dependencies installed, `node scripts/build-client.mjs` rebuilds only the browser bundle.
 
 Implementation notes and pitfalls live in [`docs/implementation-notes.md`](docs/implementation-notes.md).
 
