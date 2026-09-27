@@ -8,8 +8,8 @@
 # 启动：npx @deepseek-ai/dsh@0.1.6-alpha.1 --profile nodesched
 # --profile 是 profile 名称，不是 YAML 路径；不要使用 web --profile。
 #
-# 查询入口必须显式配置：校园网用 HPDC，校外用 HPDC_outside。
-# 本插件绝不自动切换入口；探活失败会直接提示检查网络环境。
+# 查询入口必须显式配置为本机 OpenSSH Host 别名。
+# 本插件不自动切换入口；探活失败时检查该别名的实际连接错误。
 # 查询目标与 mutation writer 相互独立；看板 bind/unbind 不会改变 writer。
 
 - insert:
@@ -17,7 +17,7 @@
       name: "@zzc/dsh-node-sched"
       config:
         # 查询通道：逐项写明，避免依赖插件内置默认值。
-        sshEntry: "HPDC"               # OpenSSH config 的 Host 别名
+        sshEntry: "my-cluster"               # OpenSSH config 的 Host 别名
         schedBin: "$HOME/bin/sched"    # 非交互执行所需的完整路径
         probeCommand: "status"
         connectTimeoutSec: 20

@@ -1,12 +1,15 @@
 # 文档索引
 
-权威设计文档目前存放在研究仓库（VeighNa_Trade），本仓库只保留链接与插件侧增量文档：
+本仓库的使用说明与实现契约在这里维护，不依赖私有研究仓库的本地路径。
 
-| 文档 | 位置 |
-|---|---|
-| dsh-node-sched 插件调研（架构选型 / 功能映射 / 里程碑） | `VeighNa_Trade/docs/04-scheduler/dsh_sched_plugin_research.md` |
-| sched 调度框架全量口径（含 B11b 分布式升级路线） | `VeighNa_Trade/docs/04-scheduler/scheduler_design.md` |
-| sched 通知渠道设计 | `VeighNa_Trade/docs/04-scheduler/sched_notify_design.md` |
+| 文档 | 用途 |
+| --- | --- |
+| [仓库 README](../README.zh-CN.md) | 安装、配置、运行平台和看板操作 |
+| [Implementation notes](implementation-notes.md) | 加载、传输、身份校验与 sched 接口定案 |
+| [UI 包说明](../packages/node-sched-ui/README.md) | 已实现界面与构建入口 |
+| [示例 profile](../profile/cordis.patch.yml) | 插件挂载和 writer 配置示例 |
 
-约定：插件实现过程中的新决策直接写在本目录（如 M1 落地记录、dsh API 运行时验证笔记），
-不再回填研究仓库。
+调度器的 CLI、JSON 和状态机由配套 `sched` 仓库的 `docs/reference.md` 定义。
+真实配置、SSH 凭据、生产任务、租约、会话和部署记录保存在仓库外；本仓库只放
+通用示例。忽略规则不会清除已提交内容，历史提交、标签和 PR 中的隐私信息
+需要另行处理，不能通过删除当前文档声称历史已净化。

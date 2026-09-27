@@ -14,8 +14,8 @@
  * throws ("cannot set property ... without provide"), so this plugin keeps
  * its proxy closure-local and registers tools directly.
  *
- * Design doc: VeighNa_Trade/docs/04-scheduler/dsh_sched_plugin_research.md
- * Sched semantics: VeighNa_Trade/docs/04-scheduler/scheduler_design.md
+ * Plugin contracts: docs/implementation-notes.md
+ * Scheduler semantics: the companion sched repository docs/reference.md
  */
 
 import cp from "node:child_process";
@@ -67,7 +67,7 @@ const name = "node-sched";
  * Config is deployment truth only — no account/node/path may leak into code
  * (same discipline as sched's own I/J-class config separation). The ssh entry
  * remains explicitly configured; the plugin never switches entries on its
- * own. The HPDC deployment currently uses only ssh HPDC.
+ * own. Deployment-specific access instructions belong in private configuration.
  */
 const Config = z.object({
 	/** ssh entry alias; probed at activation with a short ConnectTimeout. */
@@ -2281,7 +2281,7 @@ function apply(ctx, config) {
 			if (!probe.ok) {
 				ctx.logger.error(
 					"[node-sched] PROBE FAILED via ssh entry \"%s\" (code %d) — check network environment " +
-						"and the configured alias before retrying (HPDC uses ssh HPDC). stderr: %s",
+						"and the configured alias before retrying. stderr: %s",
 					config.sshEntry, probe.code, (probe.stderr || "").trim().slice(0, 400),
 				);
 				return;

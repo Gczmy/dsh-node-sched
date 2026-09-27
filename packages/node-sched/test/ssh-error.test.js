@@ -28,7 +28,7 @@ test("normalizes every keyboard-interactive prompt without assuming an OTP", () 
 test("password auth keeps keyboard-interactive available for additional prompts", () => {
 	const config = buildConnectConfig(
 		{
-			alias: "hpdc",
+			alias: "test-cluster",
 			host: "example.invalid",
 			hostKey: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 			port: 22,

@@ -25,7 +25,7 @@ import {
 
 function host() {
 	return {
-		alias: "hpdc",
+		alias: "test-cluster",
 		host: "example.invalid",
 		hostKey: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 		user: "tester",
@@ -146,11 +146,11 @@ test("HostStore cross-process CAS prevents stale instances from overwriting newe
 			() => stale.create({ ...host(), alias: "other" }),
 			(error) => error.code === "SSH_HOST_STORE_CONFLICT" && error.status === 409,
 		);
-		assert.equal(stale.find("hpdc").alias, "hpdc");
+		assert.equal(stale.find("test-cluster").alias, "test-cluster");
 		stale.create({ ...host(), alias: "other" });
 		assert.deepEqual(
 			new HostStore(file).list().map((entry) => entry.alias),
-			["hpdc", "other"],
+			["test-cluster", "other"],
 		);
 		assert.equal(fs.existsSync(`${file}.lock`), false);
 	} finally {
@@ -168,7 +168,7 @@ test("SshEngine refreshes external host-store generations before listing or conn
 		t.after(() => engine.dispose());
 		assert.deepEqual(engine.list(), []);
 		writer.create(host());
-		assert.equal(engine.list()[0].alias, "hpdc");
+		assert.equal(engine.list()[0].alias, "test-cluster");
 		assert.equal(reader.revision(), 1);
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
@@ -189,20 +189,20 @@ test("cached exec and standalone streams reject aliases removed by another host-
 	let ended = 0;
 	const cached = { client: { exec() { executions += 1; }, end() { ended += 1; } },
 		hops: [], idleAt: Date.now(), inFlight: 0, broken: false, disposed: false, closed: false };
-	engine.pool.set("hpdc", cached);
-	writer.remove("hpdc");
-	await assert.rejects(engine.execOnce("hpdc", "touch output", 50), /not found/);
+	engine.pool.set("test-cluster", cached);
+	writer.remove("test-cluster");
+	await assert.rejects(engine.execOnce("test-cluster", "touch output", 50), /not found/);
 	assert.equal(executions, 0);
 	assert.equal(ended, 1);
-	assert.equal(engine.pool.has("hpdc"), false);
+	assert.equal(engine.pool.has("test-cluster"), false);
 	writer.create(host());
 	engine.list();
-	writer.remove("hpdc");
-	await assert.rejects(openExecStream(engine, "hpdc", "tail -f output"), /not found/);
+	writer.remove("test-cluster");
+	await assert.rejects(openExecStream(engine, "test-cluster", "tail -f output"), /not found/);
 	writer.create(host());
 	engine.list();
-	writer.remove("hpdc");
-	await assert.rejects(engine.openShell("hpdc", { cols: 80, rows: 24 }), /not found/);
+	writer.remove("test-cluster");
+	await assert.rejects(engine.openShell("test-cluster", { cols: 80, rows: 24 }), /not found/);
 });
 
 test("HostStore fails closed on corrupt or overly broad credential files", () => {
@@ -458,8 +458,8 @@ test("HostStore fsyncs its parent after rename and publishes only after durabili
 			() => failedStore.create(host()),
 			/fsync|directory|durab/i,
 		);
-		assert.equal(failedStore.find("hpdc"), undefined);
-		assert.equal(new HostStore(join(dir, "failed.json")).find("hpdc"), undefined);
+		assert.equal(failedStore.find("test-cluster"), undefined);
+		assert.equal(new HostStore(join(dir, "failed.json")).find("test-cluster"), undefined);
 
 		installFs(originalFsyncSync);
 		const durabilityOrder = [];

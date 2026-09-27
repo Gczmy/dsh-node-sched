@@ -966,7 +966,7 @@ test("dropAlias and dispose abort pending acquires and discard late clients", as
 test("cancelAllForAliases cancels only the challenges targeting the dropped alias", async () => {
 	const { broker, events } = await createBroker();
 	const dropped = broker.request({ alias: "Kelvin2_outside", method: "keyboard-interactive", prompts: [{ prompt: "OTP" }] });
-	const kept = broker.request({ alias: "HPDC_outside", method: "keyboard-interactive", prompts: [{ prompt: "OTP" }] });
+	const kept = broker.request({ alias: "test_cluster_alt", method: "keyboard-interactive", prompts: [{ prompt: "OTP" }] });
 	const droppedEvent = authEvent(events.filter((e) => e.alias === "Kelvin2_outside"), "keyboard-interactive");
 
 	const cancelled = broker.cancelAllForAliases(["Kelvin2_outside"]);
@@ -975,7 +975,7 @@ test("cancelAllForAliases cancels only the challenges targeting the dropped alia
 	assert.ok(events.some((candidate) => candidate.id === droppedEvent.id && candidate.state === "cancelled"));
 
 	// The untouched alias still resolves normally.
-	const keptEvent = authEvent(events.filter((e) => e.alias === "HPDC_outside"), "keyboard-interactive");
+	const keptEvent = authEvent(events.filter((e) => e.alias === "test_cluster_alt"), "keyboard-interactive");
 	broker.answer(keptEvent.id, ["123456"]);
 	assert.deepEqual(await kept, { state: "answered", answers: ["123456"] });
 });

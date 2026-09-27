@@ -2903,12 +2903,12 @@ test("system OpenSSH mode switches only after a live ControlMaster check and per
 		const failed = await request("/sched/ssh/use-system", {
 			method: "POST",
 			origin: "http://127.0.0.1:3000",
-			body: { sshEntry: "HPDC_outside" },
+			body: { sshEntry: "test_cluster_alt" },
 		});
 		assert.equal(failed.status, 409);
 		assert.equal(failed.body?.ok, false);
 		assert.equal(failed.body?.code, "no_control_master");
-		assert.match(failed.body?.error, /ssh HPDC_outside/i);
+		assert.match(failed.body?.error, /ssh test_cluster_alt/i);
 		assert.deepEqual(JSON.parse(readFileSync(overrideFile, "utf8")), {
 			sshEntry: "gateway",
 			schedAlias: "compute",
@@ -2916,7 +2916,7 @@ test("system OpenSSH mode switches only after a live ControlMaster check and per
 		const legacyUpdate = await request("/sched/api/entry", {
 			method: "POST",
 			origin: "http://127.0.0.1:3000",
-			body: { entry: "HPDC_outside" },
+			body: { entry: "test_cluster_alt" },
 		});
 		assert.equal(legacyUpdate.status, 410);
 		assert.equal(legacyUpdate.body?.code, "entry_update_moved");
@@ -2929,27 +2929,27 @@ test("system OpenSSH mode switches only after a live ControlMaster check and per
 		const switched = await request("/sched/ssh/use-system", {
 			method: "POST",
 			origin: "http://127.0.0.1:3000",
-			body: { sshEntry: "HPDC_outside" },
+			body: { sshEntry: "test_cluster_alt" },
 		});
 		assert.equal(switched.status, 200);
 		assert.equal(switched.body?.ok, true);
 		assert.equal(switched.body?.mode, "system-openssh");
-		assert.equal(switched.body?.sshEntry, "HPDC_outside");
+		assert.equal(switched.body?.sshEntry, "test_cluster_alt");
 		assert.equal(switched.body?.master?.ready, true);
 		assert.deepEqual(JSON.parse(readFileSync(overrideFile, "utf8")), {
-			sshEntry: "HPDC_outside",
+			sshEntry: "test_cluster_alt",
 			schedAlias: null,
 		});
 
 		await new Promise((resolve) => setImmediate(resolve));
-		state.hangMasterAliases.add("HPDC_outside");
+		state.hangMasterAliases.add("test_cluster_alt");
 		const activeCheckBoundary = state.spawnCalls.length;
 		const activeBindingRequest = request("/sched/ssh/binding");
 		await new Promise((resolve) => setImmediate(resolve));
 		const activeMasterCheck = state.spawnCalls.slice(activeCheckBoundary).filter(({ args }) => (
 			args.includes("-O")
 			&& args.includes("check")
-			&& args.at(-1) === "HPDC_outside"
+			&& args.at(-1) === "test_cluster_alt"
 		)).at(-1);
 		assert.ok(activeMasterCheck, "active ControlMaster check must be in flight");
 
@@ -2962,7 +2962,7 @@ test("system OpenSSH mode switches only after a live ControlMaster check and per
 		assert.equal(rejectedCandidate.status, 409);
 		assert.equal(rejectedCandidate.body?.code, "no_control_master");
 		assert.deepEqual(JSON.parse(readFileSync(overrideFile, "utf8")), {
-			sshEntry: "HPDC_outside",
+			sshEntry: "test_cluster_alt",
 			schedAlias: null,
 		}, "a rejected candidate must not replace the active system transport");
 		assert.deepEqual(
@@ -2970,15 +2970,15 @@ test("system OpenSSH mode switches only after a live ControlMaster check and per
 			[],
 			"a rejected candidate must not dispose or abort an active system transport",
 		);
-		state.hangMasterAliases.delete("HPDC_outside");
+		state.hangMasterAliases.delete("test_cluster_alt");
 		activeMasterCheck.child.emit("close", 0);
 		const activeBinding = await activeBindingRequest;
-		assert.equal(activeBinding.body?.sshEntry, "HPDC_outside");
+		assert.equal(activeBinding.body?.sshEntry, "test_cluster_alt");
 		assert.equal(activeBinding.body?.master?.ready, true);
 
 		const binding = await request("/sched/ssh/binding");
 		assert.equal(binding.body?.mode, "system-openssh");
-		assert.equal(binding.body?.sshEntry, "HPDC_outside");
+		assert.equal(binding.body?.sshEntry, "test_cluster_alt");
 		assert.equal(binding.body?.master?.ready, true);
 	}, {
 		beforeApply({ home }) {

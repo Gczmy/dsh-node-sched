@@ -4,3 +4,14 @@ lib/**/*.js.map
 *.log
 .DS_Store
 __pycache__/
+
+# Local configuration, credentials and runtime state are not examples.
+.local/
+.env
+.env.*
+!.env.example
+!.env.template
+/.dsh/
+/profile/*.local.*
+*.pem
+*.key

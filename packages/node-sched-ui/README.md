@@ -1,18 +1,12 @@
 # @zzc/dsh-node-sched-ui
 
-dsh client 插件：sched 看板。**当前为占位骨架（计划 M3/M4 实现）**。
+dsh 的 sched 看板插件，已实现批次与任务列表、GPU 状态、日志查看、提交预览、
+项目设置、SSH 认证提示和 daemon 健康展示。调度逻辑与状态判定由 sched 提供。
 
-规划页面（见调研文档 §4.2）：
+界面通过宿主 `main`、`sidebar.panellist` 和 `settings.section` 接口注册；
+通过 host 插件的 `/sched/api/*` 与 `/sched/ws/events` 查询。写操作受设备认证、
+writer 目标和新鲜完整快照约束；完整使用说明见[仓库 README](../../README.zh-CN.md)。
 
-- 总览页：daemon 心跳 / 批次卡片（依赖图+进度）/ GPU 状态灯
-- 批次详情：任务表（状态机着色、GPU 归属、耗时、进度）
-- GPU 面板：free/assigned/releasing/unmanaged/quarantine + gpu-ignore/free/ok/set-mem 操作
-- 日志查看器：WebSocket 流式追加（host 插件桥接远程 `sched log -f`）
-- 提交表单：batch.json 上传或 `sched run` 快捷形态，强制先 `--dry-run` 预览
-
-技术要点：
-
-- React 组件经 `@deepseek-ai/dsh-client-ui-slots` 的 `register()` 挂入声明槽位
-- 数据：首屏 RPC 快照 → host 插件 tail 远程 events 目录经 WS 推增量帧；断线降级轮询
-- 前端 dist 必须预构建（dsh-web-app 无 source-serving fallback），本包后续引入
-  Vite/esbuild 构建链；styling 只用 tokens，文案走 locale namespace（对齐官方 ui 插件纪律）
+源码位于 `src/`。在仓库根目录运行 `node scripts/build-client.mjs`，生成
+`lib/client.js` 和 source map；不要直接修改生成文件。构建使用 esbuild，
+UI 契约测试位于 `test/`，实现约定见[实现定案](../../docs/implementation-notes.md)。

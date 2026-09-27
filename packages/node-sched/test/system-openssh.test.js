@@ -96,7 +96,7 @@ const configReady = () => closeWith(0, {
 });
 
 test("system OpenSSH validates aliases and refuses credential material", () => {
-	assert.equal(validateSshEntry("HPDC_outside"), "HPDC_outside");
+	assert.equal(validateSshEntry("test_cluster_alt"), "test_cluster_alt");
 	assert.equal(validateSshEntry("user@host.example"), "user@host.example");
 	for (const value of ["", "-host", "host name", "host\nname", "host;touch", "host$(id)", "h".repeat(256)]) {
 		assert.throws(() => validateSshEntry(value), /sshEntry/);
@@ -137,7 +137,7 @@ test("ssh -G control paths are absolute, expanded, and token-free", () => {
 test("checkMaster only issues a bounded, non-interactive mux check", async () => {
 	const childProcess = new ScriptedChildProcess([configReady(), masterReady()]);
 	const transport = new SystemOpenSshTransport({
-		sshEntry: "HPDC_outside",
+		sshEntry: "test_cluster_alt",
 		childProcess,
 		masterCheckTimeoutMs: 50,
 	});
@@ -146,10 +146,10 @@ test("checkMaster only issues a bounded, non-interactive mux check", async () =>
 	assert.equal(Number.isNaN(Date.parse(status.checkedAt)), false);
 	assert.equal(childProcess.calls.length, 2);
 	assert.deepEqual(childProcess.calls[0].args, [
-		"-G", "-o", "BatchMode=yes", "HPDC_outside",
+		"-G", "-o", "BatchMode=yes", "test_cluster_alt",
 	]);
 	assert.deepEqual(childProcess.calls[1].args, [
-		"-o", "BatchMode=yes", "-S", CONTROL_PATH, "-O", "check", "HPDC_outside",
+		"-o", "BatchMode=yes", "-S", CONTROL_PATH, "-O", "check", "test_cluster_alt",
 	]);
 	assert.equal(childProcess.calls[1].options.shell, false);
 	transport.dispose();
@@ -228,7 +228,7 @@ test("exec uses safe argv, mux-only fallback blocking, stdin, and no retry", asy
 		closeWith(255, { stderr: "remote failed" }),
 	]);
 	const transport = new SystemOpenSshTransport({
-		sshEntry: "HPDC_outside",
+		sshEntry: "test_cluster_alt",
 		connectTimeoutSec: 17,
 		childProcess,
 	});
@@ -251,7 +251,7 @@ test("exec uses safe argv, mux-only fallback blocking, stdin, and no retry", asy
 		"-o", "ConnectionAttempts=1",
 		"-o", "ConnectTimeout=17",
 		"-S", CONTROL_PATH,
-		"HPDC_outside",
+		"test_cluster_alt",
 		remoteCommand,
 	]);
 	assert.equal(call.options.shell, false);
@@ -369,7 +369,7 @@ test("openPty uses a master-only system ssh PTY and adapts the terminal session"
 	const processPty = new FakePty();
 	const spawnCalls = [];
 	const transport = new SystemOpenSshTransport({
-		sshEntry: "HPDC_outside",
+		sshEntry: "test_cluster_alt",
 		connectTimeoutSec: 17,
 		childProcess,
 		ptyModule: {
@@ -394,7 +394,7 @@ test("openPty uses a master-only system ssh PTY and adapts the terminal session"
 		"-o", "ConnectionAttempts=1",
 		"-o", "ConnectTimeout=17",
 		"-S", CONTROL_PATH,
-		"HPDC_outside",
+		"test_cluster_alt",
 	]);
 	assert.equal(spawnCalls[0].options.cols, 120);
 	assert.equal(spawnCalls[0].options.rows, 42);
@@ -442,7 +442,7 @@ test("openPty never loads node-pty or starts ssh when the ControlMaster is missi
 test("missing-master diagnosis explains a missing mux socket and a too-long ControlPath", async () => {
 	const missing = closeWith(255, { stderr: "Control socket connect: No such file" });
 	const childProcess = new ScriptedChildProcess([configReady(), missing]);
-	const transport = new SystemOpenSshTransport({ sshEntry: "HPDC_outside", childProcess });
+	const transport = new SystemOpenSshTransport({ sshEntry: "test_cluster_alt", childProcess });
 	const status = await transport.checkMaster();
 	assert.equal(status.ready, false);
 	assert.match(status.error, /mux socket .* does not exist/);
@@ -453,10 +453,10 @@ test("missing-master diagnosis explains a missing mux socket and a too-long Cont
 test("missing-master diagnosis explains an existing but stale mux socket", async () => {
 	const stale = closeWith(255, { stderr: "Control socket connect: Connection refused" });
 	const childProcess = new ScriptedChildProcess([
-		closeWith(0, { stdout: `host HPDC_outside\ncontrolpath ${CONTROL_PATH}\n` }),
+		closeWith(0, { stdout: `host test_cluster_alt\ncontrolpath ${CONTROL_PATH}\n` }),
 		stale,
 	]);
-	const transport = new SystemOpenSshTransport({ sshEntry: "HPDC_outside", childProcess });
+	const transport = new SystemOpenSshTransport({ sshEntry: "test_cluster_alt", childProcess });
 	// The mux socket must exist on disk for the stale-socket branch; fake it
 	// through the fs seam used by socketExists.
 	const originalExists = fs.existsSync;
@@ -475,10 +475,10 @@ test("missing-master diagnosis explains an existing but stale mux socket", async
 test("missing-master diagnosis flags a ControlPath above the Unix-socket length limit", async () => {
 	const longPath = "/tmp/dsh-" + "p".repeat(120) + ".sock";
 	const childProcess = new ScriptedChildProcess([
-		closeWith(0, { stdout: `host HPDC_outside\ncontrolpath ${longPath}\n` }),
+		closeWith(0, { stdout: `host test_cluster_alt\ncontrolpath ${longPath}\n` }),
 		closeWith(255, { stderr: "Control socket connect: No such file" }),
 	]);
-	const transport = new SystemOpenSshTransport({ sshEntry: "HPDC_outside", childProcess });
+	const transport = new SystemOpenSshTransport({ sshEntry: "test_cluster_alt", childProcess });
 	const status = await transport.checkMaster();
 	assert.equal(status.ready, false);
 	assert.match(status.error, /does not exist/);
