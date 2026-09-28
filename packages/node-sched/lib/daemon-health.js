@@ -1,4 +1,18 @@
 // Shared, browser-safe validation. Health decisions belong to sched CLI.
+export function canonicalDaemonRequestActions(actions) {
+	if (!Array.isArray(actions) || actions.length > 32) {
+		throw new TypeError("daemon request actions are invalid");
+	}
+	const seen = new Set();
+	for (const action of actions) {
+		if (typeof action !== "string" || !/^[a-z][a-z0-9-]{0,63}$/.test(action) || seen.has(action)) {
+			throw new TypeError("daemon request actions are invalid");
+		}
+		seen.add(action);
+	}
+	return actions;
+}
+
 export function canonicalDaemonHealth(raw) {
 	const fail = () => { throw new TypeError("daemon health JSON is invalid or unsupported"); };
 	if (!raw || typeof raw !== "object" || Array.isArray(raw) || raw.schema_version !== 1) fail();
@@ -21,5 +35,6 @@ export function canonicalDaemonHealth(raw) {
 		|| raw.heartbeat_age_s === null || raw.heartbeat_age_s >= 60 || raw.tick_ok_age_s === null || raw.frozen)) fail();
 	if (raw.health_state === "stopped" && raw.process_state !== "stopped") fail();
 	if (raw.health_state === "stalled" && !raw.frozen) fail();
+	if (raw.request_actions !== undefined) canonicalDaemonRequestActions(raw.request_actions);
 	return raw;
 }

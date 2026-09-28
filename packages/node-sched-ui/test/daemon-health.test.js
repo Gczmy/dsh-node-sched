@@ -9,6 +9,7 @@ const healthy = () => ({
 	heartbeat_age_s: 1, tick_ok_age_s: 2, frozen: false, draining: false, read_error: null,
 });
 const envelope = (raw = healthy()) => ({ ok: true, fresh: true, stale: false, raw, ttlMs: 30_000, ageMs: 0 });
+const maintenanceActions = ["daemon-drain", "daemon-drain-stop-when-idle", "daemon-resume"];
 
 test("healthy, drain, stalled and confirmed stopped have distinct lights and controls", () => {
 	const raw = healthy();
@@ -34,6 +35,31 @@ test("heartbeat without tick completion cannot show green", () => {
 	const view = daemonHealthView(envelope({ ...healthy(), health_state: "delayed", tick_ok_age_s: null }));
 	assert.equal(view.tone, "warn");
 	assert.equal(view.canStart, false);
+});
+
+test("maintenance controls follow advertised CLI actions and the current drain state", () => {
+	const oldCli = daemonHealthView(envelope());
+	assert.equal(oldCli.maintenanceSupported, false);
+	assert.match(oldCli.maintenanceNotice, /CLI/);
+	assert.equal(oldCli.canDrain, false);
+	assert.equal(oldCli.canResume, false);
+	let view = daemonHealthView(envelope({ ...healthy(), request_actions: maintenanceActions }));
+	assert.equal(view.maintenanceSupported, true);
+	assert.equal(view.canDrain, true);
+	assert.equal(view.canDrainStopWhenIdle, true);
+	assert.equal(view.canResume, false);
+	view = daemonHealthView(envelope({ ...healthy(), request_actions: maintenanceActions, draining: true }));
+	assert.equal(view.canDrain, false);
+	assert.equal(view.canDrainStopWhenIdle, true);
+	assert.equal(view.canResume, true);
+	view = daemonHealthView(envelope({ ...healthy(), request_actions: maintenanceActions,
+		health_state: "stopped", process_state: "stopped", draining: true }));
+	assert.equal(view.canStart, false);
+	assert.equal(view.canResume, true);
+	assert.equal(view.canDrainStopWhenIdle, false);
+	view = daemonHealthView({ ...envelope({ ...healthy(), request_actions: maintenanceActions }), ageMs: 30_000 });
+	assert.equal(view.canDrain, false);
+	assert.equal(view.canResume, false);
 });
 
 test("query failure, unsupported CLI and cache age never preserve green or enable actions", () => {
@@ -77,7 +103,9 @@ test("malformed and contradictory daemon documents fail closed", () => {
 		{ tick_ok_age_s: NaN }, { heartbeat_age_s: -1 }, { process_state: "dead" },
 		{ pid: true }, { observed_at: Infinity }, { query_host: "" },
 		{ health_state: "healthy", frozen: true, tick_ok_age_s: 200 },
-		{ health_state: "stopped", process_state: "unknown" }]) {
+		{ health_state: "stopped", process_state: "unknown" },
+		{ request_actions: ["daemon-drain", "daemon-drain"] },
+		{ request_actions: "daemon-drain" }]) {
 		assert.throws(() => canonicalDaemonHealth({ ...healthy(), ...patch }));
 		assert.equal(daemonHealthView(envelope({ ...healthy(), ...patch })).tone, "label2");
 	}

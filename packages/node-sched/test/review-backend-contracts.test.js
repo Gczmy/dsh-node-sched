@@ -230,7 +230,7 @@ async function withBackendRoutes(statusDocument, callback, { beforeApply } = {})
 				stderr = "Master running (pid=1234)";
 			}
 		} else if (remoteCommand.includes(" daemon status --json")) {
-			stdout = `${JSON.stringify(state.daemonDocument ?? {
+			stdout = `${JSON.stringify((args.includes("writer") ? state.writerDaemonDocument : state.daemonDocument) ?? state.daemonDocument ?? {
 				schema_version: 1, node: "compute-01", query_host: "gateway", pid: 123,
 				observed_at: Date.now() / 1000, process_state: "unknown", health_state: "healthy",
 				heartbeat_age_s: 1, tick_ok_age_s: 2, frozen: false, draining: false, read_error: null,
@@ -1515,6 +1515,88 @@ test("daemon endpoint returns validated JSON and rejects legacy text-shaped data
 		assert.equal(response.status, 503);
 		assert.equal(response.body.fresh, false);
 	}, { beforeApply: ({ state }) => { state.daemonDocument = { text: "运行中" }; } });
+});
+
+test("status accepts the new daemon request capability without relaxing other health fields", async () => {
+	const canonical = await exported(INDEX, "canonicalStatusDocument");
+	const actions = ["daemon-start", "daemon-stop", "daemon-drain", "daemon-drain-stop-when-idle", "daemon-resume"];
+	assert.doesNotThrow(() => canonical(statusFixture({ daemon_health: { request_actions: actions } })));
+	for (const invalid of [["daemon-drain", "daemon-drain"], ["daemon-drain", 3], "daemon-drain"]) {
+		assert.throws(() => canonical(statusFixture({ daemon_health: { request_actions: invalid } })), /request actions/);
+	}
+	assert.throws(() => canonical(statusFixture({ daemon_health: { arbitrary: [] } })), /non-scalar/);
+});
+
+test("maintenance operations use the attested writer capability and durable exact commands", async () => {
+	const actions = ["daemon-start", "daemon-stop", "daemon-drain", "daemon-drain-stop-when-idle", "daemon-resume"];
+	const writerHealth = {
+		schema_version: 1, node: "compute-01", query_host: "compute-01", pid: 123,
+		observed_at: Date.now() / 1000, process_state: "running", health_state: "healthy",
+		heartbeat_age_s: 1, tick_ok_age_s: 2, frozen: false, draining: false,
+		read_error: null, request_actions: actions,
+	};
+	await withBackendRoutes({ daemon_health: { request_actions: actions } }, async ({ request, state }) => {
+		for (const [op, command] of [
+			["daemon-drain", "daemon drain"],
+			["daemon-drain-stop-when-idle", "daemon drain --stop-when-idle"],
+			["daemon-resume", "daemon resume"],
+		]) {
+			state.commands.length = 0;
+			const requestId = `maintenance-${op}`;
+			const result = await request("/sched/api/op", {
+				method: "POST", origin: "http://127.0.0.1:3000",
+				body: { op, id: "", requestId },
+			});
+			assert.equal(result.status, 200);
+			assert.equal(result.body.ok, true);
+			assert.ok(state.commands.some((value) => value.includes("hostname && /opt/sched config get")));
+			assert.ok(state.commands.some((value) => value.includes("daemon status --json")));
+			assert.ok(state.commands.some((value) => value.includes(
+				`/opt/sched request '${requestId}' --expect-revision 0 -- ${command}`,
+			)));
+		}
+		state.writerDaemonDocument = { ...writerHealth, draining: true };
+		const replay = await request("/sched/api/op", {
+			method: "POST", origin: "http://127.0.0.1:3000",
+			body: { op: "daemon-drain", id: "", requestId: "maintenance-daemon-drain" },
+		});
+		assert.equal(replay.body.ok, true);
+	}, { beforeApply: ({ state }) => { state.writerDaemonDocument = writerHealth; } });
+});
+
+test("maintenance refuses old, mismatched and incomplete writer evidence before mutation", async () => {
+	const actions = ["daemon-drain", "daemon-drain-stop-when-idle", "daemon-resume"];
+	const healthyWriter = {
+		schema_version: 1, node: "compute-01", query_host: "compute-01", pid: 123,
+		observed_at: Date.now() / 1000, process_state: "running", health_state: "healthy",
+		heartbeat_age_s: 1, tick_ok_age_s: 2, frozen: false, draining: false,
+		read_error: null, request_actions: actions,
+	};
+	const body = { op: "daemon-drain", id: "", requestId: "maintenance-denied" };
+	for (const writerHealth of [
+		{ ...healthyWriter, request_actions: undefined },
+		{ ...healthyWriter, query_host: "gateway" },
+		{ ...healthyWriter, request_actions: ["daemon-resume"] },
+		{ ...healthyWriter, health_state: "unknown", read_error: "health_file_unreadable" },
+	]) {
+		await withBackendRoutes({}, async ({ request, state }) => {
+			state.commands.length = 0;
+			const result = await request("/sched/api/op", {
+				method: "POST", origin: "http://127.0.0.1:3000", body,
+			});
+			assert.equal(result.status, 503);
+			assert.equal(result.body.ok, false);
+			assert.equal(state.commands.some((value) => value.includes("request 'maintenance-denied'")), false);
+		}, { beforeApply: ({ state }) => { state.writerDaemonDocument = writerHealth; } });
+	}
+	await withBackendRoutes({ truncated: { batches: true, jobs: false }, next_cursor: null }, async ({ request, state }) => {
+		state.commands.length = 0;
+		const result = await request("/sched/api/op", {
+			method: "POST", origin: "http://127.0.0.1:3000", body,
+		});
+		assert.equal(result.status, 503);
+		assert.equal(state.commands.some((value) => value.includes("request 'maintenance-denied'")), false);
+	}, { beforeApply: ({ state }) => { state.writerDaemonDocument = healthyWriter; } });
 });
 
 test("a failed health refresh invalidates a young cached green immediately", async () => {

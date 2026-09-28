@@ -38,6 +38,7 @@
 - **实时事件流** — dispatcher 决策经 WebSocket 推送（对 `scheduler.log` 做 `tail -F`）。
 - **任务日志查看器** — 点击任意任务即可流式查看其 stdout/stderr。
 - **dry-run 门控提交** — 粘贴 `batch.json`，先预览任务展开与 SKIP 判定再正式提交；高危操作（cancel / resubmit / GPU 释放 / daemon stop）需键入确认词。
+- **daemon 维护** — `drain` 暂停新派发并等待运行中任务自然结束，`drain + stop` 在空闲后退出，`resume` 解除排空；daemon 已停止时仍需单独 `start`。
 - **多项目感知** — 展示 sched B11c 多项目模式配置的每项目 GPU 配额、优先级与硬亲和隔离。
 
 ### 项目 GPU 访问
@@ -169,7 +170,7 @@ npx @deepseek-ai/dsh@0.1.6-alpha.1 --profile nodesched
 | `/sched/api/log?batch=&task=` | GET | 任务日志尾部 |
 | `/sched/api/daemon` | GET | daemon 存活状态 |
 | `/sched/api/dryrun` | POST | batch spec 的 dry-run 预览（无副作用） |
-| `/sched/api/op` | POST | 白名单操作：`cancel` / `retry` / `resubmit` / `gpu-free` / `gpu-ignore` / `gpu-ok` / `daemon-start` / `daemon-stop` |
+| `/sched/api/op` | POST | 白名单操作：`cancel` / `retry` / `resubmit` / `gpu-free` / `gpu-ignore` / `gpu-ok` / `daemon-start` / `daemon-stop` / `daemon-drain` / `daemon-drain-stop-when-idle` / `daemon-resume` |
 | `/sched/ssh/hosts` | GET/POST | SSH 主机摘要及带 revision 的主机管理 |
 | `/sched/ssh/import` | POST | 导入 `~/.ssh/config` 并安全复用本机 known_hosts |
 | `/sched/ssh/host-key` | POST | 准备、确认或取消服务器 host key 信任 |
@@ -193,6 +194,7 @@ npx @deepseek-ai/dsh@0.1.6-alpha.1 --profile nodesched
 - **SSH 入口与身份显式化** — 集群别名固定写在配置中；系统 OpenSSH 只接受该精确别名的活动 master，绝不回退到新认证。内置引擎的每个目标和 ProxyJump hop 都必须有精确服务器 host key，缺失、撤销或不匹配时 fail-closed。
 - **并发安全的主机存储** — 主机编辑携带 per-host revision；写入持有跨进程私有锁，在锁内安全 reload 并比较完整旧 generation，过期进程只能得到冲突，不能覆盖新 pin。
 - **写操作门** — 写操作经单飞（single-flight）门串行执行；结果未知时不自动重试。
+- **维护能力校验** — 看板只有从新鲜健康查询看到对应能力时才启用按钮；后端还会在实际 writer 上核对完整状态、节点身份和该 CLI 的能力声明，旧 CLI 不支持时拒绝写入。
 - **键入确认** — cancel、清产物的 resubmit、GPU 释放、daemon stop 均需键入显式确认词。
 - **审计日志** — 每条转发操作记录调用方、参数与结果。
 - **认证生命周期** — 内置引擎只有在可见网页中才接受显式认证回答；取消、超时或断线会销毁连接并清除 challenge。系统 OpenSSH 不提供网页认证通道，只复用终端创建的 master，并始终使用 `BatchMode`。
