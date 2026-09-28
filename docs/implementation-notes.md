@@ -2,6 +2,20 @@
 
 本文记录仍适用的实现约定和必要原因。部署现状需另行查询，不以历史记录推断。
 
+## Daemon 排空与恢复看板操作（2026-09-28）
+
+看板提供 `drain`、`drain + stop`（空闲后退出）和 `resume`。`resume` 只解除排空；
+daemon 已停止时需随后执行 `start`。`stop` 仍会取消未完成任务，保留原有输入确认。
+查询 CLI 的新鲜 `daemon status --json` 必须公布对应的 `request_actions`，否则维护按钮
+显示为不支持。查询和 writer 可以是不同目标，因此按钮显示不代表写入许可。
+
+后端对每次维护写入先核验实际 writer 的 hostname、`config.node` 和配置的
+`mutationExpectedNode`，收齐 writer 的完整状态分页，再在同一 writer 上新执行
+`daemon status --json`，核验 `node`、`query_host` 和该操作的能力声明。旧 CLI、
+无效响应、分页缺失或节点不一致都拒绝写入。操作沿用 `sched request`：
+`--expect-revision 0`、独立持久化 request-id、完整命令绑定；结果未知时保留原请求，
+不能换 ID 自动重发。此处只接入 CLI 控制，不在插件中模拟 daemon 生命周期。
+
 ## Daemon health indicators (2026-09-23)
 
 网关心跳过期曾被本机 PID 检查误报为未运行；看板依赖“运行中”文本且查询失败保留旧绿灯。
@@ -25,7 +39,7 @@ schema 1 增加可选 `host_memory`，包含 `used_gib`、`total_gib`、`reserve
 声明预留；看板不得将其标为实测利用率。available 来自计算节点 daemon 采样。
 等待原因增加 `cpu`、`host_memory`、`gpu`、`parallel`、`draining`、`batch_blocked`；
 仅解释 sched 返回值，不在插件中复刻准入算法。`daemon_health.draining` 显示暂停状态。
-后端先接受新契约再升级 sched；CLI 的 drain/resume 暂不加入看板 writer。
+当时后端先接受新契约；看板 writer 后续接入见上节。
 
 ## Project GPU access (2026-09-07)
 

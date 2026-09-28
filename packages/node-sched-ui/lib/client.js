@@ -6354,6 +6354,19 @@ __export(client_exports, {
 module.exports = __toCommonJS(client_exports);
 
 // packages/node-sched/lib/daemon-health.js
+function canonicalDaemonRequestActions(actions) {
+  if (!Array.isArray(actions) || actions.length > 32) {
+    throw new TypeError("daemon request actions are invalid");
+  }
+  const seen = /* @__PURE__ */ new Set();
+  for (const action of actions) {
+    if (typeof action !== "string" || !/^[a-z][a-z0-9-]{0,63}$/.test(action) || seen.has(action)) {
+      throw new TypeError("daemon request actions are invalid");
+    }
+    seen.add(action);
+  }
+  return actions;
+}
 function canonicalDaemonHealth(raw) {
   const fail = () => {
     throw new TypeError("daemon health JSON is invalid or unsupported");
@@ -6374,6 +6387,7 @@ function canonicalDaemonHealth(raw) {
   if (raw.health_state === "healthy" && (raw.read_error !== null || raw.process_state === "stopped" || raw.heartbeat_age_s === null || raw.heartbeat_age_s >= 60 || raw.tick_ok_age_s === null || raw.frozen)) fail();
   if (raw.health_state === "stopped" && raw.process_state !== "stopped") fail();
   if (raw.health_state === "stalled" && !raw.frozen) fail();
+  if (raw.request_actions !== void 0) canonicalDaemonRequestActions(raw.request_actions);
   return raw;
 }
 
@@ -6384,6 +6398,11 @@ function daemonHealthView(snapshot) {
     label: "\u72B6\u6001\u672A\u77E5",
     canStart: false,
     canStop: false,
+    canDrain: false,
+    canDrainStopWhenIdle: false,
+    canResume: false,
+    maintenanceSupported: false,
+    maintenanceNotice: "",
     title: snapshot?.lastError || snapshot?.text || "\u7B49\u5F85\u6709\u6548\u5065\u5EB7\u6570\u636E"
   };
   let raw;
@@ -6410,12 +6429,20 @@ function daemonHealthView(snapshot) {
     stopped: ["label2", "\u5DF2\u505C\u6B62"],
     unknown: ["label2", "\u72B6\u6001\u672A\u77E5"]
   }[raw.health_state];
+  const actions = raw.request_actions ?? [];
+  const maintenanceSupported = ["daemon-drain", "daemon-drain-stop-when-idle", "daemon-resume"].every((action) => actions.includes(action));
+  const canControlRunning = raw.health_state !== "unknown" && (raw.process_state === "running" || raw.health_state === "healthy");
   return {
     tone,
     label,
     title: detail,
-    canStart: raw.health_state === "stopped" && raw.process_state === "stopped",
-    canStop: raw.health_state !== "unknown" && (raw.process_state === "running" || raw.health_state === "healthy")
+    canStart: raw.health_state === "stopped" && raw.process_state === "stopped" && !raw.draining,
+    canStop: raw.health_state !== "unknown" && (raw.process_state === "running" || raw.health_state === "healthy"),
+    canDrain: actions.includes("daemon-drain") && canControlRunning && !raw.draining,
+    canDrainStopWhenIdle: actions.includes("daemon-drain-stop-when-idle") && canControlRunning,
+    canResume: actions.includes("daemon-resume") && raw.draining && raw.health_state !== "unknown",
+    maintenanceSupported,
+    maintenanceNotice: maintenanceSupported ? "" : "\u67E5\u8BE2 CLI \u672A\u516C\u5E03\u5168\u90E8\u7EF4\u62A4\u64CD\u4F5C\u80FD\u529B\uFF1B\u8BF7\u66F4\u65B0 CLI\u3002"
   };
 }
 var TERMINAL_AUTH_STATES = /* @__PURE__ */ new Set(["resolved", "expired", "cancelled"]);
@@ -9112,7 +9139,7 @@ function apply(cctx, config) {
       g.quarantined && j("button", { onClick: () => runOp("gpu-ok", g), style: btn(T.ok) }, "gpu-ok \u89E3\u9664\u9694\u79BB")
     ]);
   }
-  function DaemonBar({ runOp }) {
+  function DaemonBar({ runOp, mutationAvailability }) {
     const [snapshot, setSnapshot] = useState(null);
     const [querying, setQuerying] = useState(false);
     const [confirmStop, setConfirmStop] = useState(false);
@@ -9170,6 +9197,8 @@ function apply(cctx, config) {
       };
     }, [load]);
     const health = daemonHealthView(snapshot);
+    const maintenanceWritable = mutationAvailability?.writable === true;
+    const maintenanceTitle = health.maintenanceNotice || mutationAvailability?.reason || "\u4EC5\u4F7F\u7528\u65B0\u9C9C\u5065\u5EB7\u6570\u636E\u548C\u5B8C\u6574\u72B6\u6001\u5FEB\u7167\u6267\u884C\u7EF4\u62A4\u64CD\u4F5C";
     useEffect(() => {
       if (!health.canStop) setConfirmStop(false);
     }, [health.canStop]);
@@ -9205,9 +9234,46 @@ function apply(cctx, config) {
           { style: { color: T.label2, fontSize: 11, marginLeft: 8 } },
           `\u91C7\u6837 ${new Date(snapshot.raw.observed_at * 1e3).toLocaleTimeString("zh-CN", { hour12: false })}`
         ),
-        querying && j("span", { style: { color: T.label2 } }, " \u2026\u7B49\u5F85\u67E5\u8BE2")
+        querying && j("span", { style: { color: T.label2 } }, " \u2026\u7B49\u5F85\u67E5\u8BE2"),
+        health.maintenanceNotice && j("span", {
+          style: { color: T.label2, fontSize: 11, marginLeft: 8 },
+          title: health.maintenanceNotice
+        }, "\u7EF4\u62A4\u64CD\u4F5C\u4E0D\u53EF\u7528\uFF08CLI \u7248\u672C\uFF09")
       ]),
       j("button", { disabled: querying, onClick: load, style: btn(T.label2, querying) }, "\u91CD\u65B0\u68C0\u6D4B"),
+      j("button", {
+        disabled: !maintenanceWritable || !health.canDrain,
+        title: maintenanceTitle,
+        onClick: async () => {
+          if (maintenanceWritable && daemonHealthView(gate.current.snapshot()).canDrain) {
+            await runOp("daemon-drain", null);
+            void load();
+          }
+        },
+        style: btn(T.brand, !maintenanceWritable || !health.canDrain)
+      }, "drain"),
+      j("button", {
+        disabled: !maintenanceWritable || !health.canDrainStopWhenIdle,
+        title: maintenanceTitle,
+        onClick: async () => {
+          if (maintenanceWritable && daemonHealthView(gate.current.snapshot()).canDrainStopWhenIdle) {
+            await runOp("daemon-drain-stop-when-idle", null);
+            void load();
+          }
+        },
+        style: btn(T.brand, !maintenanceWritable || !health.canDrainStopWhenIdle)
+      }, "drain + stop"),
+      j("button", {
+        disabled: !maintenanceWritable || !health.canResume,
+        title: `${maintenanceTitle}\uFF1Bresume \u53EA\u89E3\u9664\u6392\u7A7A\uFF0C\u5DF2\u505C\u6B62\u65F6\u9700\u53E6\u884C start`,
+        onClick: async () => {
+          if (maintenanceWritable && daemonHealthView(gate.current.snapshot()).canResume) {
+            await runOp("daemon-resume", null);
+            void load();
+          }
+        },
+        style: btn(T.ok, !maintenanceWritable || !health.canResume)
+      }, "resume"),
       j("button", {
         disabled: !health.canStart,
         title: "\u4EC5\u786E\u8BA4\u5DF2\u505C\u6B62\u65F6\u53EF\u542F\u52A8",
@@ -10108,7 +10174,7 @@ function apply(cctx, config) {
           "aria-describedby": "sched-read-only-reason",
           style: { border: 0, padding: 0, margin: 0, minWidth: 0 }
         }, [
-          j(DaemonBar, { runOp }),
+          j(DaemonBar, { runOp, mutationAvailability }),
           !summary && j("div", null, "loading\u2026"),
           summary && j(ResizableTextBox, {
             minHeight: 64,

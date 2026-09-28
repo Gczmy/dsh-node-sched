@@ -3,6 +3,8 @@ import { canonicalDaemonHealth } from "../../node-sched/lib/daemon-health.js";
 export function daemonHealthView(snapshot) {
 	const unknown = {
 		tone: "label2", label: "状态未知", canStart: false, canStop: false,
+		canDrain: false, canDrainStopWhenIdle: false, canResume: false,
+		maintenanceSupported: false, maintenanceNotice: "",
 		title: snapshot?.lastError || snapshot?.text || "等待有效健康数据",
 	};
 	let raw;
@@ -29,10 +31,20 @@ export function daemonHealthView(snapshot) {
 		stopped: ["label2", "已停止"],
 		unknown: ["label2", "状态未知"],
 	}[raw.health_state];
+	const actions = raw.request_actions ?? [];
+	const maintenanceSupported = ["daemon-drain", "daemon-drain-stop-when-idle", "daemon-resume"]
+		.every((action) => actions.includes(action));
+	const canControlRunning = raw.health_state !== "unknown"
+		&& (raw.process_state === "running" || raw.health_state === "healthy");
 	return {
 		tone, label, title: detail,
-		canStart: raw.health_state === "stopped" && raw.process_state === "stopped",
+		canStart: raw.health_state === "stopped" && raw.process_state === "stopped" && !raw.draining,
 		canStop: raw.health_state !== "unknown" && (raw.process_state === "running" || raw.health_state === "healthy"),
+		canDrain: actions.includes("daemon-drain") && canControlRunning && !raw.draining,
+		canDrainStopWhenIdle: actions.includes("daemon-drain-stop-when-idle") && canControlRunning,
+		canResume: actions.includes("daemon-resume") && raw.draining && raw.health_state !== "unknown",
+		maintenanceSupported,
+		maintenanceNotice: maintenanceSupported ? "" : "查询 CLI 未公布全部维护操作能力；请更新 CLI。",
 	};
 }
 

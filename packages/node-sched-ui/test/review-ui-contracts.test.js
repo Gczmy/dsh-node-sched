@@ -211,7 +211,7 @@ test("SCHED can reuse an existing terminal OpenSSH ControlMaster without prompti
 	const sshStart = source.indexOf("\tfunction SshTab()");
 	const sshEnd = source.indexOf("\n\tfunction SshTerminal", sshStart);
 	const sshTab = source.slice(sshStart, sshEnd);
-	const daemonStart = source.indexOf("\tfunction DaemonBar({ runOp })");
+	const daemonStart = source.indexOf("\tfunction DaemonBar({ runOp, mutationAvailability })");
 	const daemonEnd = source.indexOf("\n\n\n\tconst IncidentsTab", daemonStart);
 	const daemonBar = source.slice(daemonStart, daemonEnd);
 	const terminalStart = source.indexOf("\tfunction SshTerminal(");

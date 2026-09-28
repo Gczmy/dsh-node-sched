@@ -1822,7 +1822,7 @@ function apply(cctx, config) {
 
 
 
-	function DaemonBar({ runOp }) {
+	function DaemonBar({ runOp, mutationAvailability }) {
 		const [snapshot, setSnapshot] = useState(null);
 		const [querying, setQuerying] = useState(false);
 		const [confirmStop, setConfirmStop] = useState(false);
@@ -1877,6 +1877,9 @@ function apply(cctx, config) {
 			};
 		}, [load]);
 		const health = daemonHealthView(snapshot);
+		const maintenanceWritable = mutationAvailability?.writable === true;
+		const maintenanceTitle = health.maintenanceNotice || mutationAvailability?.reason
+			|| "仅使用新鲜健康数据和完整状态快照执行维护操作";
 		useEffect(() => { if (!health.canStop) setConfirmStop(false); }, [health.canStop]);
 		const engineMode = channel?.mode === "engine";
 		const systemOpenSshMode = channel?.mode === "system-openssh";
@@ -1920,10 +1923,31 @@ function apply(cctx, config) {
 					`采样 ${new Date(snapshot.raw.observed_at * 1000).toLocaleTimeString("zh-CN", { hour12: false })}`),
 
 				querying && j("span", { style: { color: T.label2 } }, " …等待查询"),
+				health.maintenanceNotice && j("span", { style: { color: T.label2, fontSize: 11, marginLeft: 8 },
+					title: health.maintenanceNotice }, "维护操作不可用（CLI 版本）"),
 
 			]),
 
 			j("button", { disabled: querying, onClick: load, style: btn(T.label2, querying) }, "重新检测"),
+			j("button", { disabled: !maintenanceWritable || !health.canDrain, title: maintenanceTitle,
+				onClick: async () => {
+					if (maintenanceWritable && daemonHealthView(gate.current.snapshot()).canDrain) {
+						await runOp("daemon-drain", null); void load();
+					}
+				}, style: btn(T.brand, !maintenanceWritable || !health.canDrain) }, "drain"),
+			j("button", { disabled: !maintenanceWritable || !health.canDrainStopWhenIdle, title: maintenanceTitle,
+				onClick: async () => {
+					if (maintenanceWritable && daemonHealthView(gate.current.snapshot()).canDrainStopWhenIdle) {
+						await runOp("daemon-drain-stop-when-idle", null); void load();
+					}
+				}, style: btn(T.brand, !maintenanceWritable || !health.canDrainStopWhenIdle) }, "drain + stop"),
+			j("button", { disabled: !maintenanceWritable || !health.canResume,
+				title: `${maintenanceTitle}；resume 只解除排空，已停止时需另行 start`,
+				onClick: async () => {
+					if (maintenanceWritable && daemonHealthView(gate.current.snapshot()).canResume) {
+						await runOp("daemon-resume", null); void load();
+					}
+				}, style: btn(T.ok, !maintenanceWritable || !health.canResume) }, "resume"),
 			j("button", { disabled: !health.canStart, title: "仅确认已停止时可启动",
 				onClick: async () => { if (daemonHealthView(gate.current.snapshot()).canStart) { await runOp("daemon-start", null); void load(); } },
 				style: btn(T.ok, !health.canStart) }, "start"),
@@ -3037,7 +3061,7 @@ function apply(cctx, config) {
 					style: { border: 0, padding: 0, margin: 0, minWidth: 0 },
 				}, [
 
-					j(DaemonBar, { runOp }),
+					j(DaemonBar, { runOp, mutationAvailability }),
 
 					!summary && j("div", null, "loading…"),
 

@@ -266,13 +266,17 @@ test("rendered dashboard button recipes expose classes as props and preserve leg
 
 test("rendered daemon bar clears green and disables controls on outage, then recovers", async () => {
 	let offline = false;
+	let draining = false;
+	let actions = ["daemon-drain", "daemon-drain-stop-when-idle", "daemon-resume"];
+	const operations = [];
 	const h = await createHarness({ ready: true, fetchResponse(input) {
 		if (input === "/sched/api/daemon" && offline) return Promise.reject(new Error("SSH timeout"));
 		const value = input === "/sched/api/daemon" ? {
 			ok: true, fresh: true, stale: false, ttlMs: 30_000, ageMs: 0,
 			raw: { schema_version: 1, node: "compute", query_host: "gateway", pid: 123,
 				observed_at: Date.now() / 1000, health_state: "healthy", process_state: "unknown",
-				heartbeat_age_s: 1, tick_ok_age_s: 2, frozen: false, draining: false, read_error: null },
+				heartbeat_age_s: 1, tick_ok_age_s: 2, frozen: false, draining,
+				read_error: null, request_actions: actions },
 		} : { ok: true, raw: { batches: [], jobs: [], gpus: [] } };
 		return Promise.resolve({ ok: true, json: async () => value });
 	} });
@@ -281,7 +285,11 @@ test("rendered daemon bar clears green and disables controls on outage, then rec
 	const dashboard = h.renderComponent(child.type, child.props);
 	const daemon = elements(dashboard.tree, (el) => el.type?.name === "DaemonBar")[0];
 	assert.ok(daemon);
-	const bar = h.renderComponent(daemon.type, daemon.props);
+	const bar = h.renderComponent(daemon.type, {
+		...daemon.props,
+		mutationAvailability: { writable: true, reason: "" },
+		runOp: async (op) => { operations.push(op); },
+	});
 	const settle = async () => { await new Promise((resolve) => setImmediate(resolve)); bar.render(); };
 	const button = (label) => elements(bar.tree, (el) => el.type === "button" && el.props.children === label)[0];
 	const light = () => elements(bar.tree, (el) => el.props?.role === "status")[0];
@@ -289,6 +297,27 @@ test("rendered daemon bar clears green and disables controls on outage, then rec
 	assert.match(light().props.children, /调度正常/);
 	assert.equal(button("start").props.disabled, true);
 	assert.equal(button("stop").props.disabled, false);
+	assert.equal(button("drain").props.disabled, false);
+	assert.equal(button("drain + stop").props.disabled, false);
+	assert.equal(button("resume").props.disabled, true);
+	await button("drain").props.onClick();
+	assert.deepEqual(operations, ["daemon-drain"]);
+	await settle();
+	draining = true;
+	await button("重新检测").props.onClick();
+	bar.render();
+	assert.equal(button("drain").props.disabled, true);
+	assert.equal(button("drain + stop").props.disabled, false);
+	assert.equal(button("resume").props.disabled, false);
+	await button("resume").props.onClick();
+	assert.deepEqual(operations, ["daemon-drain", "daemon-resume"]);
+	await settle();
+	actions = [];
+	await button("重新检测").props.onClick();
+	bar.render();
+	assert.equal(button("resume").props.disabled, true);
+	assert.ok(elements(bar.tree, (el) => el.props?.children === "维护操作不可用（CLI 版本）").length);
+	actions = ["daemon-drain", "daemon-drain-stop-when-idle", "daemon-resume"];
 	offline = true;
 	await button("重新检测").props.onClick();
 	bar.render();
@@ -296,6 +325,9 @@ test("rendered daemon bar clears green and disables controls on outage, then rec
 	assert.match(light().props.title, /SSH timeout/);
 	assert.equal(button("start").props.disabled, true);
 	assert.equal(button("stop").props.disabled, true);
+	assert.equal(button("drain").props.disabled, true);
+	assert.equal(button("resume").props.disabled, true);
+	draining = false;
 	offline = false;
 	await button("重新检测").props.onClick();
 	bar.render();

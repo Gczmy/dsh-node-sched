@@ -19,7 +19,7 @@
  */
 
 import cp from "node:child_process";
-import { canonicalDaemonHealth } from "./daemon-health.js";
+import { canonicalDaemonHealth, canonicalDaemonRequestActions } from "./daemon-health.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -363,6 +363,9 @@ function buildOperationCommand(operation, id, schedBin) {
 		"gpu-ok": () => `${schedBin} gpu-ok ${id}`,
 		"daemon-start": () => `${schedBin} daemon start`,
 		"daemon-stop": () => `${schedBin} daemon stop`,
+		"daemon-drain": () => `${schedBin} daemon drain`,
+		"daemon-drain-stop-when-idle": () => `${schedBin} daemon drain --stop-when-idle`,
+		"daemon-resume": () => `${schedBin} daemon resume`,
 	};
 	if (!commands[operation]) throw new Error(`unsupported operation: ${operation}`);
 	return commands[operation]();
@@ -470,6 +473,25 @@ function durableUploadName(requestId, content) {
 
 function operationHttpResult(result) {
 	return { ok: Boolean(result?.ok), code: result?.code ?? -1, text: String(result?.text ?? "") };
+}
+
+function assertWriterDaemonAction(raw, expectedNode, action) {
+	let health;
+	try {
+		health = canonicalDaemonHealth(raw);
+	} catch {
+		throw mutationPreconditionError("writer daemon status is invalid or unavailable", 503);
+	}
+	if (!hostMatches(health.node, expectedNode) || !hostMatches(health.query_host, expectedNode)) {
+		throw mutationPreconditionError("writer daemon status node does not match mutationExpectedNode", 503);
+	}
+	if (health.read_error !== null || health.health_state === "unknown") {
+		throw mutationPreconditionError("writer daemon status is not a valid current-state sample", 503);
+	}
+	if (!health.request_actions?.includes(action)) {
+		throw mutationPreconditionError(`writer sched CLI does not support ${action}; update the writer CLI`, 503);
+	}
+	return health;
 }
 
 function hostMatches(left, right) {
@@ -1494,7 +1516,11 @@ function canonicalStatusDocument(document) {
 	if (document.daemon_health !== undefined) {
 		const health = statusRecord(document.daemon_health, "status.daemon_health");
 		if (Object.keys(health).length > 32) throw new TypeError("status.daemon_health is too large");
-		for (const value of Object.values(health)) {
+		for (const [key, value] of Object.entries(health)) {
+			if (key === "request_actions") {
+				canonicalDaemonRequestActions(value);
+				continue;
+			}
 			if (value !== null && !["string", "number", "boolean"].includes(typeof value)) {
 				throw new TypeError("status.daemon_health contains a non-scalar field");
 			}
@@ -2318,6 +2344,7 @@ function apply(ctx, config) {
 		{
 			timeoutMs,
 			preflight,
+			requireCompleteStatus = false,
 			precondition = { kind: "none" },
 			prepare,
 			requestId,
@@ -2360,7 +2387,7 @@ function apply(ctx, config) {
 						let statusDocument;
 						try {
 							const kind = String(precondition?.kind ?? "none");
-							if (kind === "batch" || kind === "task") {
+							if (kind === "batch" || kind === "task" || requireCompleteStatus) {
 								const pages = await collectWriterStatusPages(fetchPage, {
 									target: precondition,
 									maxPages: 100,
@@ -2673,6 +2700,13 @@ function apply(ctx, config) {
 		};
 		const readGuard = (req, res) => guardReadRequest(req, res, browserAuth);
 		const writeGuard = (req, res) => guardMutationRequest(req, res, browserAuth);
+		const maintenancePreflight = (action) => async (writer, timeoutMs) => {
+			const result = envelope(await executeWriterRead(writer, `${S} daemon status --json`, timeoutMs));
+			if (!result.ok) {
+				throw mutationPreconditionError(`writer daemon status unavailable: ${result.text}`, 503);
+			}
+			assertWriterDaemonAction(result.raw, writer.expectedNode, action);
+		};
 		const OPS = {
 			cancel: { cmd: (id) => buildOperationCommand("cancel", id, S), needsId: true },
 			retry: { cmd: (id) => buildOperationCommand("retry", id, S), needsId: true },
@@ -2682,6 +2716,9 @@ function apply(ctx, config) {
 			"gpu-ok": { cmd: (id) => buildOperationCommand("gpu-ok", id, S), needsId: true, pattern: /^\d+$/ },
 			"daemon-start": { cmd: () => buildOperationCommand("daemon-start", "", S), needsId: false },
 			"daemon-stop": { cmd: () => buildOperationCommand("daemon-stop", "", S), needsId: false },
+			"daemon-drain": { cmd: () => buildOperationCommand("daemon-drain", "", S), needsId: false, maintenance: true },
+			"daemon-drain-stop-when-idle": { cmd: () => buildOperationCommand("daemon-drain-stop-when-idle", "", S), needsId: false, maintenance: true },
+			"daemon-resume": { cmd: () => buildOperationCommand("daemon-resume", "", S), needsId: false, maintenance: true },
 		};
 
 
@@ -3226,7 +3263,13 @@ function apply(ctx, config) {
 					const result = await operate(
 						`${op}:${id ?? ""}`,
 						spec.cmd(id),
-						{ requestId, precondition },
+						{
+							requestId, precondition,
+							...(spec.maintenance ? {
+								requireCompleteStatus: true,
+								preflight: maintenancePreflight(op),
+							} : {}),
+						},
 					);
 					await json(
 						res,
