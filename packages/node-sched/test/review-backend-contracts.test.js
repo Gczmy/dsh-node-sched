@@ -188,7 +188,7 @@ function sshPublicKeyBlob(keyType, value) {
 }
 
 
-async function withBackendRoutes(statusDocument, callback, { beforeApply } = {}) {
+async function withBackendRoutes(statusDocument, callback, { beforeApply, config = {} } = {}) {
 	const apply = await exported(INDEX, "apply");
 	const previousSpawn = cp.spawn;
 	const previousHome = process.env.HOME;
@@ -229,6 +229,21 @@ async function withBackendRoutes(statusDocument, callback, { beforeApply } = {})
 				stdout = "";
 				stderr = "Master running (pid=1234)";
 			}
+        } else if (remoteCommand.includes(" identity --json")) {
+            stdout = `${JSON.stringify(state.identityDocument ?? {
+                schema_version: 1, query: "identity", contract: "sched-identity-v1", node: "compute-01", query_host: "gateway",
+                available: true, instance_id: "a".repeat(32), reason: null,
+            })}\n`;
+        } else if (remoteCommand.includes(" version --json")) {
+            stdout = JSON.stringify({schema_version: 1, contracts: state.integrationContracts ?? {
+                identity: "sched-identity-v1", request_status: "sched-request-status-v1", submit: "sched-submit-v1",
+            }});
+        } else if (remoteCommand.includes(" request-status ")) {
+            stdout = JSON.stringify(state.requestReceipt ?? {
+                schema_version: 1, query: "request_status", contract: "sched-request-status-v1", request_id: "original",
+                instance_id: "a".repeat(32), found: true, request_kind: "submission", phase: "unknown", code: null,
+                output_compacted: false, binding_sha256: "b".repeat(64), result: null,
+            });
 		} else if (remoteCommand.includes(" daemon status --json")) {
 			stdout = `${JSON.stringify((args.includes("writer") ? state.writerDaemonDocument : state.daemonDocument) ?? state.daemonDocument ?? {
 				schema_version: 1, node: "compute-01", query_host: "gateway", pid: 123,
@@ -267,6 +282,11 @@ async function withBackendRoutes(statusDocument, callback, { beforeApply } = {})
 				truncated: false,
 				next_cursor: null,
 			})}\n`;
+        } else if (remoteCommand.includes("nodesched-upload-") && remoteCommand.includes("python3")) {
+            const name = remoteCommand.match(/nodesched-upload-[A-Za-z0-9_.:-]+[.]json/)[0];
+            stdout = "/tmp/" + name + "\n";
+        } else if (remoteCommand.includes(" submit ") && remoteCommand.includes(" --request-id ")) {
+            stdout = JSON.stringify({batch_id: "accepted-original", project: "p", delivery: "inbox", persisted: false});
 		} else if (remoteCommand.includes("hostname &&") && remoteCommand.includes(" config get")) {
 			stdout = "compute-01\n{\"node\":\"compute-01\"}\n";
 		}
@@ -312,6 +332,7 @@ async function withBackendRoutes(statusDocument, callback, { beforeApply } = {})
 			mutationTarget: "writer",
 			mutationSession: "",
 			mutationExpectedNode: "compute-01",
+            ...config,
 		});
 		const token = readFileSync(
 			path.join(home, ".dsh", "node-sched-access-token"),
@@ -3164,4 +3185,70 @@ test("an invalid persisted system entry degrades without blocking recovery to a 
 			}), { mode: 0o600 });
 		},
 	});
+});
+
+test("integration reads use the query target and never issue a mutation", async () => {
+    await withBackendRoutes({}, async ({request,state}) => {
+        state.commands.length = 0;
+        const identity = await request("/sched/api/identity");
+        assert.equal(identity.status,200);
+        assert.equal(identity.body.raw.instance_id,"a".repeat(32));
+        const receipt = await request("/sched/api/request-status?request-id=original");
+        assert.equal(receipt.status,200);
+        assert.equal(receipt.body.raw.phase,"unknown");
+        assert.equal(receipt.body.raw.code,null);
+        assert.equal(state.spawnCalls.filter(call => call.args.includes("writer")).length,0);
+        assert.equal(state.commands.some(command => command.includes(" request ") || command.includes(" submit ")),false);
+        const before = state.commands.length;
+        const denied = await request("/sched/api/identity",{authorization:"Bearer wrong"});
+        assert.equal(denied.status,401);
+        assert.equal(state.commands.length,before);
+    });
+});
+
+test("writer instance cannot override the immutable requested identity",async () => {
+    await withBackendRoutes({},async ({request,state}) => {
+        const response = await request("/sched/api/op",{method:"POST",origin:"http://127.0.0.1:3000",body:{
+            op:"gpu-ok", id:"0", requestId:"original", expectedInstance:"b".repeat(32),
+        }});
+        assert.equal(response.body.ok,false);
+        assert.match(response.body.text,/identity differs/);
+        assert.equal(state.commands.some(command => command.includes(" request 'original'")),false);
+    },{config:{mutationExpectedInstance:"a".repeat(32)}});
+});
+
+test("configured instance rejects missing submission contracts before uploading",async () => {
+    await withBackendRoutes({},async ({request,state}) => {
+        state.integrationContracts = {};
+        const response = await request("/sched/api/submit",{method:"POST",origin:"http://127.0.0.1:3000",body:{
+            requestId:"original",content:JSON.stringify({name:"sample",project:"p",tasks:[{id:"t",cmd:["true"]}]}),
+        }});
+        assert.equal(response.body.ok,false);
+        assert.match(response.body.text,/contracts unavailable/);
+        assert.equal(state.commands.some(command => command.includes(" submit ") || command.includes("base64")),false);
+    },{config:{mutationExpectedInstance:"a".repeat(32)}});
+});
+
+
+test("explicit-instance submit negotiates on the writer and preserves the original request", async () => {
+    await withBackendRoutes({}, async ({request,state}) => {
+        state.spawnCalls.length = 0;
+        const response = await request("/sched/api/submit", {method:"POST",origin:"http://127.0.0.1:3000",body:{
+            requestId:"original",content:JSON.stringify({name:"sample",project:"p",tasks:[{id:"t",cmd:["true"]}]}),
+        }});
+        assert.equal(response.body.ok,true,JSON.stringify(response.body));
+        const commands = state.spawnCalls.filter(call => !call.args.includes("-G") && !call.args.includes("-O"));
+        const submissions = commands.filter(call => String(call.args.at(-1)).includes(" submit "));
+        assert.equal(submissions.length,1);
+        const command = String(submissions[0].args.at(-1));
+        assert.match(command,/--request-id 'original'/);
+        assert.match(command,/--expect-instance 'a{32}'/);
+        assert.match(command,/--expect-project 'p' --json/);
+        assert.equal(command.includes(" request "),false);
+        assert.equal(submissions[0].args.includes("writer"),true);
+        const negotiation = commands.filter(call => / (version|identity) --json/.test(String(call.args.at(-1))));
+        assert.equal(negotiation.length,2);
+        assert.equal(negotiation.every(call => call.args.includes("writer")),true);
+        assert.equal(commands.some(call => String(call.args.at(-1)).includes("rm -f")),true);
+    }, {config:{mutationExpectedInstance:"a".repeat(32)}});
 });

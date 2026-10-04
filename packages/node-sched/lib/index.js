@@ -19,6 +19,7 @@
  */
 
 import cp from "node:child_process";
+import { canonicalIdentity, canonicalRequestStatus, integrationReadCommand } from "./integration-contract.js";
 import { canonicalDaemonHealth, canonicalDaemonRequestActions } from "./daemon-health.js";
 import fs from "node:fs";
 import os from "node:os";
@@ -96,6 +97,8 @@ const Config = z.object({
 	mutationSession: z.string().default(""),
 	/** Expected sched config.node and writer hostname. */
 	mutationExpectedNode: z.string().default(""),
+	/** Optional persistent sched identity; independent of the read target. */
+	mutationExpectedInstance: z.string().default(""),
 });
 
 const inject = ["tools", "systemPrompt", "webServer"];
@@ -460,6 +463,15 @@ function buildIdempotentMutationCommand(
 	} else {
 		expectation.push("--expect-revision", "0");
 	}
+    if (precondition.expectedInstance !== undefined) {
+        if (typeof precondition.expectedInstance !== "string" || !/^[0-9a-f]{32}$/.test(precondition.expectedInstance)) throw new Error("invalid mutation instance identity");
+        expectation.push("--expect-instance", shellQuote(precondition.expectedInstance));
+    }
+    if (precondition.expectedProject !== undefined) {
+        if (!["batch", "task"].includes(kind) || typeof precondition.expectedProject !== "string"
+            || !precondition.expectedProject || precondition.expectedProject.startsWith("-") || /\s/.test(precondition.expectedProject)) throw new Error("invalid mutation project binding");
+        expectation.push("--expect-project", shellQuote(precondition.expectedProject));
+    }
 	const expectationText = ` ${expectation.join(" ")}`;
 	return `${schedBin} request ${shellQuote(requestId)}${expectationText} -- ${command.slice(prefix.length)}`;
 }
@@ -2258,25 +2270,28 @@ function apply(ctx, config) {
 
 	function configuredMutationWriter() {
 		const expectedNode = String(config.mutationExpectedNode ?? "").trim();
+        const expectedInstance = String(config.mutationExpectedInstance ?? "").trim();
+        if (expectedInstance && !/^[0-9a-f]{32}$/.test(expectedInstance)) throw new Error("mutationExpectedInstance is invalid");
+        const scope = expectedInstance ? { expectedInstance } : {};
 		if (!expectedNode) throw new Error("mutationExpectedNode is required for an enabled mutation writer");
 		switch (config.mutationMode) {
 			case "local":
-				return { mode: "local", expectedNode };
+				return { mode: "local", expectedNode, ...scope };
 			case "engine": {
 				const alias = String(config.mutationTarget ?? "").trim();
 				if (!alias) throw new Error("engine mutation writer requires mutationTarget");
-				return { mode: "engine", alias, expectedNode };
+				return { mode: "engine", alias, expectedNode, ...scope };
 			}
 			case "ssh": {
 				const sshEntry = String(config.mutationTarget ?? "").trim();
 				if (!sshEntry) throw new Error("ssh mutation writer requires mutationTarget");
-				return { mode: "cli", sshEntry, expectedNode };
+				return { mode: "cli", sshEntry, expectedNode, ...scope };
 			}
 			case "screen": {
 				const sshEntry = String(config.mutationTarget ?? "").trim();
 				const session = String(config.mutationSession ?? "").trim();
 				if (!sshEntry || !session) throw new Error("screen mutation writer requires mutationTarget and mutationSession");
-				return { mode: "screen", sshEntry, session, expectedNode };
+				return { mode: "screen", sshEntry, session, expectedNode, ...scope };
 			}
 			default:
 				throw new Error("explicit mutation writer is disabled");
@@ -2409,12 +2424,19 @@ function apply(ctx, config) {
 						if (preflight) await preflight(writer, preflightTimeoutMs, statusDocument);
 					},
 					executeMutation: async (writer, command, operationTimeoutMs) => {
-						const durableCommand = buildIdempotentMutationCommand(
+                        if (writer.expectedInstance && precondition.expectedInstance !== undefined
+                            && writer.expectedInstance !== precondition.expectedInstance) {
+                            throw new Error("request identity differs from configured writer identity");
+                        }
+						const durableCommand = key === "submit" && writer.expectedInstance ? command : buildIdempotentMutationCommand(
 							command,
 							S,
 							requestId,
-							precondition,
-						);
+                            {
+                                ...precondition,
+                                ...(writer.expectedInstance ? { expectedInstance: writer.expectedInstance } : {}),
+                            },
+                        );
 						ctx.logger.warn(
 							"[node-sched] audit #%d op=%s request=%s",
 							++auditSeq,
@@ -2985,9 +3007,25 @@ function apply(ctx, config) {
 				},
 			}),
 
+            ...["identity", "request-status"].map((kind) => ctx.webServer.register({
+                kind: "prefix", path: `/sched/api/${kind}`,
+                handler: async (req, res) => {
+                    if (!readGuard(req, res)) return;
+                    try {
+                        const url = new URL(req.url ?? "/", "http://x");
+                        const requestId = url.searchParams.get("request-id");
+                        const result = await query(integrationReadCommand(S, kind, requestId));
+                        if (!result.ok) return void json(res, { ok: false, text: "integration query unavailable" }, 503);
+                        const raw = kind === "identity" ? canonicalIdentity(result.raw) : canonicalRequestStatus(result.raw, requestId);
+                        return void json(res, { ok: true, raw, text: JSON.stringify(raw) });
+                    } catch (error) {
+                        return void json(res, { ok: false, text: safeError(error) }, 400);
+                    }
+                },
+            })),
 			ctx.webServer.register({
 				kind: "prefix",
-				path: "/sched/api/history",
+                path: "/sched/api/history",
 				handler: async (req, res) => {
 					if (!readGuard(req, res)) return;
 					try {
@@ -3161,6 +3199,27 @@ function apply(ctx, config) {
 									if (writer.mode === "screen") {
 										throw new Error("screen mutation writer cannot attest an uploaded submit payload");
 									}
+                                    let submitScope = "";
+                                    if (writer.expectedInstance) {
+                                        const version = envelope(await executeWriterRead(writer, `${S} version --json`));
+                                        const contracts = version.raw?.contracts;
+                                        if (!version.ok || contracts?.submit !== "sched-submit-v1"
+                                            || contracts?.identity !== "sched-identity-v1"
+                                            || contracts?.request_status !== "sched-request-status-v1") {
+                                            throw new Error("idempotent submission contracts unavailable");
+                                        }
+                                        const identityReply = envelope(await executeWriterRead(writer, `${S} identity --json`));
+                                        if (!identityReply.ok) throw new Error("writer identity unavailable");
+                                        const identity = canonicalIdentity(identityReply.raw);
+                                        if (!identity.available || identity.instance_id !== writer.expectedInstance) {
+                                            throw new Error("writer scheduler instance differs");
+                                        }
+                                        const project = JSON.parse(String(content)).project;
+                                        if (typeof project !== "string" || !project || project.startsWith("-") || /\s/.test(project)) {
+                                            throw new Error("explicit submission project required");
+                                        }
+                                        submitScope = ` --request-id ${shellQuote(requestId)} --expect-instance ${shellQuote(writer.expectedInstance)} --expect-project ${shellQuote(project)} --json`;
+                                    }
 									const uploadTarget = writerTransportTarget(writer);
 									const uploadContent = String(content);
 									const remotePath = await uploadRemote(
@@ -3169,7 +3228,7 @@ function apply(ctx, config) {
 										{ name: durableUploadName(requestId, uploadContent) },
 									);
 									return {
-										command: `${S} submit ${shellQuote(remotePath)}`,
+										command: `${S} submit ${shellQuote(remotePath)}${submitScope}`,
 										cleanup: async () => runOnTarget(
 											uploadTarget,
 											`rm -f ${shellQuote(remotePath)}`,
@@ -3235,6 +3294,7 @@ function apply(ctx, config) {
 						expectedQuarantined,
 						expectedRevision,
 						expectedAssignments,
+                        expectedInstance, expectedProject,
 					} = body && typeof body === "object" ? body : {};
 					const spec = Object.hasOwn(OPS, op) ? OPS[op] : undefined;
 					if (!spec || typeof (id ?? "") !== "string") {
@@ -3243,7 +3303,9 @@ function apply(ctx, config) {
 					if (spec.needsId && (!id || !(spec.pattern ?? /^[\w:.-]+$/).test(id))) {
 						return void json(res, { ok: false, error: "bad id for op" }, 400);
 					}
-					let precondition = { kind: "none" };
+					let precondition = { kind: "none",
+                        ...(expectedInstance === undefined ? {} : { expectedInstance }),
+                        ...(expectedProject === undefined ? {} : { expectedProject }) };
 					if (spec.needsId) {
 						const kind = op.startsWith("gpu-")
 							? "gpu"
@@ -3253,6 +3315,8 @@ function apply(ctx, config) {
 							id,
 							expectedStatus,
 							expectedRevision,
+                            ...(expectedInstance === undefined ? {} : { expectedInstance }),
+                            ...(expectedProject === undefined ? {} : { expectedProject }),
 							...(kind === "task" ? { expectedVersion } : {}),
 							...(kind === "gpu" ? {
 								expectedQuarantined,
