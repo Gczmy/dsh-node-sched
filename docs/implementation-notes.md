@@ -188,3 +188,21 @@ SSH 命令用 argv 数组执行，不经本地 shell 展开远程 `$HOME`；非�
 本文件保留实现契约和必要原因，不保存生产任务、会话、租约、个人路径、
 一次性迁移步骤或截图日志。旧里程碑中的 UI 迭代和事故流水已移出当前文档，
 功能现状以源码、契约测试和[文档索引](README.md)为准。
+
+## Public integration contracts
+
+GET /sched/api/identity and /sched/api/request-status?request-id=ID use the
+authenticated query target. They select documented fields, omit raw commands/output,
+and never choose a writer or replay a request. Unknown is distinct from absence.
+
+Optional mutationExpectedInstance binds task/batch/GPU/maintenance requests to a
+persistent sched CLI identity. A conflicting request identity cannot be overwritten
+by configuration. expectedProject is supported for batch/task expectations.
+Defaults keep the original request command format.
+
+With an explicit instance, submit negotiates identity/submit/request-status contracts
+on the attested writer before upload, checks its current identity, and calls native
+`submit --request-id ... --expect-instance ... --expect-project ... --json` directly.
+It is not nested in sched request. This is distinct from the legacy compute writer
+path. Query binding and mutation target remain separate; screen submit remains
+unsupported. Each logical operation retains its original request ID and payload.
